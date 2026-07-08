@@ -37,10 +37,8 @@ dev = [
 ]
 
 [project.urls]
-# TODO: fill in once a repository exists -- these are placeholders, not
-# real links (project.urls is optional; PyPI accepts a package without it).
-# Homepage = "https://github.com/<your-username>/zoneboost"
-# Issues = "https://github.com/<your-username>/zoneboost/issues"
+Homepage = "https://github.com/stainaz/zoneboost"
+Issues = "https://github.com/stainaz/zoneboost/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/zoneboost"]
