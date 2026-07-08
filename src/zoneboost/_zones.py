@@ -33,7 +33,10 @@ __all__ = [
 
 def zone_index(values, boundaries: np.ndarray) -> np.ndarray:
     """Map each value to a zone index via ``searchsorted`` against sorted
-    cut points.
+    cut points. A missing (NaN) value maps to a dedicated "missing" zone
+    one past the last regular zone -- ``searchsorted`` against NaN is
+    undefined, so this is handled explicitly rather than left to whatever
+    numpy happens to do with it.
 
     Parameters
     ----------
@@ -45,9 +48,14 @@ def zone_index(values, boundaries: np.ndarray) -> np.ndarray:
     Returns
     -------
     ndarray of shape (n_samples,)
-        Integer zone index in ``[0, n_cuts]`` for each value.
+        Integer zone index in ``[0, n_cuts]`` for each present value, or
+        ``n_cuts + 1`` (the missing zone) for NaN.
     """
-    return np.searchsorted(boundaries, np.asarray(values), side="right")
+    arr = np.asarray(values, dtype=float)
+    is_missing = np.isnan(arr)
+    idx = np.searchsorted(boundaries, arr, side="right")
+    missing_idx = len(boundaries) + 1
+    return np.where(is_missing, missing_idx, idx)
 
 
 def _best_split(y_sorted_seg: np.ndarray, x_sorted_seg: np.ndarray, min_size: int):
@@ -124,10 +132,17 @@ def adaptive_zone_boundaries(
     Returns
     -------
     ndarray
-        Sorted cut points; ``len(result) + 1`` zones result from them.
+        Sorted cut points; ``len(result) + 1`` regular zones result from
+        them, plus one further "missing" zone reserved for NaN (see
+        :func:`zone_index`) -- missing rows never enter this search, since
+        a NaN sorts to an arbitrary position and would otherwise corrupt
+        whichever segment's cumulative sums it lands in, including the cut
+        *value* itself.
     """
     x_arr = np.asarray(x, dtype=float)
     y_arr = np.asarray(y, dtype=float)
+    present = ~np.isnan(x_arr)
+    x_arr, y_arr = x_arr[present], y_arr[present]
     order = np.argsort(x_arr)
     x_sorted, y_sorted = x_arr[order], y_arr[order]
     n = len(x_sorted)
@@ -154,10 +169,17 @@ def adaptive_zone_boundaries(
 
 
 def categorical_zone_map(series) -> dict:
-    """Map each distinct value of a nominal column to its own zone index,
-    in first-seen order. No cut-point search: there is no meaningful
-    "adjacent" for categories with no true order, so a value simply gets
-    its own zone.
+    """Map each distinct, present value of a nominal column to its own
+    zone index, in first-seen order. No cut-point search: there is no
+    meaningful "adjacent" for categories with no true order, so a value
+    simply gets its own zone.
+
+    Missing values (NaN/None) are deliberately excluded from this map --
+    they get their own dedicated zone in :func:`categorical_zone_index`,
+    kept separate from "an unseen but real category", rather than being
+    folded in as just another dict key (which is what a raw NaN key would
+    otherwise become, relying on a fragile identity-comparison quirk in
+    Python dict lookups rather than an explicit rule).
 
     Parameters
     ----------
@@ -166,21 +188,26 @@ def categorical_zone_map(series) -> dict:
     Returns
     -------
     dict
-        Maps each distinct value to an integer zone index
+        Maps each distinct present value to an integer zone index
         ``0, 1, ..., n_categories - 1``.
     """
-    categories = pd.unique(np.asarray(series))
+    arr = np.asarray(series, dtype=object)
+    present = arr[~pd.isna(arr)]
+    categories = pd.unique(present)
     return {cat: i for i, cat in enumerate(categories)}
 
 
 def categorical_zone_index(series, category_map: dict) -> np.ndarray:
     """Look up each value's zone index via a stored category map.
 
-    A value absent from ``category_map`` (an unseen category, typically
-    encountered at predict time on new data) maps to a dedicated "unknown"
-    zone one past the end. That zone has zero fit-time support, so it
-    naturally carries zero confidence and contributes nothing to a
-    prediction, rather than raising an error.
+    Two distinct fallback zones, both one-past-the-regular-categories:
+    a missing (NaN/None) value gets its own dedicated zone, kept separate
+    from an unseen-but-real category (a value that exists but wasn't
+    present at fit time, typically encountered at predict time on new
+    data), which gets the zone after that. Both start with zero fit-time
+    support, so they naturally carry zero confidence and contribute
+    nothing to a prediction rather than raising an error or silently
+    colliding with a real category's zone.
 
     Parameters
     ----------
@@ -192,6 +219,15 @@ def categorical_zone_index(series, category_map: dict) -> np.ndarray:
     -------
     ndarray of shape (n_samples,)
     """
-    unknown_idx = len(category_map)
-    mapped = pd.Series(np.asarray(series)).map(category_map)
-    return mapped.fillna(unknown_idx).astype(int).to_numpy()
+    arr = np.asarray(series, dtype=object)
+    is_missing = pd.isna(arr)
+    n_categories = len(category_map)
+    missing_idx = n_categories
+    unknown_idx = n_categories + 1
+
+    result = np.full(len(arr), unknown_idx, dtype=int)
+    result[is_missing] = missing_idx
+    present_mask = ~is_missing
+    mapped = pd.Series(arr[present_mask]).map(category_map)
+    result[present_mask] = mapped.fillna(unknown_idx).astype(int).to_numpy()
+    return result

@@ -45,6 +45,28 @@ def test_adaptive_zone_boundaries_uses_more_zones_for_real_structure_than_noise(
     assert len(bounds_structured) >= len(bounds_noise)
 
 
+def test_adaptive_zone_boundaries_excludes_missing_values_from_split_search():
+    # A NaN sorts to an arbitrary position and would otherwise corrupt
+    # whichever segment's cumulative sums (and cut *value*) it lands in --
+    # missing rows must never enter the search at all.
+    rng = np.random.default_rng(3)
+    x = rng.uniform(-5, 5, 300)
+    y = x**2 + rng.normal(0, 1, 300)
+    x_missing = x.copy()
+    x_missing[rng.choice(300, size=20, replace=False)] = np.nan
+
+    bounds = adaptive_zone_boundaries(x_missing, y, max_zones=7)
+    assert not np.isnan(bounds).any()
+
+
+def test_zone_index_missing_value_maps_to_dedicated_zone():
+    bounds = np.array([2.0, 5.0, 8.0])
+    values = np.array([1.0, 6.0, np.nan])
+    zones = zone_index(values, bounds)
+    assert zones[2] == len(bounds) + 1  # dedicated missing zone, one past the regular ones
+    assert zones[0] != zones[2] and zones[1] != zones[2]
+
+
 def test_zone_index_matches_boundaries():
     bounds = np.array([2.0, 5.0, 8.0])
     values = np.array([1.0, 2.0, 3.0, 6.0, 9.0])
@@ -67,9 +89,29 @@ def test_categorical_zone_map_and_index_roundtrip():
 
 
 def test_categorical_zone_index_unseen_category_maps_to_unknown_bucket():
+    # Two distinct fallback buckets past the regular categories: missing
+    # (index len(cat_map)) and unseen-but-real-category (index
+    # len(cat_map) + 1) -- kept separate rather than merged.
     train = pd.Series(["a", "b", "a"])
     cat_map = categorical_zone_map(train)
     new = pd.Series(["a", "c"])  # "c" was never seen during fit
     idx = categorical_zone_index(new, cat_map)
     assert idx[0] == cat_map["a"]
-    assert idx[1] == len(cat_map)  # dedicated unknown bucket, one past the end
+    assert idx[1] == len(cat_map) + 1  # dedicated "unseen category" bucket
+
+
+def test_categorical_zone_index_missing_value_maps_to_own_bucket():
+    train = pd.Series(["a", "b", "a"])
+    cat_map = categorical_zone_map(train)
+    new = pd.Series(["a", np.nan, "c"])  # nan (missing) vs "c" (unseen) must differ
+    idx = categorical_zone_index(new, cat_map)
+    assert idx[0] == cat_map["a"]
+    assert idx[1] == len(cat_map)      # dedicated "missing" bucket
+    assert idx[2] == len(cat_map) + 1  # dedicated "unseen category" bucket, distinct from missing
+
+
+def test_categorical_zone_map_excludes_missing_values():
+    series = pd.Series(["a", "b", np.nan, "a"])
+    cat_map = categorical_zone_map(series)
+    assert set(cat_map.keys()) == {"a", "b"}
+    assert len(cat_map) == 2

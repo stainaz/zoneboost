@@ -107,3 +107,27 @@ def test_predict_n_rounds_override():
     pred_5 = model.predict(X, n_rounds=5)
     pred_all = model.predict(X, n_rounds=model.best_n_rounds_)
     assert not np.array_equal(pred_5, pred_all)
+
+
+def test_missing_values_in_continuous_and_categorical_columns_do_not_crash():
+    X, y = _synthetic_regression()
+    X_missing = X.copy()
+    X_missing.loc[X_missing.sample(20, random_state=1).index, "x1"] = np.nan
+    X_missing.loc[X_missing.sample(20, random_state=2).index, "cat"] = np.nan
+
+    model = ZoneBoostRegressor(n_rounds=30, categorical_features=["cat"], random_state=0)
+    model.fit(X_missing, y)
+    pred = model.predict(X_missing)
+    assert np.all(np.isfinite(pred))
+
+
+def test_explain_sums_exactly_to_predict_with_missing_values_present():
+    X, y = _synthetic_regression()
+    X_missing = X.copy()
+    X_missing.loc[X_missing.sample(20, random_state=1).index, "x1"] = np.nan
+    X_missing.loc[X_missing.sample(20, random_state=2).index, "cat"] = np.nan
+
+    model = ZoneBoostRegressor(n_rounds=30, categorical_features=["cat"], random_state=0).fit(X_missing, y)
+    pred = model.predict(X_missing)
+    contrib = model.explain(X_missing)
+    np.testing.assert_allclose(contrib.sum(axis=1).to_numpy(), pred, atol=1e-6)

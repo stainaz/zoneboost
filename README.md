@@ -77,6 +77,19 @@ prediction, exactly like standard gradient boosting. `row_subsample` /
 `col_subsample` add stochastic-gradient-boosting-style regularization by
 fitting each round on a random subsample of rows and columns.
 
+### Missing values
+
+Both continuous and categorical columns accept NaN/None directly — no
+imputation needed beforehand. A missing value gets its own dedicated zone,
+kept separate from an unseen-but-real category (a value that exists but
+wasn't present at fit time), the same way an unseen category is handled.
+If missingness itself is informative (a common, real phenomenon — e.g. a
+sensor reading that's absent exactly when it would have been extreme), the
+model learns that: the missing zone gets its own data-driven average
+contribution from whichever training rows were actually missing for that
+column, rather than being silently imputed away or corrupting the
+adaptive split search for the column's present values.
+
 ### Classification
 
 `ZoneBoostClassifier` uses the *identical* weak learner — same main

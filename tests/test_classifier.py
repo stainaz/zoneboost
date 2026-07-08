@@ -117,3 +117,15 @@ def test_string_labels_supported():
     model.fit(X, y_str)
     pred = model.predict(X)
     assert set(np.unique(pred)) <= {"yes", "no"}
+
+
+def test_missing_values_in_continuous_and_categorical_columns_do_not_crash():
+    X, y = _binary_data()
+    X_missing = X.copy()
+    X_missing.loc[X_missing.sample(20, random_state=1).index, "x1"] = np.nan
+    X_missing.loc[X_missing.sample(20, random_state=2).index, "cat"] = np.nan
+
+    model = ZoneBoostClassifier(n_rounds=20, categorical_features=["cat"], random_state=0)
+    model.fit(X_missing, y)
+    proba = model.predict_proba(X_missing)
+    assert np.all(np.isfinite(proba))

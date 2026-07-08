@@ -69,8 +69,10 @@ def _column_zone_index(x_col: pd.Series, info: tuple) -> np.ndarray:
 
 
 def _column_n_zones(info: tuple) -> int:
-    _kind, payload = info
-    return len(payload) + 1  # +1: last cut point (continuous) or the "unknown" bucket (categorical)
+    kind, payload = info
+    if kind == "categorical":
+        return len(payload) + 2  # +2: dedicated "missing" zone, dedicated "unseen category" zone
+    return len(payload) + 2  # +2: last cut point, dedicated "missing" zone
 
 
 def weak_learner_fit(
