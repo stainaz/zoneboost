@@ -1,0 +1,22 @@
+"""zoneboost -- fully transparent, zone-based gradient boosting.
+
+No decision trees, no gradient descent, no neural weights. Every number in
+a prediction traces back to a quantile, a group count, or a group average.
+
+    >>> from zoneboost import ZoneBoostRegressor
+    >>> model = ZoneBoostRegressor().fit(X_train, y_train)
+    >>> model.predict(X_test)
+
+    >>> from zoneboost import ZoneBoostClassifier
+    >>> model = ZoneBoostClassifier().fit(X_train, y_train)
+    >>> model.predict_proba(X_test)
+
+See :class:`ZoneBoostRegressor` / :class:`ZoneBoostClassifier` for the full
+parameter and attribute reference.
+"""
+
+from ._version import __version__
+from .classifier import ZoneBoostClassifier
+from .regressor import ZoneBoostRegressor
+
+__all__ = ["ZoneBoostRegressor", "ZoneBoostClassifier", "__version__"]
