@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zoneboost — fully transparent, zone-based gradient boosting</title>
+<meta name="description" content="Fully transparent, zone-based gradient boosting for regression and classification — no decision trees, no gradient descent, no neural weights. scikit-learn compatible.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="container">
+    <a class="wordmark" href="index.html">
+      <span class="mark"><img src="assets/favicon.svg" alt="" width="22" height="22"></span>
+      zoneboost
+    </a>
+    <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false">☰</button>
+    <nav class="main-nav">
+      <a href="getting-started.html">Docs</a>
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero container">
+    <div class="hero-copy">
+      <p class="eyebrow">scikit-learn compatible</p>
+      <h1>Gradient boosting you can read like a spreadsheet.</h1>
+      <p class="lede">Fully transparent, zone-based gradient boosting — no decision trees, no
+      gradient descent, no neural weights. Every number in a prediction traces back to a
+      quantile, a group count, or a group average, and is inspectable directly from the
+      fitted model.</p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="getting-started.html">Get started</a>
+        <a class="btn btn-ghost" href="https://github.com/stainaz/zoneboost">View on GitHub</a>
+      </div>
+      <div class="install-line">
+        <code>pip install zoneboost</code>
+        <button class="copy-btn" data-copy="pip install zoneboost">Copy</button>
+      </div>
+    </div>
+    <figure class="hero-visual">
+      <svg viewBox="0 0 440 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Four zones along a predictor axis, each with its own average residual line">
+        <rect class="zbar-card" x="1" y="1" width="438" height="298" rx="16"/>
+        <line class="zbar-boundary" x1="115" y1="30" x2="115" y2="270"/>
+        <line class="zbar-boundary" x1="210" y1="30" x2="210" y2="270"/>
+        <line class="zbar-boundary" x1="305" y1="30" x2="305" y2="270"/>
+        <line class="zbar-axis" x1="20" y1="230" x2="410" y2="230" stroke-width="1.5"/>
+
+        <line class="zbar-avg" x1="25" y1="215" x2="110" y2="215"/>
+        <circle class="zbar-dot-a" cx="40" cy="210" r="5"/>
+        <circle class="zbar-dot-b" cx="58" cy="222" r="5"/>
+        <circle class="zbar-dot-a" cx="75" cy="206" r="5"/>
+        <circle class="zbar-dot-b" cx="92" cy="218" r="5"/>
+        <circle class="zbar-dot-a" cx="105" cy="224" r="5"/>
+
+        <line class="zbar-avg" x1="120" y1="169" x2="205" y2="169"/>
+        <circle class="zbar-dot-b" cx="130" cy="185" r="5"/>
+        <circle class="zbar-dot-a" cx="148" cy="160" r="5"/>
+        <circle class="zbar-dot-b" cx="165" cy="178" r="5"/>
+        <circle class="zbar-dot-a" cx="182" cy="152" r="5"/>
+        <circle class="zbar-dot-b" cx="198" cy="170" r="5"/>
+
+        <line class="zbar-avg" x1="215" y1="250" x2="300" y2="250"/>
+        <circle class="zbar-dot-a" cx="225" cy="245" r="5"/>
+        <circle class="zbar-dot-b" cx="242" cy="262" r="5"/>
+        <circle class="zbar-dot-a" cx="260" cy="238" r="5"/>
+        <circle class="zbar-dot-b" cx="278" cy="255" r="5"/>
+        <circle class="zbar-dot-a" cx="295" cy="248" r="5"/>
+
+        <line class="zbar-avg" x1="310" y1="234" x2="395" y2="234"/>
+        <circle class="zbar-dot-b" cx="320" cy="230" r="5"/>
+        <circle class="zbar-dot-a" cx="338" cy="245" r="5"/>
+        <circle class="zbar-dot-b" cx="355" cy="224" r="5"/>
+        <circle class="zbar-dot-a" cx="372" cy="240" r="5"/>
+        <circle class="zbar-dot-b" cx="390" cy="233" r="5"/>
+      </svg>
+      <figcaption>One predictor split into data-driven zones — each zone's contribution is
+      just that zone's average residual, shrunk and added in.</figcaption>
+    </figure>
+  </section>
+
+  <section class="container">
+    <h2>Quickstart</h2>
+    <div class="two-col">
+      <div>
+        <h3>Regression</h3>
+        <pre><code>import pandas as pd
+from zoneboost import ZoneBoostRegressor
+
+X = pd.DataFrame({
+    "rooms": [3, 4, 2, 5, 3, 4, 2, 5],
+    "distance_km": [5.0, 2.0, 8.0, 1.0, 6.0, 3.0, 7.5, 1.5],
+    "neighborhood": ["a", "b", "a", "b", "a", "b", "a", "b"],
+})
+y = [300, 450, 220, 520, 310, 470, 230, 510]
+
+model = ZoneBoostRegressor(
+    categorical_features=["neighborhood"], random_state=0
+)
+model.fit(X, y)
+model.predict(X)</code></pre>
+      </div>
+      <div>
+        <h3>Classification</h3>
+        <pre><code>from zoneboost import ZoneBoostClassifier
+
+y_class = [0, 1, 0, 1, 0, 1, 0, 1]
+clf = ZoneBoostClassifier(
+    categorical_features=["neighborhood"], random_state=0
+)
+clf.fit(X, y_class)
+clf.predict_proba(X)   # (n_samples, n_classes), rows sum to 1
+clf.predict(X)          # binary and 3+ classes alike</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="container">
+    <h2>What zoneboost gives you</h2>
+    <div class="features">
+      <div class="card">
+        <h3>One weak learner, two estimators</h3>
+        <p><code>ZoneBoostRegressor</code> and <code>ZoneBoostClassifier</code> (binary and
+        multiclass) share the exact same underlying weak learner — classification just
+        boosts in log-odds space instead of raw target space.</p>
+      </div>
+      <div class="card">
+        <h3>Adaptive zones, not fixed bins</h3>
+        <p>Continuous predictors get variance-reducing split points re-derived fresh every
+        round from that round's residual — the same criterion a regression tree split
+        uses, without growing a tree.</p>
+      </div>
+      <div class="card">
+        <h3>Exact categorical handling</h3>
+        <p>Declared or auto-detected categorical columns skip cut-point search entirely:
+        every distinct value gets its own zone, with no assumption that nearby encoded
+        values behave alike.</p>
+      </div>
+      <div class="card">
+        <h3>Missing values, handled honestly</h3>
+        <p>NaN/None need no imputation — a missing value gets its own dedicated zone, so
+        informative missingness is learned rather than silently imputed away.</p>
+      </div>
+      <div class="card">
+        <h3>Explainable by construction</h3>
+        <p><code>explain(X)</code> is an exact algebraic decomposition of what
+        <code>predict</code> already computes — not a post-hoc approximation — and its
+        terms sum exactly to the prediction.</p>
+      </div>
+      <div class="card">
+        <h3>Drop into scikit-learn</h3>
+        <p>Works with <code>Pipeline</code>, <code>GridSearchCV</code>,
+        <code>cross_val_score</code>, and <code>clone</code> — no special-cased fitting
+        code required.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="container">
+    <h2>How it works, in brief</h2>
+    <p class="lede" style="max-width:70ch">Each boosting round fits a weak learner made of
+    two transparent pieces: a <strong>main effect</strong> (a 1D lookup from zone to
+    average residual) for every predictor, and an <strong>interaction</strong> (a 2D
+    lookup from joint zones to average residual) for every pair of predictors. Every
+    zone's contribution is weighted by its <strong>density confidence</strong> — its row
+    count relative to that round's best-supported zone — so sparse zones contribute less
+    than well-supported ones. Read the full mechanics, including missing-value handling
+    and how classification reuses the same learner, in
+    <a href="how-it-works.html">How It Works</a>.</p>
+  </section>
+
+  <section class="container">
+    <div class="cta">
+      <h2>Read the docs</h2>
+      <p class="text-muted">Installation, the full parameter table, and how
+      <code>explain()</code> decomposes a prediction.</p>
+      <a class="btn btn-primary" href="getting-started.html">Get started →</a>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <span>MIT licensed — © zoneboost contributors</span>
+    <div class="footer-links">
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://github.com/stainaz/zoneboost/issues">Issues</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+      <a href="https://github.com/stainaz/zoneboost/blob/main/LICENSE">License</a>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/script.js"></script>
+</body>
+</html>

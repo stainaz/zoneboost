@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How It Works — zoneboost docs</title>
+<meta name="description" content="How zoneboost's zone-based weak learner works: main effects, interactions, density confidence, categorical zones, and missing values.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="container">
+    <a class="wordmark" href="index.html">
+      <span class="mark"><img src="assets/favicon.svg" alt="" width="22" height="22"></span>
+      zoneboost
+    </a>
+    <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false">☰</button>
+    <nav class="main-nav">
+      <a href="getting-started.html" aria-current="page">Docs</a>
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+    </nav>
+  </div>
+</header>
+
+<div class="docs-layout container">
+  <button class="sidebar-toggle" aria-expanded="false">☰ Docs menu</button>
+  <aside class="docs-sidebar">
+    <div class="docs-search">
+      <input type="text" placeholder="Search docs…" aria-label="Search docs" autocomplete="off">
+      <div class="search-results"></div>
+    </div>
+    <p class="docs-nav-label">Docs</p>
+    <nav>
+      <a href="getting-started.html">Getting Started</a>
+      <a href="how-it-works.html" aria-current="page">How It Works</a>
+      <a href="api-reference.html">API Reference</a>
+      <a href="explaining-predictions.html">Explaining Predictions</a>
+    </nav>
+  </aside>
+
+  <article class="docs-content">
+    <h1>How It Works</h1>
+    <p class="subtitle">No decision trees, no gradient descent, no neural weights — just
+    zones and averages, boosted.</p>
+
+    <h2 id="weak-learner">The Weak Learner</h2>
+    <p>Each boosting round fits a weak learner made of two transparent pieces, both built
+    by splitting each predictor's axis into a small number of data-driven zones and
+    averaging the current residual within each zone (or zone pair).</p>
+
+    <h3 id="main-effects">Main Effects</h3>
+    <p>For each predictor, a 1D lookup from zone to average residual — the simplest
+    possible model of "what does this variable alone tell us about the current error."</p>
+
+    <h3 id="interactions">Interactions</h3>
+    <p>For every pair of predictors, a 2D lookup from their joint zones to average
+    residual, capturing effects neither variable explains alone. An interaction's
+    contribution is never split back between its two variables — it's reported and
+    explained as its own term (see <a href="explaining-predictions.html">Explaining
+    Predictions</a>).</p>
+
+    <h3 id="density-confidence">Density Confidence</h3>
+    <p>Every zone's contribution is weighted by its <strong>density confidence</strong> —
+    its row count relative to the best-supported zone that round — so sparse zones
+    contribute less than well-supported ones. Each round's correction is applied at a
+    small, shrunk step (<code>learning_rate</code>) and added to a running prediction,
+    exactly like standard gradient boosting. <code>row_subsample</code> /
+    <code>col_subsample</code> add stochastic-gradient-boosting-style regularization by
+    fitting each round on a random subsample of rows and columns.</p>
+
+    <h2 id="continuous-vs-categorical">Continuous vs. Categorical Zones</h2>
+    <p><strong>Continuous</strong> predictors get <em>adaptive</em> zone boundaries, found
+    the way a regression tree finds a split — the cut that most reduces the target's
+    within-zone variance — re-derived fresh every round from that round's residual, rather
+    than fixed quantile bins computed once.</p>
+    <p><strong>Categorical</strong> predictors (declared via <code>categorical_features</code>,
+    or auto-detected from <code>object</code>/<code>category</code>/<code>bool</code>
+    dtype) skip that search entirely: every distinct value gets its own zone. A cut-point
+    search assumes two values that are numerically close behave alike — true for a
+    continuous variable, false for a nominal category like a neighborhood ID, where
+    there's no reason two adjacent label-encoded values behave similarly.</p>
+    <div class="note">
+      If a variable genuinely has many distinct meaningful groups (a neighborhood or
+      occupation code), declare it in <code>categorical_features</code> rather than
+      raising <code>max_zones</code>. Raising the continuous cap for everyone gives every
+      continuous variable more per-round fitting flexibility, which in practice mostly
+      helps it overfit noise rather than capture real structure.
+    </div>
+
+    <h2 id="missing-values">Missing Values</h2>
+    <p>Both continuous and categorical columns accept NaN/None directly — no imputation
+    needed beforehand. A missing value gets its own dedicated zone, kept separate from an
+    unseen-but-real category (a value that exists but wasn't present at fit time), the
+    same way an unseen category is handled. If missingness itself is informative (a
+    common, real phenomenon — e.g. a sensor reading that's absent exactly when it would
+    have been extreme), the model learns that: the missing zone gets its own data-driven
+    average contribution from whichever training rows were actually missing for that
+    column, rather than being silently imputed away or corrupting the adaptive split
+    search for the column's present values.</p>
+
+    <h2 id="classification">From Regression to Classification</h2>
+    <p><code>ZoneBoostClassifier</code> uses the <em>identical</em> weak learner — same
+    main effects, same interactions, same density confidence. The only change is where
+    boosting happens: each round is fit against the residual in <strong>log-odds
+    space</strong> (<code>y - sigmoid(current_score)</code>, the standard logistic-loss
+    gradient) instead of the raw target, and predictions are squashed through a sigmoid at
+    the end. This is the standard way gradient boosting generalizes from regression to
+    classification.</p>
+    <p>Binary targets fit a single log-odds booster. 3+ classes use one-vs-rest: an
+    independent booster is fit per class ("is this class vs. everything else"), sharing
+    one validation split across all of them, and their probabilities are normalized to sum
+    to 1 at predict time — multiclass is not a different mechanism, just K independent
+    copies of the same binary booster.</p>
+  </article>
+</div>
+
+<footer class="site-footer">
+  <div class="container">
+    <span>MIT licensed — © zoneboost contributors</span>
+    <div class="footer-links">
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://github.com/stainaz/zoneboost/issues">Issues</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+      <a href="https://github.com/stainaz/zoneboost/blob/main/LICENSE">License</a>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/script.js"></script>
+</body>
+</html>

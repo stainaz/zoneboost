@@ -1,0 +1,6 @@
+<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="zoneboost">
+  <rect width="32" height="32" rx="7" fill="#1a1d23"/>
+  <rect x="4" y="14" width="6" height="10" rx="1.5" fill="#f59e0b" opacity="0.55"/>
+  <rect x="13" y="4" width="6" height="20" rx="1.5" fill="#f59e0b" opacity="0.85"/>
+  <rect x="22" y="10" width="6" height="14" rx="1.5" fill="#f59e0b"/>
+</svg>

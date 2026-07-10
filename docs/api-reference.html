@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API Reference — zoneboost docs</title>
+<meta name="description" content="zoneboost parameter table and fitted attributes for ZoneBoostRegressor and ZoneBoostClassifier.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="container">
+    <a class="wordmark" href="index.html">
+      <span class="mark"><img src="assets/favicon.svg" alt="" width="22" height="22"></span>
+      zoneboost
+    </a>
+    <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false">☰</button>
+    <nav class="main-nav">
+      <a href="getting-started.html" aria-current="page">Docs</a>
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+    </nav>
+  </div>
+</header>
+
+<div class="docs-layout container">
+  <button class="sidebar-toggle" aria-expanded="false">☰ Docs menu</button>
+  <aside class="docs-sidebar">
+    <div class="docs-search">
+      <input type="text" placeholder="Search docs…" aria-label="Search docs" autocomplete="off">
+      <div class="search-results"></div>
+    </div>
+    <p class="docs-nav-label">Docs</p>
+    <nav>
+      <a href="getting-started.html">Getting Started</a>
+      <a href="how-it-works.html">How It Works</a>
+      <a href="api-reference.html" aria-current="page">API Reference</a>
+      <a href="explaining-predictions.html">Explaining Predictions</a>
+    </nav>
+  </aside>
+
+  <article class="docs-content">
+    <h1>API Reference</h1>
+    <p class="subtitle">Identical parameter set on <code>ZoneBoostRegressor</code> and
+    <code>ZoneBoostClassifier</code>.</p>
+
+    <h2 id="parameters">Parameters</h2>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>n_rounds</code></td><td><code>300</code></td><td>Maximum number of boosting rounds</td></tr>
+        <tr><td><code>learning_rate</code></td><td><code>0.1</code></td><td>Shrinkage applied to each round's correction</td></tr>
+        <tr><td><code>row_subsample</code></td><td><code>0.7</code></td><td>Fraction of rows sampled per round</td></tr>
+        <tr><td><code>col_subsample</code></td><td><code>0.7</code></td><td>Fraction of columns sampled per round</td></tr>
+        <tr><td><code>max_zones</code></td><td><code>7</code></td><td>Zone cap for <em>continuous</em> columns only — see the note in <a href="how-it-works.html#continuous-vs-categorical">Continuous vs. Categorical Zones</a></td></tr>
+        <tr><td><code>min_zone_frac</code></td><td><code>0.02</code></td><td>Minimum row fraction required on each side of a zone split</td></tr>
+        <tr><td><code>categorical_features</code></td><td><code>None</code></td><td>Column names/indices to treat as nominal categories</td></tr>
+        <tr><td><code>validation_fraction</code></td><td><code>0.2</code></td><td>Held-out fraction used to pick the best round count</td></tr>
+        <tr><td><code>n_iter_no_change</code></td><td><code>None</code></td><td>Early-stopping patience, in rounds</td></tr>
+        <tr><td><code>random_state</code></td><td><code>42</code></td><td>Seed for the validation split and subsampling</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="regressor-attributes">ZoneBoostRegressor Fitted Attributes</h2>
+    <p>After <code>fit</code>, <code>ZoneBoostRegressor</code> exposes (among others):</p>
+    <table>
+      <tbody>
+        <tr><td><code>rounds_</code></td><td>One entry per boosting round: that round's zone boundaries/category maps, main effects, interactions, and rescaling stats. Plain dicts of numpy arrays, nothing hidden in an opaque object.</td></tr>
+        <tr><td><code>best_n_rounds_</code></td><td>The round count actually used by <code>predict</code>.</td></tr>
+        <tr><td><code>val_rmse_</code> / <code>train_rmse_</code></td><td>RMSE after each round.</td></tr>
+        <tr><td><code>categorical_features_</code></td><td>The resolved set of categorical columns (declared ∪ auto-detected).</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="classifier-attributes">ZoneBoostClassifier Fitted Attributes</h2>
+    <p><code>ZoneBoostClassifier</code> exposes the same <code>categorical_features_</code>, plus:</p>
+    <table>
+      <tbody>
+        <tr><td><code>classes_</code></td><td>Distinct class labels seen during <code>fit</code>.</td></tr>
+        <tr><td><code>multiclass_</code></td><td>Whether one-vs-rest (3+ classes) was used.</td></tr>
+        <tr><td><code>booster_</code> (binary) or <code>boosters_</code> (3+ classes)</td><td>An internal log-odds booster (or a <code>{class_label: booster}</code> dict) — each with its own <code>rounds_</code> and <code>best_n_rounds_</code>, same plain-data structure as the regressor's.</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="scope">Scope &amp; Compatibility</h2>
+    <p>This estimator targets practical scikit-learn compatibility —
+    <code>get_params</code>/<code>set_params</code>/<code>clone</code>, use inside a
+    <code>Pipeline</code>, and scoring via <code>cross_val_score</code> — rather than full
+    compliance with <code>sklearn.utils.estimator_checks.check_estimator</code>, which
+    checks many edge cases (e.g. sparse-matrix input) not exercised here.</p>
+  </article>
+</div>
+
+<footer class="site-footer">
+  <div class="container">
+    <span>MIT licensed — © zoneboost contributors</span>
+    <div class="footer-links">
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://github.com/stainaz/zoneboost/issues">Issues</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+      <a href="https://github.com/stainaz/zoneboost/blob/main/LICENSE">License</a>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/script.js"></script>
+</body>
+</html>

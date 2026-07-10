@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Getting Started — zoneboost docs</title>
+<meta name="description" content="Install zoneboost and fit your first ZoneBoostRegressor or ZoneBoostClassifier.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="container">
+    <a class="wordmark" href="index.html">
+      <span class="mark"><img src="assets/favicon.svg" alt="" width="22" height="22"></span>
+      zoneboost
+    </a>
+    <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false">☰</button>
+    <nav class="main-nav">
+      <a href="getting-started.html" aria-current="page">Docs</a>
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+    </nav>
+  </div>
+</header>
+
+<div class="docs-layout container">
+  <button class="sidebar-toggle" aria-expanded="false">☰ Docs menu</button>
+  <aside class="docs-sidebar">
+    <div class="docs-search">
+      <input type="text" placeholder="Search docs…" aria-label="Search docs" autocomplete="off">
+      <div class="search-results"></div>
+    </div>
+    <p class="docs-nav-label">Docs</p>
+    <nav>
+      <a href="getting-started.html" aria-current="page">Getting Started</a>
+      <a href="how-it-works.html">How It Works</a>
+      <a href="api-reference.html">API Reference</a>
+      <a href="explaining-predictions.html">Explaining Predictions</a>
+    </nav>
+  </aside>
+
+  <article class="docs-content">
+    <h1>Getting Started</h1>
+    <p class="subtitle">Install zoneboost and fit your first model in a few lines.</p>
+
+    <h2 id="installation">Installation</h2>
+    <pre><code>pip install zoneboost</code></pre>
+    <p>zoneboost has three runtime dependencies — numpy, pandas, and scikit-learn — and no
+    compiled extensions, so installation is a plain wheel install on any platform.</p>
+
+    <h2 id="quickstart">Quickstart</h2>
+    <p>Both estimators accept a pandas DataFrame directly. Declare which columns are
+    nominal categories with <code>categorical_features</code>; everything else is treated
+    as continuous and split into data-driven zones automatically.</p>
+
+    <h3 id="regression">Regression</h3>
+    <pre><code>import pandas as pd
+from zoneboost import ZoneBoostRegressor
+
+X = pd.DataFrame({
+    "rooms": [3, 4, 2, 5, 3, 4, 2, 5],
+    "distance_km": [5.0, 2.0, 8.0, 1.0, 6.0, 3.0, 7.5, 1.5],
+    "neighborhood": ["a", "b", "a", "b", "a", "b", "a", "b"],
+})
+y = [300, 450, 220, 520, 310, 470, 230, 510]
+
+model = ZoneBoostRegressor(
+    categorical_features=["neighborhood"], random_state=0
+)
+model.fit(X, y)
+model.predict(X)</code></pre>
+
+    <h3 id="classification">Classification</h3>
+    <pre><code>from zoneboost import ZoneBoostClassifier
+
+y_class = [0, 1, 0, 1, 0, 1, 0, 1]
+clf = ZoneBoostClassifier(
+    categorical_features=["neighborhood"], random_state=0
+)
+clf.fit(X, y_class)
+clf.predict_proba(X)   # (n_samples, n_classes), rows sum to 1
+clf.predict(X)          # works for binary and 3+ classes (one-vs-rest) alike</code></pre>
+
+    <div class="note">
+      Both continuous and categorical columns accept <code>NaN</code>/<code>None</code>
+      directly — no imputation step needed before calling <code>fit</code>. See
+      <a href="how-it-works.html#missing-values">Missing Values</a> for how that's handled
+      internally.
+    </div>
+
+    <h2 id="requirements">Requirements</h2>
+    <table>
+      <thead><tr><th>Dependency</th><th>Minimum version</th></tr></thead>
+      <tbody>
+        <tr><td>Python</td><td><code>&gt;=3.9</code></td></tr>
+        <tr><td>numpy</td><td><code>&gt;=1.23</code></td></tr>
+        <tr><td>pandas</td><td><code>&gt;=1.5</code></td></tr>
+        <tr><td>scikit-learn</td><td><code>&gt;=1.2</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="development">Development</h2>
+    <p>Working on zoneboost itself:</p>
+    <pre><code>pip install -e ".[dev]"
+pytest</code></pre>
+    <p class="text-muted">Source and issue tracker: <a href="https://github.com/stainaz/zoneboost">github.com/stainaz/zoneboost</a>.</p>
+  </article>
+</div>
+
+<footer class="site-footer">
+  <div class="container">
+    <span>MIT licensed — © zoneboost contributors</span>
+    <div class="footer-links">
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://github.com/stainaz/zoneboost/issues">Issues</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+      <a href="https://github.com/stainaz/zoneboost/blob/main/LICENSE">License</a>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Explaining Predictions — zoneboost docs</title>
+<meta name="description" content="How explain(X) and feature_importance(X) work in zoneboost — an exact algebraic decomposition, not a post-hoc approximation.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="container">
+    <a class="wordmark" href="index.html">
+      <span class="mark"><img src="assets/favicon.svg" alt="" width="22" height="22"></span>
+      zoneboost
+    </a>
+    <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false">☰</button>
+    <nav class="main-nav">
+      <a href="getting-started.html" aria-current="page">Docs</a>
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+    </nav>
+  </div>
+</header>
+
+<div class="docs-layout container">
+  <button class="sidebar-toggle" aria-expanded="false">☰ Docs menu</button>
+  <aside class="docs-sidebar">
+    <div class="docs-search">
+      <input type="text" placeholder="Search docs…" aria-label="Search docs" autocomplete="off">
+      <div class="search-results"></div>
+    </div>
+    <p class="docs-nav-label">Docs</p>
+    <nav>
+      <a href="getting-started.html">Getting Started</a>
+      <a href="how-it-works.html">How It Works</a>
+      <a href="api-reference.html">API Reference</a>
+      <a href="explaining-predictions.html" aria-current="page">Explaining Predictions</a>
+    </nav>
+  </aside>
+
+  <article class="docs-content">
+    <h1>Explaining Predictions</h1>
+    <p class="subtitle">Both estimators expose <code>explain(X)</code> and
+    <code>feature_importance(X)</code>.</p>
+
+    <p>Unlike SHAP or LIME, this isn't a post-hoc approximation of a black-box model —
+    it's an algebraic decomposition of the exact computation <code>predict</code> already
+    performs, so it costs no extra sampling and the result sums <em>exactly</em> to the
+    prediction.</p>
+
+    <h2 id="explain">explain(X)</h2>
+    <pre><code>contrib = model.explain(X)            # one column per term, plus "baseline"
+contrib.sum(axis=1)                    # == model.predict(X), exactly</code></pre>
+    <p>Each column is either a predictor's own name (its main effect) or <code>"A x
+    B"</code> (that pair's interaction) — never split further, so an interaction's
+    contribution isn't arbitrarily divided between its two variables.</p>
+
+    <h2 id="feature-importance">feature_importance(X)</h2>
+    <pre><code>model.feature_importance(X)            # mean |contribution| per term, sorted</code></pre>
+    <p>The mean absolute contribution of each term across <code>X</code>, sorted from most
+    to least influential — a direct summary of <code>explain(X)</code>, not a separately
+    computed statistic.</p>
+
+    <h2 id="classification-semantics">Classification Semantics</h2>
+    <p>For <code>ZoneBoostClassifier</code>, <code>explain(X)</code> sums to the
+    <strong>log-odds</strong> score, not the probability directly — probability
+    contributions don't add linearly through a sigmoid, the same convention SHAP uses for
+    logistic models. For 3+ classes it returns a <code>{class_label: DataFrame}</code>
+    dict, one per one-vs-rest booster, and</p>
+    <pre><code>sigmoid(explain(X)[k].sum(axis=1))</code></pre>
+    <p>reproduces that booster's <em>raw</em> probability before the final cross-class
+    normalization <code>predict_proba</code> applies.</p>
+
+    <h2 id="vs-shap-lime">How This Differs from SHAP/LIME</h2>
+    <ul>
+      <li><strong>No sampling.</strong> SHAP and LIME approximate a black-box model by
+      perturbing inputs and fitting a local surrogate; <code>explain(X)</code> reads the
+      terms the fitted model already stores in <code>rounds_</code> — no extra model
+      evaluations, no approximation error.</li>
+      <li><strong>Exact, not approximate.</strong> <code>contrib.sum(axis=1)</code> equals
+      <code>model.predict(X)</code> to the last floating-point digit, because it's the
+      same arithmetic, not an estimate of it.</li>
+      <li><strong>Interactions stay whole.</strong> An <code>"A x B"</code> term is
+      reported as itself, rather than being credited fractionally back to <code>A</code>
+      and <code>B</code> individually the way Shapley-value attribution does.</li>
+    </ul>
+  </article>
+</div>
+
+<footer class="site-footer">
+  <div class="container">
+    <span>MIT licensed — © zoneboost contributors</span>
+    <div class="footer-links">
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://github.com/stainaz/zoneboost/issues">Issues</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+      <a href="https://github.com/stainaz/zoneboost/blob/main/LICENSE">License</a>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/script.js"></script>
+</body>
+</html>
