@@ -114,6 +114,23 @@
     one validation split across all of them, and their probabilities are normalized to sum
     to 1 at predict time — multiclass is not a different mechanism, just K independent
     copies of the same binary booster.</p>
+
+    <h2 id="future-work">Possible Future Enhancement: Adaptive Interaction Order</h2>
+    <p>zoneboost currently learns main effects and every pairwise interaction. A promising
+    extension, not yet implemented, is <strong>adaptive interaction order</strong>:</p>
+    <ol>
+      <li>Start with main effects.</li>
+      <li>Learn all pairwise interactions.</li>
+      <li>Measure how much unexplained error remains.</li>
+      <li>Only if there's strong evidence of a genuine higher-order pattern, learn a small
+      number of carefully selected 3-way interactions.</li>
+      <li>Ignore the rest.</li>
+    </ol>
+    <p>That would preserve interpretability while avoiding the combinatorial explosion of
+    trying every possible 3D or 4D interaction. In fact, that kind of adaptive interaction
+    selection could become a distinctive feature of zoneboost, giving it the ability to
+    capture complex relationships only when the data justify them, rather than assuming
+    every higher-order interaction is worth learning.</p>
   </article>
 </div>
 
