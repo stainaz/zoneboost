@@ -331,9 +331,10 @@
     row-count-weighted isotonic regression, applied after empirical Bayes shrinkage so
     sparse zones don't distort the projection.</p>
     <ul>
-      <li><strong>Main effects only.</strong> Pairwise/triple interactions, and the
-      internal marginal priors those use for their own shrinkage, are untouched — the same
-      scope XGBoost's/LightGBM's own <code>monotone_constraints</code> cover.</li>
+      <li><strong>Inherited by interactions.</strong> Every pairwise/triple term the
+      column participates in is also projected along that column's own axis, holding the
+      other axis/axes fixed — automatic whenever a constraint is declared, no separate
+      opt-in. See "Global Shape Constraints" below for how.</li>
       <li>A continuous column's zones are already ordered low → high by construction, so
       there's no threshold or window to tune — just a direction.</li>
       <li>A constraint declared on a categorical column is silently dropped (no meaningful
@@ -628,6 +629,81 @@ lower, upper = cqr.predict_interval(X)</code></pre>
     duplicating dozens of <code>ZoneBoostRegressor</code> parameters onto this class.
     Not a <code>RegressorMixin</code> — there is no meaningful single-point
     <code>predict</code>, only <code>predict_interval</code>.</p>
+
+    <h2 id="global-shape-constraints">Global Shape Constraints</h2>
+    <p>Four related mechanisms for declaring shape knowledge the model has no way to
+    infer on its own — all <strong>opt-in</strong>, all main-effects-focused, all reusing
+    the same <code>{column: ...}</code> declaration convention as
+    <code>monotonic_constraints</code>.</p>
+    <p><strong>Interactions inherit monotonicity.</strong> Declaring
+    <code>monotonic_constraints={"age": 1}</code> now also projects every pairwise/triple
+    interaction <code>age</code> participates in along <code>age</code>'s own axis
+    (holding the other axis/axes fixed) — via <code>sklearn.isotonic.IsotonicRegression</code>
+    fit fiber-by-fiber (one independent fit per slice along the constrained axis),
+    weighted by that slice's own row counts, the multi-dimensional generalization of the
+    main effect's own projection. Without this, a column's <em>total</em> dependence on
+    the target (main effect + every interaction it's part of) could still come out
+    non-monotonic overall, undermining the point of declaring the constraint in the first
+    place.</p>
+    <div class="note">
+      <strong>Behavior change for existing users:</strong> this is automatic whenever
+      <code>monotonic_constraints</code> is declared — disclosed as completing the
+      feature's original intent (interactions were deliberately unconstrained before),
+      not a free correctness fix. A term with more than one constrained axis is projected
+      axis-by-axis in a fixed order — a disclosed heuristic, not a jointly-optimal
+      multi-dimensional isotone regression, consistent with cyclic backfitting's own
+      single-pass approximation.
+    </div>
+    <p><strong>Measured, honestly</strong>, on synthetic data with a genuine
+    non-monotonic dip in an interaction term: the unconstrained interaction's largest
+    single-step <em>decrease</em> was -0.189; constrained, it was exactly 0.000 (fully
+    non-decreasing).</p>
+    <p><strong>Convexity/concavity constraints</strong>:
+    <code>convexity_constraints={"column": +1}</code> (convex) or <code>{-1}</code>
+    (concave) forces a continuous column's <em>main effect</em> onto a convex/concave
+    sequence. A convex piecewise-linear function through zone centroids
+    <code>(center_i, y_i)</code> requires non-decreasing <em>slopes</em>
+    <code>(y[i+1]-y[i])/(center[i+1]-center[i])</code> — not non-decreasing raw
+    differences, since zones are rarely evenly spaced (adaptive zone boundaries). This
+    isotonic-regresses those slopes, reconstructs, and re-centers to the original level.</p>
+    <div class="note">
+      <strong>Guarantees convexity of each boosting round's own stored value, not the
+      ensemble's cumulative multi-round main effect:</strong> a sum of convex functions is
+      convex only when combined with non-negative weights, but a round's own
+      Lasso-stacking weight for a term can be negative, flipping a convex round's
+      contribution to concave in the combined output — a real, disclosed limitation of
+      layering a per-round shape constraint on top of signed Lasso stacking.
+    </div>
+    <p><strong>Measured, honestly</strong>: across 60 rounds fit on genuinely non-convex
+    (wiggly) synthetic data, every single round's own projected slopes were
+    non-decreasing (0 violations) — the guarantee holds exactly where it's actually made.</p>
+    <p><strong>Bounded effects</strong>: <code>bounded_effects={"column": (lower,
+    upper)}</code> clips a continuous column's main-effect deviation to this range,
+    applied last (after monotonic/convexity projection).</p>
+    <div class="note">
+      <strong>Bounds each round's own contribution, not the cumulative multi-round
+      total:</strong> with <code>learning_rate</code> shrinkage and many rounds, the
+      summed contribution across all rounds can still exceed <code>(lower, upper)</code>
+      even though no single round's own value ever does.
+    </div>
+    <p><strong>Measured, honestly</strong>: with <code>bounded_effects={"x1": (-5.0,
+    5.0)}</code>, the worst per-round violation across every round was exactly 0 — but the
+    <em>cumulative</em> contribution range across all rounds was 19.81, well past the
+    declared width of 10. This is a real regularization (no single round's zone-fitting
+    produces an extreme outlier value for that term), not a business-rule guarantee on
+    the final prediction's total range.</p>
+    <p><strong>Forbidden interactions</strong>: <code>forbidden_interactions=[("col_a",
+    "col_b")]</code> excludes that pair from pairwise interaction discovery entirely
+    (both the exhaustive and <code>max_pair_interactions</code>-screened paths), and any
+    3-way candidate whose three constituent pairs include a forbidden one is skipped too.
+    Raises <code>ValueError</code> if an entry doesn't name exactly 2 distinct columns.
+    <strong>Measured, honestly</strong>: on synthetic data with a genuine <code>a ×
+    b</code> interaction, its measured feature importance dropped from 2.518 (allowed) to
+    exactly 0.000 (forbidden) — the term never gets fit at all, not merely
+    down-weighted.</p>
+    <p>Leaving <code>convexity_constraints</code>/<code>bounded_effects</code>/
+    <code>forbidden_interactions</code> at their <code>None</code> defaults reproduces
+    every prior release's predictions bit-for-bit — verified.</p>
 
     <h2 id="how-it-compares">How It Compares</h2>
     <p>zoneboost sits at the intersection of additive models (GAMs), boosting frameworks

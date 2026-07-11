@@ -8,7 +8,13 @@ import numpy as np
 import pandas as pd
 from sklearn.utils.validation import check_array
 
-__all__ = ["ensure_dataframe", "resolve_categorical_features", "resolve_monotonic_constraints"]
+__all__ = [
+    "ensure_dataframe",
+    "resolve_categorical_features",
+    "resolve_monotonic_constraints",
+    "resolve_bounded_effects",
+    "resolve_forbidden_interactions",
+]
 
 
 def ensure_dataframe(X, feature_names=None) -> pd.DataFrame:
@@ -48,6 +54,10 @@ def resolve_monotonic_constraints(X: pd.DataFrame, declared, categorical_feature
     An invalid direction (anything other than -1 or 1) does raise --
     unlike a stray categorical key, that's simply a usage mistake with no
     sensible silent interpretation.
+
+    Also reused as-is for ``convexity_constraints`` (``{column: +1 convex,
+    -1 concave}``) -- identical shape and validation, this function doesn't
+    care what the direction semantically means.
     """
     if not declared:
         return {}
@@ -59,4 +69,47 @@ def resolve_monotonic_constraints(X: pd.DataFrame, declared, categorical_feature
         if name in categorical_features:
             continue
         resolved[name] = direction
+    return resolved
+
+
+def resolve_bounded_effects(X: pd.DataFrame, declared, categorical_features: set) -> dict:
+    """Normalize a user-declared ``{column_name_or_index: (lower, upper)}``
+    dict to ``{column_name: (lower, upper)}``, the same name/index
+    convention ``resolve_categorical_features`` uses.
+
+    A bound declared on a categorical column is silently dropped, same
+    precedent as ``resolve_monotonic_constraints``. ``lower > upper``
+    raises -- simply invalid, no sensible silent interpretation.
+    """
+    if not declared:
+        return {}
+    resolved = {}
+    for f, bounds in declared.items():
+        lower, upper = bounds
+        if lower > upper:
+            raise ValueError(f"bounded_effects lower bound must be <= upper bound, got {bounds!r} for {f!r}")
+        name = X.columns[f] if isinstance(f, (int, np.integer)) else f
+        if name in categorical_features:
+            continue
+        resolved[name] = (float(lower), float(upper))
+    return resolved
+
+
+def resolve_forbidden_interactions(X: pd.DataFrame, declared) -> set:
+    """Normalize a user-declared list of 2-column name/index pairs to a
+    ``set`` of 2-element ``frozenset``s of column names -- the same
+    name/index convention ``resolve_categorical_features`` uses.
+
+    An entry that doesn't name exactly 2 distinct columns raises: unlike a
+    stray categorical key on ``monotonic_constraints``, this is simply a
+    usage mistake with no sensible silent interpretation.
+    """
+    if not declared:
+        return set()
+    resolved = set()
+    for pair in declared:
+        names = {X.columns[f] if isinstance(f, (int, np.integer)) else f for f in pair}
+        if len(names) != 2:
+            raise ValueError(f"forbidden_interactions entries must name exactly 2 distinct columns, got {pair!r}")
+        resolved.add(frozenset(names))
     return resolved

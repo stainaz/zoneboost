@@ -12,6 +12,8 @@ from zoneboost._weak_learner import (
     _make_folds,
     _pair_interaction_score,
     _pair_shrunk_deviation,
+    _project_convexity,
+    _project_monotonic_axis,
     _seed_candidate_columns,
     _term_importance,
     _triple_shrunk_deviation,
@@ -695,3 +697,189 @@ def test_fit_lasso_weights_quantile_none_bit_identical_to_before():
     intercept_b, weights_b = _fit_lasso_weights(contributions, residual, alpha=0.01, quantile=None)
     assert intercept_a == intercept_b
     np.testing.assert_array_equal(weights_a, weights_b)
+
+
+def test_project_monotonic_axis_projects_axis_0_and_leaves_missing_row_untouched():
+    deviation = np.array(
+        [
+            [5.0, 1.0, 2.0],
+            [2.0, 3.0, 1.0],  # non-monotonic dip
+            [4.0, 4.0, 4.0],
+            [6.0, 5.0, 5.0],
+            [99.0, 99.0, 99.0],  # missing-value row (axis 0's last index)
+        ]
+    )
+    counts = np.full((5, 3), 10.0)
+    projected = _project_monotonic_axis(deviation, counts, axis=0, direction=1)
+    for col in range(3):
+        assert np.all(np.diff(projected[:4, col]) >= -1e-9)
+    np.testing.assert_array_equal(projected[4], deviation[4])
+
+
+def test_project_monotonic_axis_direction_minus_one_is_non_increasing():
+    deviation = np.array([[1.0], [5.0], [2.0], [0.0]])
+    counts = np.full((4, 1), 10.0)
+    projected = _project_monotonic_axis(deviation, counts, axis=0, direction=-1)
+    assert np.all(np.diff(projected[:3, 0]) <= 1e-9)
+    np.testing.assert_array_equal(projected[3], deviation[3])
+
+
+def test_project_monotonic_axis_axis_1_works_symmetrically():
+    deviation = np.array([[5.0, 2.0, 8.0], [1.0, 3.0, 9.0]])
+    counts = np.full((2, 3), 10.0)
+    projected = _project_monotonic_axis(deviation, counts, axis=1, direction=1)
+    for row in range(2):
+        assert np.all(np.diff(projected[row, :2]) >= -1e-9)
+    np.testing.assert_array_equal(projected[:, 2], deviation[:, 2])
+
+
+def test_project_monotonic_axis_skips_fiber_with_zero_counts():
+    deviation = np.array([[5.0, 1.0], [2.0, 3.0], [9.0, 9.0]])
+    counts = np.array([[10.0, 0.0], [10.0, 0.0], [5.0, 0.0]])
+    projected = _project_monotonic_axis(deviation, counts, axis=0, direction=1)
+    np.testing.assert_array_equal(projected[:, 1], deviation[:, 1])
+
+
+def test_project_convexity_forces_nondecreasing_diffs_and_preserves_level():
+    real = np.array([0.0, 5.0, 6.0, 5.0, 6.0, 11.0])  # diffs: 5,1,-1,1,5 -- not convex
+    deviation = np.concatenate([real, [99.0]])
+    counts = np.full(7, 10.0)
+    centers = np.arange(7, dtype=float)  # evenly spaced -- divided differences == raw differences
+    projected = _project_convexity(deviation, counts, centers, direction=1)
+    diffs = np.diff(projected[:6])
+    assert np.all(np.diff(diffs) >= -1e-9)
+    assert projected[6] == pytest.approx(99.0)
+    np.testing.assert_allclose(
+        np.average(projected[:6], weights=counts[:6]), np.average(real, weights=counts[:6])
+    )
+
+
+def test_project_convexity_concave_forces_nonincreasing_diffs():
+    real = np.array([0.0, -5.0, -6.0, -5.0, -6.0, -11.0])
+    deviation = np.concatenate([real, [0.0]])
+    counts = np.full(7, 10.0)
+    centers = np.arange(7, dtype=float)
+    projected = _project_convexity(deviation, counts, centers, direction=-1)
+    diffs = np.diff(projected[:6])
+    assert np.all(np.diff(diffs) <= 1e-9)
+
+
+def test_project_convexity_respects_irregular_zone_spacing():
+    # zone centers unevenly spaced -- convexity must hold in the actual
+    # x-space slope (divided difference), not raw index-to-index diffs.
+    real = np.array([0.0, 10.0, 11.0, 20.0])
+    centers = np.array([0.0, 1.0, 9.0, 10.0])  # wide gap in the middle
+    deviation = np.concatenate([real, [0.0]])
+    counts = np.full(5, 10.0)
+    projected = _project_convexity(deviation, counts, centers, direction=1)
+    gaps = np.diff(centers)
+    slopes = np.diff(projected[:4]) / gaps
+    assert np.all(np.diff(slopes) >= -1e-9)
+
+
+def test_project_convexity_too_few_real_zones_returns_unchanged():
+    deviation = np.array([1.0, 2.0, 99.0])
+    counts = np.array([10.0, 10.0, 5.0])
+    centers = np.array([0.0, 1.0])
+    projected = _project_convexity(deviation, counts, centers, direction=1)
+    np.testing.assert_array_equal(projected, deviation)
+
+
+def test_pair_shrunk_deviation_monotonic_a_produces_monotonic_slice():
+    rng = np.random.default_rng(0)
+    n = 6000
+    za = rng.integers(0, 4, n)  # zone 4 (missing) never populated
+    zb = rng.integers(0, 3, n)
+    true_effect = np.array([5.0, 1.0, 4.0, 8.0])[za]  # genuinely non-monotonic
+    target = true_effect + rng.normal(0, 0.5, n)
+
+    dev_unconstrained = _pair_shrunk_deviation(za, zb, target, float(target.mean()), 5, 3, m=5.0)
+    dev_constrained = _pair_shrunk_deviation(za, zb, target, float(target.mean()), 5, 3, m=5.0, monotonic_a=1)
+
+    assert not np.all(np.diff(dev_unconstrained[:4, 0]) >= 0)
+    for col in range(3):
+        assert np.all(np.diff(dev_constrained[:4, col]) >= -1e-9)
+
+
+def test_triple_shrunk_deviation_monotonic_c_produces_monotonic_slice():
+    rng = np.random.default_rng(0)
+    n = 8000
+    za = rng.integers(0, 3, n)
+    zb = rng.integers(0, 3, n)
+    zc = rng.integers(0, 4, n)  # zone 4 (missing) never populated
+    true_effect = np.array([5.0, 1.0, 4.0, 8.0])[zc]
+    target = true_effect + rng.normal(0, 0.5, n)
+
+    dev_constrained = _triple_shrunk_deviation(
+        za, zb, zc, target, float(target.mean()), 3, 3, 5, m=5.0, monotonic_c=1
+    )
+    for a in range(3):
+        for b in range(3):
+            assert np.all(np.diff(dev_constrained[a, b, :4]) >= -1e-9)
+
+
+def _forbidden_interaction_data(n=3000, seed=0):
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame(
+        {
+            "a": rng.uniform(-3, 3, n),
+            "b": rng.uniform(-3, 3, n),
+            "c": rng.uniform(-3, 3, n),
+        }
+    )
+    y = (X["a"] * X["b"] + X["a"] * X["c"] + rng.normal(0, 0.3, n)).to_numpy()
+    return X, y
+
+
+def test_weak_learner_fit_forbidden_interactions_excludes_pair_unscreened():
+    X, y = _forbidden_interaction_data()
+    forbidden = frozenset({frozenset({"a", "b"})})
+    _, _, interactions, _, _ = weak_learner_fit(
+        X, y, ["a", "b", "c"], set(), np.random.default_rng(1), forbidden_interactions=forbidden
+    )
+    assert ("a", "b") not in interactions and ("b", "a") not in interactions
+    assert ("a", "c") in interactions or ("c", "a") in interactions
+
+
+def test_weak_learner_fit_forbidden_interactions_excludes_pair_screened():
+    X, y = _forbidden_interaction_data()
+    forbidden = frozenset({frozenset({"a", "b"})})
+    _, _, interactions, _, _ = weak_learner_fit(
+        X, y, ["a", "b", "c"], set(), np.random.default_rng(1),
+        max_pair_interactions=2, forbidden_interactions=forbidden,
+    )
+    assert ("a", "b") not in interactions and ("b", "a") not in interactions
+
+
+def test_weak_learner_fit_forbidden_interactions_excludes_triples_containing_pair():
+    rng = np.random.default_rng(0)
+    n = 3000
+    X = pd.DataFrame(
+        {
+            "a": rng.uniform(-3, 3, n),
+            "b": rng.uniform(-3, 3, n),
+            "c": rng.uniform(-3, 3, n),
+            "d": rng.uniform(-3, 3, n),
+        }
+    )
+    y = (X["a"] * X["b"] * X["c"] + rng.normal(0, 0.3, n)).to_numpy()
+    forbidden = frozenset({frozenset({"a", "b"})})
+    _, _, _, triples, _ = weak_learner_fit(
+        X, y, ["a", "b", "c", "d"], set(), np.random.default_rng(1),
+        max_interaction_order=3, forbidden_interactions=forbidden,
+    )
+    for key in triples:
+        assert not ({"a", "b"} <= set(key))
+
+
+def test_weak_learner_fit_new_shape_constraint_defaults_are_bit_identical():
+    X, y = _forbidden_interaction_data()
+    a = weak_learner_fit(X, y, ["a", "b", "c"], set(), np.random.default_rng(1))
+    b = weak_learner_fit(
+        X, y, ["a", "b", "c"], set(), np.random.default_rng(1),
+        convexity_constraints=None, bounded_effects=None, forbidden_interactions=frozenset(),
+    )
+    for key in a[1]:
+        np.testing.assert_array_equal(a[1][key], b[1][key])
+    for key in a[2]:
+        np.testing.assert_array_equal(a[2][key], b[2][key])

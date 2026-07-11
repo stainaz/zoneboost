@@ -33,7 +33,13 @@ from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.isotonic import IsotonicRegression
 from sklearn.utils.validation import check_is_fitted
 
-from ._common import ensure_dataframe, resolve_categorical_features, resolve_monotonic_constraints
+from ._common import (
+    ensure_dataframe,
+    resolve_bounded_effects,
+    resolve_categorical_features,
+    resolve_forbidden_interactions,
+    resolve_monotonic_constraints,
+)
 from ._explain import explain_rounds
 from ._weak_learner import _fit_lasso_weights, weak_learner_contributions, weak_learner_fit
 
@@ -76,6 +82,7 @@ class _LogOddsBooster:
                  max_interaction_order, max_triple_interactions, triple_min_gain,
                  cross_fit_folds, shrinkage_m, stacking_alpha, monotonic_constraints,
                  max_pair_interactions, adaptive_boundary_smoothing, boundary_shrinkage_m,
+                 convexity_constraints, bounded_effects, forbidden_interactions,
                  calibrate, refit_on_full_data, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
@@ -95,6 +102,9 @@ class _LogOddsBooster:
         self.max_pair_interactions = max_pair_interactions
         self.adaptive_boundary_smoothing = adaptive_boundary_smoothing
         self.boundary_shrinkage_m = boundary_shrinkage_m
+        self.convexity_constraints = convexity_constraints
+        self.bounded_effects = bounded_effects
+        self.forbidden_interactions = forbidden_interactions
         self.calibrate = calibrate
         self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
@@ -192,6 +202,9 @@ class _LogOddsBooster:
                 max_pair_interactions=self.max_pair_interactions,
                 adaptive_boundary_smoothing=self.adaptive_boundary_smoothing,
                 boundary_shrinkage_m=self.boundary_shrinkage_m,
+                convexity_constraints=self.convexity_constraints,
+                bounded_effects=self.bounded_effects,
+                forbidden_interactions=self.forbidden_interactions,
             )
             contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
             contributions[row_idx, :] = oof_contributions
@@ -261,6 +274,7 @@ class _SoftmaxBooster:
                  max_interaction_order, max_triple_interactions, triple_min_gain,
                  cross_fit_folds, shrinkage_m, stacking_alpha, monotonic_constraints,
                  max_pair_interactions, adaptive_boundary_smoothing, boundary_shrinkage_m,
+                 convexity_constraints, bounded_effects, forbidden_interactions,
                  calibrate, refit_on_full_data, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
@@ -280,6 +294,9 @@ class _SoftmaxBooster:
         self.max_pair_interactions = max_pair_interactions
         self.adaptive_boundary_smoothing = adaptive_boundary_smoothing
         self.boundary_shrinkage_m = boundary_shrinkage_m
+        self.convexity_constraints = convexity_constraints
+        self.bounded_effects = bounded_effects
+        self.forbidden_interactions = forbidden_interactions
         self.calibrate = calibrate
         self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
@@ -392,6 +409,9 @@ class _SoftmaxBooster:
                     max_pair_interactions=self.max_pair_interactions,
                     adaptive_boundary_smoothing=self.adaptive_boundary_smoothing,
                     boundary_shrinkage_m=self.boundary_shrinkage_m,
+                    convexity_constraints=self.convexity_constraints,
+                    bounded_effects=self.bounded_effects,
+                    forbidden_interactions=self.forbidden_interactions,
                 )
                 contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
                 contributions[row_idx, :] = oof_contributions
@@ -563,8 +583,23 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         description.
     monotonic_constraints : dict, default=None
         ``{column: +1 or -1}`` -- forces a continuous column's main effect
-        to be non-decreasing/non-increasing across its zones. Opt-in
-        (encodes domain knowledge, not a general improvement) -- see
+        to be non-decreasing/non-increasing across its zones, inherited by
+        every interaction that column participates in. Opt-in (encodes
+        domain knowledge, not a general improvement) -- see
+        :class:`~zoneboost.ZoneBoostRegressor` for the full description.
+    convexity_constraints : dict, default=None
+        ``{column: +1 convex, -1 concave}`` -- forces a continuous column's
+        main effect onto a convex/concave sequence. Main effects only,
+        opt-in -- see :class:`~zoneboost.ZoneBoostRegressor` for the full
+        description.
+    bounded_effects : dict, default=None
+        ``{column: (lower, upper)}`` -- clips a continuous column's main
+        effect to this range, **per boosting round, not cumulatively**
+        across all rounds. Main effects only, opt-in -- see
+        :class:`~zoneboost.ZoneBoostRegressor` for the full description.
+    forbidden_interactions : list, default=None
+        A list of 2-column name/index pairs that must never be fit as
+        pairwise (or 3-way) interactions. Opt-in -- see
         :class:`~zoneboost.ZoneBoostRegressor` for the full description.
     calibrate : bool, default=False
         If ``True``, recalibrate each booster's raw probability with an
@@ -606,6 +641,14 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         Resolved set of columns treated as categorical.
     monotonic_constraints_ : dict
         Resolved ``{column: +1 or -1}`` constraints actually in effect.
+    convexity_constraints_ : dict
+        Resolved ``{column: +1 or -1}`` convexity/concavity constraints
+        actually in effect.
+    bounded_effects_ : dict
+        Resolved ``{column: (lower, upper)}`` bounds actually in effect.
+    forbidden_interactions_ : set
+        Resolved ``set`` of 2-element column-name ``frozenset``s actually
+        excluded from interaction discovery.
     multiclass_ : bool
         Whether native multinomial boosting (3+ classes) was used.
 
@@ -651,6 +694,9 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         max_pair_interactions=None,
         adaptive_boundary_smoothing: bool = False,
         boundary_shrinkage_m: float = 10.0,
+        convexity_constraints=None,
+        bounded_effects=None,
+        forbidden_interactions=None,
         calibrate: bool = False,
         calibration_fraction: float = 0.0,
         refit_on_full_data: bool = False,
@@ -675,6 +721,9 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.max_pair_interactions = max_pair_interactions
         self.adaptive_boundary_smoothing = adaptive_boundary_smoothing
         self.boundary_shrinkage_m = boundary_shrinkage_m
+        self.convexity_constraints = convexity_constraints
+        self.bounded_effects = bounded_effects
+        self.forbidden_interactions = forbidden_interactions
         self.calibrate = calibrate
         self.calibration_fraction = calibration_fraction
         self.refit_on_full_data = refit_on_full_data
@@ -703,6 +752,9 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             max_pair_interactions=self.max_pair_interactions,
             adaptive_boundary_smoothing=self.adaptive_boundary_smoothing,
             boundary_shrinkage_m=self.boundary_shrinkage_m,
+            convexity_constraints=self.convexity_constraints_,
+            bounded_effects=self.bounded_effects_,
+            forbidden_interactions=self.forbidden_interactions_,
             calibrate=self.calibrate,
             refit_on_full_data=self.refit_on_full_data,
             random_state=self.random_state,
@@ -728,6 +780,9 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             max_pair_interactions=self.max_pair_interactions,
             adaptive_boundary_smoothing=self.adaptive_boundary_smoothing,
             boundary_shrinkage_m=self.boundary_shrinkage_m,
+            convexity_constraints=self.convexity_constraints_,
+            bounded_effects=self.bounded_effects_,
+            forbidden_interactions=self.forbidden_interactions_,
             calibrate=self.calibrate,
             refit_on_full_data=self.refit_on_full_data,
             random_state=self.random_state,
@@ -764,6 +819,11 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.monotonic_constraints_ = resolve_monotonic_constraints(
             X, self.monotonic_constraints, self.categorical_features_
         )
+        self.convexity_constraints_ = resolve_monotonic_constraints(
+            X, self.convexity_constraints, self.categorical_features_
+        )
+        self.bounded_effects_ = resolve_bounded_effects(X, self.bounded_effects, self.categorical_features_)
+        self.forbidden_interactions_ = resolve_forbidden_interactions(X, self.forbidden_interactions)
 
         has_val = self.validation_fraction and self.validation_fraction > 0
         has_cal = self.calibration_fraction and self.calibration_fraction > 0

@@ -109,6 +109,7 @@
     { title: "Adaptive Boundary Continuity", crumb: "How It Works", url: "how-it-works.html#adaptive-boundary-continuity" },
     { title: "Quantile Regression", crumb: "How It Works", url: "how-it-works.html#quantile-regression" },
     { title: "Conformalized Quantile Regression (CQR)", crumb: "How It Works", url: "how-it-works.html#conformalized-quantile-regression" },
+    { title: "Global Shape Constraints", crumb: "How It Works", url: "how-it-works.html#global-shape-constraints" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },

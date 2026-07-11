@@ -299,9 +299,10 @@ row-count-weighted isotonic regression, after empirical Bayes shrinkage
 so sparse zones don't distort the projection. Scope is deliberately
 narrow:
 
-- **Main effects only.** Pairwise/triple interactions, and the internal
-  marginal priors those use for their own shrinkage, are untouched — the
-  same scope XGBoost's/LightGBM's own `monotone_constraints` cover.
+- **Inherited by interactions.** Every pairwise/triple term the column
+  participates in is also projected along that column's own axis, holding
+  the other axis/axes fixed — automatic whenever a constraint is declared,
+  no separate opt-in (see "Global shape constraints" below for how).
 - A continuous column's zones are already ordered low → high by
   construction, so there's no threshold or window to tune — just a
   direction.
@@ -314,6 +315,80 @@ narrow:
 
 Leaving `monotonic_constraints=None` (the default) reproduces the exact
 same predictions as before this change — verified bit-for-bit.
+
+### Global shape constraints
+
+Four related mechanisms for declaring shape knowledge the model has no
+way to infer on its own — all **opt-in**, all main-effects-focused, all
+reusing the same `{column: ...}` declaration convention as
+`monotonic_constraints`:
+
+**Interactions inherit monotonicity.** Declaring `monotonic_constraints=
+{"age": 1}` now also projects every pairwise/triple interaction `age`
+participates in along `age`'s own axis (holding the other axis/axes
+fixed) — via `sklearn.isotonic.IsotonicRegression` fit fiber-by-fiber
+(one independent fit per slice along the constrained axis), weighted by
+that slice's own row counts, the multi-dimensional generalization of the
+main effect's own projection. Without this, a column's *total* dependence
+on the target (main effect + every interaction it's part of) could still
+come out non-monotonic overall, undermining the point of declaring the
+constraint in the first place. **This changes behavior for existing
+`monotonic_constraints` users** — disclosed as completing the feature's
+original intent (interactions were deliberately unconstrained before),
+not a free correctness fix. A term with more than one constrained axis is
+projected axis-by-axis in a fixed order — a disclosed heuristic, not a
+jointly-optimal multi-dimensional isotone regression, consistent with
+cyclic backfitting's own single-pass approximation. **Measured, honestly**,
+on synthetic data with a genuine non-monotonic dip in an interaction term:
+the unconstrained interaction's largest single-step *decrease* was -0.189;
+constrained, it was exactly 0.000 (fully non-decreasing).
+
+**Convexity/concavity constraints**: `convexity_constraints={"column": +1}`
+(convex) or `{-1}` (concave) forces a continuous column's *main effect*
+onto a convex/concave sequence. A convex piecewise-linear function through
+zone centroids `(center_i, y_i)` requires non-decreasing *slopes*
+`(y[i+1]-y[i])/(center[i+1]-center[i])` — not non-decreasing raw
+differences, since zones are rarely evenly spaced (adaptive zone
+boundaries). This isotonic-regresses those slopes, reconstructs, and
+re-centers to the original level. **Guarantees convexity of each
+boosting round's own stored value, not the ensemble's cumulative
+multi-round main effect**: a sum of convex functions is convex only when
+combined with non-negative weights, but a round's own Lasso-stacking
+weight for a term can be negative, flipping a convex round's contribution
+to concave in the combined output — a real, disclosed limitation of
+layering a per-round shape constraint on top of signed Lasso stacking.
+**Measured, honestly**: across 60 rounds fit on genuinely non-convex
+(wiggly) synthetic data, every single round's own projected slopes were
+non-decreasing (0 violations) — the guarantee holds exactly where it's
+actually made.
+
+**Bounded effects**: `bounded_effects={"column": (lower, upper)}` clips a
+continuous column's main-effect deviation to this range, applied last
+(after monotonic/convexity projection). **Bounds each round's own
+contribution, not the cumulative multi-round total**: with
+`learning_rate` shrinkage and many rounds, the summed contribution across
+all rounds can still exceed `(lower, upper)` even though no single
+round's own value ever does. **Measured, honestly**: with
+`bounded_effects={"x1": (-5.0, 5.0)}`, the worst per-round violation
+across every round was exactly 0 — but the *cumulative* contribution
+range across all rounds was 19.81, well past the declared width of 10.
+This is a real regularization (no single round's zone-fitting produces an
+extreme outlier value for that term), not a business-rule guarantee on
+the final prediction's total range.
+
+**Forbidden interactions**: `forbidden_interactions=[("col_a", "col_b")]`
+excludes that pair from pairwise interaction discovery entirely (both the
+exhaustive and `max_pair_interactions`-screened paths), and any 3-way
+candidate whose three constituent pairs include a forbidden one is
+skipped too. Raises `ValueError` if an entry doesn't name exactly 2
+distinct columns. **Measured, honestly**: on synthetic data with a
+genuine `a × b` interaction, its measured feature importance dropped from
+2.518 (allowed) to exactly 0.000 (forbidden) — the term never gets fit at
+all, not merely down-weighted.
+
+Leaving `convexity_constraints`/`bounded_effects`/`forbidden_interactions`
+at their `None` defaults reproduces every prior release's predictions
+bit-for-bit — verified.
 
 ### Pair screening
 
@@ -619,8 +694,11 @@ Identical parameter set on both estimators, except `calibrate`
 | `cross_fit_folds` | 5 | Number of folds used to compute each round's training signal honestly (see "Cross-fitted cell means" above); falls back to no cross-fitting if a round's row count is smaller than 2 folds |
 | `shrinkage_m` | 10.0 | Empirical-Bayes shrinkage strength — a zone needs about this many rows of its own before it's trusted as much as its (hierarchical) prior; see "Empirical Bayes shrinkage" above |
 | `stacking_alpha` | 0.01 | Lasso regularization strength for combining a round's terms; see "Lasso stacking" above |
-| `monotonic_constraints` | None | `{column: +1 or -1}` — forces a continuous column's main effect to be non-decreasing/non-increasing; opt-in, see "Monotonic constraints" above |
+| `monotonic_constraints` | None | `{column: +1 or -1}` — forces a continuous column's main effect (and every interaction it participates in) to be non-decreasing/non-increasing; opt-in, see "Monotonic constraints" above |
 | `max_pair_interactions` | None | Cap on how many pairwise interactions a round keeps, ranked by importance; opt-in, see "Pair screening" above |
+| `convexity_constraints` | None | `{column: +1 convex, -1 concave}` — forces a continuous column's main effect onto a convex/concave sequence; main effects only, opt-in, see "Global shape constraints" above |
+| `bounded_effects` | None | `{column: (lower, upper)}` — clips a continuous column's main effect to this range, per boosting round (not cumulatively); main effects only, opt-in, see "Global shape constraints" above |
+| `forbidden_interactions` | None | List of 2-column name/index pairs that must never be fit as pairwise (or 3-way) interactions; opt-in, see "Global shape constraints" above |
 | `calibrate` | False | **Classifier only.** Isotonic-recalibrate `predict_proba`; opt-in, see "Probability calibration" above |
 | `calibration_fraction` | 0.0 | Fraction held out in a dedicated calibration split, separate from `validation_fraction`; opt-in, see "Honest data splits" above |
 | `refit_on_full_data` | False | Refit the deployed model on fit+validation data once `best_n_rounds_` is chosen; requires `calibration_fraction > 0`, see "Honest data splits" above |
@@ -699,6 +777,12 @@ After `fit`, `ZoneBoostRegressor` exposes (among others):
   (declared ∪ auto-detected).
 - `monotonic_constraints_` — the resolved `{column: +1 or -1}` dict
   actually in effect (categorical columns dropped).
+- `convexity_constraints_` — the resolved `{column: +1 or -1}` convexity
+  dict actually in effect (same resolution as `monotonic_constraints_`).
+- `bounded_effects_` — the resolved `{column: (lower, upper)}` dict
+  actually in effect (categorical columns dropped).
+- `forbidden_interactions_` — the resolved `set` of 2-element column-name
+  `frozenset`s actually excluded from interaction discovery.
 - `conformal_scores_` — sorted absolute residuals on the held-out
   validation split at `best_n_rounds_`, the nonconformity scores
   `predict_interval` draws its margin from (`None` if

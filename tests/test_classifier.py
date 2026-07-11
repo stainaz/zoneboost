@@ -350,3 +350,58 @@ def test_multiclass_calibration_fraction_and_refit_on_full_data():
     proba = model.predict_proba(X)
     np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-9)
     assert model.softmax_booster_.calibrators_ is not None
+
+
+def test_binary_shape_constraints_fit_and_resolve_correctly():
+    X, y = _binary_data()
+    model = ZoneBoostClassifier(
+        n_rounds=30,
+        random_state=0,
+        monotonic_constraints={"x1": 1},
+        convexity_constraints={"x2": 1},
+        bounded_effects={"x2": (-3.0, 3.0)},
+        forbidden_interactions=[("x1", "x2")],
+    ).fit(X, y)
+    assert model.monotonic_constraints_ == {"x1": 1}
+    assert model.convexity_constraints_ == {"x2": 1}
+    assert model.bounded_effects_ == {"x2": (-3.0, 3.0)}
+    assert model.forbidden_interactions_ == {frozenset({"x1", "x2"})}
+    importance = model.feature_importance(X)
+    assert "x1 x x2" not in importance.index
+
+
+def test_multiclass_shape_constraints_fit_and_resolve_correctly():
+    X, y = _multiclass_data()
+    model = ZoneBoostClassifier(
+        n_rounds=20,
+        random_state=0,
+        monotonic_constraints={"x1": 1},
+        convexity_constraints={"x2": 1},
+        bounded_effects={"x2": (-3.0, 3.0)},
+        forbidden_interactions=[("x1", "x2")],
+    ).fit(X, y)
+    assert model.monotonic_constraints_ == {"x1": 1}
+    assert model.convexity_constraints_ == {"x2": 1}
+    assert model.bounded_effects_ == {"x2": (-3.0, 3.0)}
+    proba = model.predict_proba(X)
+    np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-9)
+
+
+def test_shape_constraint_defaults_reproduce_bit_identical_predictions_binary():
+    X, y = _binary_data()
+    model_default = ZoneBoostClassifier(n_rounds=30, random_state=0).fit(X, y)
+    model_explicit = ZoneBoostClassifier(
+        n_rounds=30, random_state=0,
+        convexity_constraints=None, bounded_effects=None, forbidden_interactions=None,
+    ).fit(X, y)
+    np.testing.assert_array_equal(model_default.predict_proba(X), model_explicit.predict_proba(X))
+
+
+def test_shape_constraint_defaults_reproduce_bit_identical_predictions_multiclass():
+    X, y = _multiclass_data()
+    model_default = ZoneBoostClassifier(n_rounds=20, random_state=0).fit(X, y)
+    model_explicit = ZoneBoostClassifier(
+        n_rounds=20, random_state=0,
+        convexity_constraints=None, bounded_effects=None, forbidden_interactions=None,
+    ).fit(X, y)
+    np.testing.assert_array_equal(model_default.predict_proba(X), model_explicit.predict_proba(X))

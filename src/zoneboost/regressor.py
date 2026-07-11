@@ -13,7 +13,13 @@ import pandas as pd
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_is_fitted
 
-from ._common import ensure_dataframe, resolve_categorical_features, resolve_monotonic_constraints
+from ._common import (
+    ensure_dataframe,
+    resolve_bounded_effects,
+    resolve_categorical_features,
+    resolve_forbidden_interactions,
+    resolve_monotonic_constraints,
+)
 from ._explain import explain_rounds
 from ._weak_learner import _fit_lasso_weights, weak_learner_contributions, weak_learner_fit
 
@@ -183,16 +189,21 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         ``{column: +1 or -1}`` -- forces a continuous column's *main
         effect* to be non-decreasing (+1) or non-increasing (-1) across
         its zones, via isotonic regression weighted by each zone's own row
-        count. Interaction terms are never constrained. Accepts column
-        names (if ``X`` is a DataFrame) or integer positions, the same
-        convention as ``categorical_features``. A constraint declared on a
-        categorical column is silently dropped -- there's no meaningful
-        order to constrain for a nominal category. Unlike every other
-        parameter here, this is **opt-in**: it encodes domain knowledge the
-        model can't infer on its own (e.g. "take-up must not decrease as
-        affordability rises"), not a general improvement, so the default
-        (no constraints) reproduces the exact same predictions as if this
-        parameter didn't exist.
+        count. **Inherited by interactions**: every pairwise/triple term
+        that column participates in is also projected along that column's
+        own axis (holding the other axis/axes fixed), so the column's
+        *total* dependence on the target can't come out non-monotonic
+        overall just because an interaction term wasn't constrained --
+        automatic whenever this is declared, no separate opt-in. Accepts
+        column names (if ``X`` is a DataFrame) or integer positions, the
+        same convention as ``categorical_features``. A constraint declared
+        on a categorical column is silently dropped -- there's no
+        meaningful order to constrain for a nominal category. This is
+        **opt-in**: it encodes domain knowledge the model can't infer on
+        its own (e.g. "take-up must not decrease as affordability rises"),
+        not a general improvement, so the default (no constraints)
+        reproduces the exact same predictions as if this parameter didn't
+        exist.
     loss : str, default="squared_error"
         ``"squared_error"`` (default) targets the conditional mean, exactly
         as every prior release -- zero change to today's behavior or cost.
@@ -221,6 +232,43 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         :class:`zoneboost.ConformalizedQuantileRegressor` for a
         distribution-free, locally-adaptive prediction interval built from
         exactly two such quantile fits.
+    convexity_constraints : dict, default=None
+        ``{column: +1 convex, -1 concave}`` -- forces a continuous column's
+        *main effect* onto a convex/concave sequence across its zones:
+        isotonic-regresses the sequence's own first differences (a convex
+        sequence has non-decreasing first differences) rather than the
+        values themselves, weighted by each gap's neighboring row count,
+        then reconstructs and re-centers to the original level. Same
+        declaration convention as ``monotonic_constraints`` (categorical
+        columns dropped); main effects only -- not inherited by
+        interactions. Combining this with ``monotonic_constraints`` on the
+        same column is a heuristic ordering (monotonic projection happens
+        first), not guaranteed to keep the result strictly monotonic
+        afterward. **Opt-in**: the default (no constraints) reproduces the
+        exact same predictions as if this parameter didn't exist.
+    bounded_effects : dict, default=None
+        ``{column: (lower, upper)}`` -- clips a continuous column's *main
+        effect* deviation to this range, applied after any monotonic/
+        convexity projection. Main effects only. **Bounds each boosting
+        round's own contribution, not the cumulative multi-round total**:
+        with ``learning_rate`` shrinkage and many rounds, the column's
+        summed contribution across all of ``rounds_`` can still exceed
+        ``(lower, upper)`` even though no single round's own stored value
+        ever does -- a real regularization (no single round's zone-fitting
+        can produce an extreme outlier value for that term), not a
+        business-rule guarantee on the final prediction's total range.
+        **Opt-in**: the default (no bounds) reproduces the exact same
+        predictions as if this parameter didn't exist.
+    forbidden_interactions : list, default=None
+        A list of 2-column name/index pairs (same convention as
+        ``categorical_features``) that must never be fit as pairwise
+        interactions -- applies to both the exhaustive and screened
+        (``max_pair_interactions``) discovery paths. Any 3-way candidate
+        (when ``max_interaction_order=3``) whose three constituent pairs
+        include a forbidden one is skipped too. Raises ``ValueError`` at
+        `fit` if an entry doesn't name exactly 2 distinct columns.
+        **Opt-in**: the default (``None``) reproduces the exact same
+        predictions as if this parameter didn't exist.
     calibration_fraction : float, default=0.0
         Fraction of training rows held out in a **third**, dedicated split
         purely for calibration (:attr:`conformal_scores_`) -- distinct from
@@ -260,6 +308,15 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
     monotonic_constraints_ : dict
         Resolved ``{column: +1 or -1}`` constraints actually in effect
         (declared constraints on a categorical column are dropped here).
+    convexity_constraints_ : dict
+        Resolved ``{column: +1 or -1}`` convexity/concavity constraints
+        actually in effect (same resolution as ``monotonic_constraints_``).
+    bounded_effects_ : dict
+        Resolved ``{column: (lower, upper)}`` bounds actually in effect
+        (declared bounds on a categorical column are dropped here).
+    forbidden_interactions_ : set
+        Resolved ``set`` of 2-element column-name ``frozenset``s actually
+        excluded from pairwise/triple interaction discovery.
     baseline_ : float
         The target's mean on the training split -- the starting prediction
         before any boosting round is applied.
@@ -342,6 +399,9 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         boundary_shrinkage_m: float = 10.0,
         loss: str = "squared_error",
         quantile: float = 0.5,
+        convexity_constraints=None,
+        bounded_effects=None,
+        forbidden_interactions=None,
         calibration_fraction: float = 0.0,
         refit_on_full_data: bool = False,
         random_state: int = 42,
@@ -370,6 +430,9 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.boundary_shrinkage_m = boundary_shrinkage_m
         self.loss = loss
         self.quantile = quantile
+        self.convexity_constraints = convexity_constraints
+        self.bounded_effects = bounded_effects
+        self.forbidden_interactions = forbidden_interactions
         self.calibration_fraction = calibration_fraction
         self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
@@ -412,6 +475,11 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.monotonic_constraints_ = resolve_monotonic_constraints(
             X, self.monotonic_constraints, self.categorical_features_
         )
+        self.convexity_constraints_ = resolve_monotonic_constraints(
+            X, self.convexity_constraints, self.categorical_features_
+        )
+        self.bounded_effects_ = resolve_bounded_effects(X, self.bounded_effects, self.categorical_features_)
+        self.forbidden_interactions_ = resolve_forbidden_interactions(X, self.forbidden_interactions)
 
         has_val = self.validation_fraction and self.validation_fraction > 0
         has_cal = self.calibration_fraction and self.calibration_fraction > 0
@@ -554,6 +622,9 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 adaptive_boundary_smoothing=self.adaptive_boundary_smoothing,
                 boundary_shrinkage_m=self.boundary_shrinkage_m,
                 quantile=self.quantile if self.loss == "quantile" else None,
+                convexity_constraints=self.convexity_constraints_,
+                bounded_effects=self.bounded_effects_,
+                forbidden_interactions=self.forbidden_interactions_,
             )
             contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
             # The round's own (sub)sampled rows would otherwise be scored by a

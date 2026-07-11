@@ -134,9 +134,13 @@ def _zone_shrunk_deviation(
     only ever passed for a column's own main effect (continuous columns,
     whose zones are meaningfully ordered by construction) -- never from
     ``_pair_shrunk_deviation``/``_triple_shrunk_deviation``'s internal calls
-    for their own hierarchical priors, so interaction terms stay
-    unconstrained. When set, the *real* zones (all but the last index --
-    for a continuous column that's always the dedicated missing-value
+    for their own marginal *priors* (``dev_a``/``dev_b``/``dev_c`` stay
+    unconstrained there, exactly as before). The joint cell array those two
+    functions return can still end up monotonic along a constrained column's
+    own axis -- via a separate mechanism, :func:`_project_monotonic_axis`,
+    applied to the *joint* deviation itself, not to this function's own
+    marginal calls. When set here, the *real* zones (all but the last index
+    -- for a continuous column that's always the dedicated missing-value
     bucket, which isn't part of the ordered continuum and is left alone)
     are projected onto the nearest monotonic sequence via
     ``sklearn.isotonic.IsotonicRegression``, weighted by each zone's own
@@ -157,6 +161,102 @@ def _zone_shrunk_deviation(
     return deviation
 
 
+def _project_monotonic_axis(deviation: np.ndarray, counts: np.ndarray, axis: int, direction: int) -> np.ndarray:
+    """Multi-dimensional generalization of :func:`_zone_shrunk_deviation`'s
+    own isotonic projection: projects one ``axis`` of a 2D/3D joint
+    ``deviation`` array onto a monotonic sequence, holding every other axis
+    fixed -- one independent ``sklearn.isotonic.IsotonicRegression`` fit
+    per fiber along ``axis``, weighted by that fiber's own row counts (via
+    ``counts``, the same shape as ``deviation``). ``axis``'s own last index
+    (its dedicated missing-value zone) is excluded and left untouched, same
+    convention as the main effect.
+
+    A single, independent pass over ``axis`` -- not a jointly-optimal
+    multi-dimensional isotone regression. When a term has more than one
+    constrained axis, the caller applies this once per axis in a fixed
+    order, and a later axis's projection can slightly disturb an earlier
+    axis's own monotonicity -- a disclosed heuristic, consistent with
+    cyclic backfitting's own single-pass approximation elsewhere in this
+    module.
+    """
+    n_real = deviation.shape[axis] - 1
+    if n_real <= 0:
+        return deviation
+    dev_moved = np.moveaxis(deviation, axis, 0)
+    counts_moved = np.moveaxis(counts, axis, 0)
+    out = dev_moved.copy()
+    for idx in np.ndindex(dev_moved.shape[1:]):
+        key = (slice(0, n_real),) + idx
+        fiber_counts = counts_moved[key]
+        if fiber_counts.sum() <= 0:
+            continue
+        iso = IsotonicRegression(increasing=direction > 0, out_of_bounds="clip")
+        out[key] = iso.fit_transform(np.arange(n_real), dev_moved[key], sample_weight=fiber_counts)
+    return np.moveaxis(out, 0, axis)
+
+
+def _project_convexity(deviation: np.ndarray, counts: np.ndarray, centers: np.ndarray, direction: int) -> np.ndarray:
+    """Project a continuous main effect's per-zone deviation onto a convex
+    (``direction=+1``) or concave (``direction=-1``) sequence, as evaluated
+    against the actual piecewise-*linear* interpolant :func:`_blend_1d`
+    reconstructs between zone centroids -- not against the raw zone-index
+    sequence. Zones are rarely evenly spaced (adaptive zone boundaries), so
+    a sequence with non-decreasing *index-to-index* differences is not
+    generally convex once interpolated against irregular real-valued
+    centroids: convexity of a piecewise-linear function through points
+    ``(center_i, y_i)`` requires non-decreasing *slopes*
+    ``(y[i+1]-y[i]) / (center[i+1]-center[i])`` (divided differences), not
+    non-decreasing raw differences.
+
+    This isotonic-regresses those slopes (real zones only -- the last
+    index, the dedicated missing-value zone, is excluded and left
+    untouched, same convention as monotonic projection), weighted by each
+    gap's average neighboring row count, reconstructs via a cumulative sum
+    of ``slope * gap``, then re-centers the result to the *original*
+    count-weighted mean -- the projection changes shape, not overall
+    level, the same "project shape, preserve level" spirit as the existing
+    monotonic projection.
+
+    Guarantees convexity of *this round's own* stored deviation only, not
+    the boosted ensemble's cumulative multi-round main effect: a sum of
+    convex functions is itself convex only when every term is combined
+    with a non-negative weight, but each round's own Lasso-stacking weight
+    for this term (see :func:`_fit_lasso_weights`) can be negative --
+    flipping a convex round's contribution to concave in the combined
+    output. A real, disclosed limitation of layering a per-round shape
+    constraint on top of signed Lasso stacking, not a free guarantee.
+
+    Combining this with a monotonic constraint on the same column is a
+    heuristic ordering (monotonic projection happens first, inside
+    :func:`_zone_shrunk_deviation`, before this is applied) -- not
+    guaranteed to keep the result strictly monotonic afterward.
+    """
+    n_real = len(deviation) - 1
+    if n_real <= 2:
+        return deviation
+    real = deviation[:n_real]
+    real_counts = counts[:n_real]
+    real_centers = centers[:n_real]
+    if real_counts.sum() <= 0:
+        return deviation
+    gaps = np.diff(real_centers)
+    if np.any(gaps <= 0):
+        return deviation
+    slopes = np.diff(real) / gaps
+    slope_weights = (real_counts[:-1] + real_counts[1:]) / 2.0
+    if slope_weights.sum() <= 0:
+        return deviation
+    iso = IsotonicRegression(increasing=direction > 0, out_of_bounds="clip")
+    fitted_slopes = iso.fit_transform(np.arange(n_real - 1), slopes, sample_weight=slope_weights)
+    reconstructed = np.concatenate([[0.0], np.cumsum(fitted_slopes * gaps)])
+    orig_mean = np.average(real, weights=real_counts)
+    new_mean = np.average(reconstructed, weights=real_counts)
+    reconstructed = reconstructed + (orig_mean - new_mean)
+    out = deviation.copy()
+    out[:n_real] = reconstructed
+    return out
+
+
 def _pair_shrunk_deviation(
     za: np.ndarray,
     zb: np.ndarray,
@@ -166,6 +266,8 @@ def _pair_shrunk_deviation(
     n_zones_b: int,
     m: float,
     quantile: float = None,
+    monotonic_a: int = 0,
+    monotonic_b: int = 0,
 ):
     """Same idea, gridded over two variables' zones jointly -- but shrunk
     toward a *hierarchical* prior, not the flat overall statistic: each
@@ -182,7 +284,15 @@ def _pair_shrunk_deviation(
     :func:`_zone_raw_stat`) -- an additive sum of two quantile deviations
     isn't an exact quantile identity the way it is for means, but reuses
     the identical hierarchical-prior shrinkage pattern as a defensible
-    heuristic (see :func:`_zone_shrunk_deviation`)."""
+    heuristic (see :func:`_zone_shrunk_deviation`).
+
+    ``monotonic_a``/``monotonic_b`` (default 0, unconstrained) project the
+    *joint* returned deviation along that axis via
+    :func:`_project_monotonic_axis` -- so a column with a declared
+    monotonic main effect gets its interactions constrained too ("inherited
+    monotonicity"), not just its own main effect. Applied in a fixed order
+    (``a`` then ``b``) when both are set -- a disclosed heuristic, see
+    :func:`_project_monotonic_axis`."""
     dev_a = _zone_shrunk_deviation(za, target_values, overall_stat, n_zones_a, m, quantile=quantile)
     dev_b = _zone_shrunk_deviation(zb, target_values, overall_stat, n_zones_b, m, quantile=quantile)
 
@@ -193,7 +303,13 @@ def _pair_shrunk_deviation(
     counts = counts.reshape(n_zones_a, n_zones_b)
     prior = overall_stat + dev_a[:, None] + dev_b[None, :]
     shrunk_stat = (counts * cell_stat + m * prior) / (counts + m)
-    return shrunk_stat - overall_stat
+    deviation = shrunk_stat - overall_stat
+
+    if monotonic_a != 0:
+        deviation = _project_monotonic_axis(deviation, counts, axis=0, direction=monotonic_a)
+    if monotonic_b != 0:
+        deviation = _project_monotonic_axis(deviation, counts, axis=1, direction=monotonic_b)
+    return deviation
 
 
 def _triple_shrunk_deviation(
@@ -207,13 +323,23 @@ def _triple_shrunk_deviation(
     n_zones_c: int,
     m: float,
     quantile: float = None,
+    monotonic_a: int = 0,
+    monotonic_b: int = 0,
+    monotonic_c: int = 0,
 ):
     """Same recursive pattern as :func:`_pair_shrunk_deviation`, one level
     deeper: the three main effects and three pairwise interactions
     (themselves already shrunk) combine additively into the joint 3D cell's
     prior, and the cell is shrunk toward that. ``quantile`` is forwarded to
     every recursive call and the joint cell's own raw statistic, same
-    heuristic-extension caveat as :func:`_pair_shrunk_deviation`."""
+    heuristic-extension caveat as :func:`_pair_shrunk_deviation`.
+
+    ``monotonic_a``/``monotonic_b``/``monotonic_c`` project the *joint*
+    returned deviation along that axis, same "inherited monotonicity"
+    mechanism and fixed-order caveat as :func:`_pair_shrunk_deviation` (not
+    passed to the ``dev_ab``/``dev_ac``/``dev_bc`` recursive calls above --
+    those stay unconstrained pairwise priors, only this function's own
+    final joint cell is projected)."""
     dev_a = _zone_shrunk_deviation(za, target_values, overall_stat, n_zones_a, m, quantile=quantile)
     dev_b = _zone_shrunk_deviation(zb, target_values, overall_stat, n_zones_b, m, quantile=quantile)
     dev_c = _zone_shrunk_deviation(zc, target_values, overall_stat, n_zones_c, m, quantile=quantile)
@@ -236,7 +362,15 @@ def _triple_shrunk_deviation(
         + dev_bc[None, :, :]
     )
     shrunk_stat = (counts * cell_stat + m * prior) / (counts + m)
-    return shrunk_stat - overall_stat
+    deviation = shrunk_stat - overall_stat
+
+    if monotonic_a != 0:
+        deviation = _project_monotonic_axis(deviation, counts, axis=0, direction=monotonic_a)
+    if monotonic_b != 0:
+        deviation = _project_monotonic_axis(deviation, counts, axis=1, direction=monotonic_b)
+    if monotonic_c != 0:
+        deviation = _project_monotonic_axis(deviation, counts, axis=2, direction=monotonic_c)
+    return deviation
 
 
 def _term_importance(deviation: np.ndarray) -> float:
@@ -551,6 +685,8 @@ def _cross_fitted_contributions(
                 n_zones[b],
                 m,
                 quantile=quantile,
+                monotonic_a=monotonic_constraints.get(a, 0),
+                monotonic_b=monotonic_constraints.get(b, 0),
             )
             za_lo, za_hi, wa = soft[a]
             zb_lo, zb_hi, wb = soft[b]
@@ -577,6 +713,9 @@ def _cross_fitted_contributions(
                 n_zones[c],
                 m,
                 quantile=quantile,
+                monotonic_a=monotonic_constraints.get(a, 0),
+                monotonic_b=monotonic_constraints.get(b, 0),
+                monotonic_c=monotonic_constraints.get(c, 0),
             )
             za_lo, za_hi, wa = soft[a]
             zb_lo, zb_hi, wb = soft[b]
@@ -606,17 +745,36 @@ def _get_pair(interactions: dict, x: str, y: str):
 
 
 def _fit_pairs(
-    pairs, zones: dict, n_zones: dict, main_effects: dict, residual: np.ndarray, m: float, quantile: float = None
+    pairs,
+    zones: dict,
+    n_zones: dict,
+    main_effects: dict,
+    residual: np.ndarray,
+    m: float,
+    quantile: float = None,
+    monotonic_constraints: dict = None,
 ) -> dict:
     """Fully fit (backfit against mains, see module docstring) exactly the
     given ``pairs`` -- shared by ``weak_learner_fit``'s screened and
     unscreened paths so there's a single place that does the expensive
-    per-pair work."""
+    per-pair work. ``monotonic_constraints`` (default ``None``) is looked
+    up per column and forwarded to :func:`_pair_shrunk_deviation` as
+    ``monotonic_a``/``monotonic_b`` -- see "inherited monotonicity" there."""
+    monotonic_constraints = monotonic_constraints or {}
     interactions = {}
     for a, b in pairs:
         partial = residual - main_effects[a][zones[a]] - main_effects[b][zones[b]]
         interactions[(a, b)] = _pair_shrunk_deviation(
-            zones[a], zones[b], partial, _overall_stat(partial, quantile), n_zones[a], n_zones[b], m, quantile=quantile
+            zones[a],
+            zones[b],
+            partial,
+            _overall_stat(partial, quantile),
+            n_zones[a],
+            n_zones[b],
+            m,
+            quantile=quantile,
+            monotonic_a=monotonic_constraints.get(a, 0),
+            monotonic_b=monotonic_constraints.get(b, 0),
         )
     return interactions
 
@@ -651,6 +809,8 @@ def _select_triples(
     triple_min_gain: float,
     m: float,
     quantile: float = None,
+    monotonic_constraints: dict = None,
+    forbidden_pairs: frozenset = frozenset(),
 ):
     """Adaptive 3-way interaction selection for one round: start from main
     effects + pairwise interactions (already fit), and only add a small
@@ -688,17 +848,31 @@ def _select_triples(
     it is a cheap diagnostic for "is there signal here," not the literal
     training objective. Only the accepted triple's *stored* value
     (``dev_abc``) uses ``quantile`` when set, since that value becomes part
-    of the round's actual output.
+    of the round's actual output; it also inherits ``monotonic_constraints``
+    the same way :func:`_pair_shrunk_deviation`'s own callers do.
+
+    ``forbidden_pairs`` (a ``frozenset`` of 2-element column-name
+    ``frozenset``s) skips any candidate triple containing a forbidden pair
+    among its three constituent pairs -- a domain-expert-declared "these two
+    columns must never interact" also blocks the 3-way term that would
+    otherwise still jointly involve both.
     """
     if len(candidate_cols) < 3 or not interactions:
         return {}
     if float(residual.std()) <= 0:
         return {}
 
+    monotonic_constraints = monotonic_constraints or {}
     pair_importance = {pair: _term_importance(interactions[pair]) for pair in interactions}
 
     scored = []
     for a, b, c in itertools.combinations(candidate_cols, 3):
+        if forbidden_pairs and (
+            frozenset((a, b)) in forbidden_pairs
+            or frozenset((a, c)) in forbidden_pairs
+            or frozenset((b, c)) in forbidden_pairs
+        ):
+            continue
         za, zb, zc = zones[a], zones[b], zones[c]
         dev_a = main_effects[a]
         dev_b = main_effects[b]
@@ -744,6 +918,9 @@ def _select_triples(
                 n_zones[c],
                 m,
                 quantile=quantile,
+                monotonic_a=monotonic_constraints.get(a, 0),
+                monotonic_b=monotonic_constraints.get(b, 0),
+                monotonic_c=monotonic_constraints.get(c, 0),
             )
             scored.append(((a, b, c), gain, dev_abc))
 
@@ -860,6 +1037,9 @@ def weak_learner_fit(
     adaptive_boundary_smoothing: bool = False,
     boundary_shrinkage_m: float = 10.0,
     quantile: float = None,
+    convexity_constraints: dict = None,
+    bounded_effects: dict = None,
+    forbidden_interactions: frozenset = frozenset(),
 ):
     """Fit one boosting round's weak learner: zone info (adaptive-continuous
     or exact-categorical per column), main effects, interactions, and
@@ -964,6 +1144,25 @@ def weak_learner_fit(
         loss), but the value stored per zone/cell is now loss-optimal for
         pinball loss at ``quantile`` rather than for squared error. See
         :func:`_zone_shrunk_deviation`.
+    convexity_constraints : dict, default=None
+        ``{column: +1 convex, -1 concave}`` -- forces a continuous column's
+        *main effect* onto a convex/concave sequence across its zones (see
+        :func:`_project_convexity`), same declaration convention as
+        ``monotonic_constraints``. Main effects only -- unlike
+        ``monotonic_constraints``, not inherited by interactions.
+    bounded_effects : dict, default=None
+        ``{column: (lower, upper)}`` -- clips a continuous column's *main
+        effect* deviation to this range (applied last, after any
+        monotonic/convexity projection), for **this round's own stored
+        value only** -- not the cumulative multi-round total, which can
+        still exceed the bound once summed across many shrunk rounds. Main
+        effects only.
+    forbidden_interactions : frozenset, default=frozenset()
+        A ``frozenset`` of 2-element column-name ``frozenset``s: these
+        pairs are never fit as pairwise interactions (in either the
+        exhaustive or screened path), and any 3-way candidate whose three
+        constituent pairs include a forbidden one is skipped too -- see
+        :func:`_select_triples`.
 
     Returns
     -------
@@ -982,6 +1181,8 @@ def weak_learner_fit(
         ``weak_learner_contributions`` would produce for the same tables.
     """
     monotonic_constraints = monotonic_constraints or {}
+    convexity_constraints = convexity_constraints or {}
+    bounded_effects = bounded_effects or {}
     zone_info = {
         c: _column_zone_info(X[c], residual, c in categorical_features, max_zones, min_zone_frac)
         for c in predictor_subset
@@ -990,8 +1191,9 @@ def weak_learner_fit(
     zones = {c: _column_zone_index(X[c], zone_info[c]) for c in predictor_subset}
     overall_stat = _overall_stat(residual, quantile)
 
-    main_effects = {
-        col: _zone_shrunk_deviation(
+    main_effects = {}
+    for col in predictor_subset:
+        dev = _zone_shrunk_deviation(
             zones[col],
             residual,
             overall_stat,
@@ -1000,8 +1202,14 @@ def weak_learner_fit(
             monotonic_constraints.get(col, 0),
             quantile=quantile,
         )
-        for col in predictor_subset
-    }
+        if col in convexity_constraints:
+            counts = np.bincount(zones[col], minlength=n_zones[col]).astype(float)
+            centers = zone_info[col][2]
+            dev = _project_convexity(dev, counts, centers, convexity_constraints[col])
+        if col in bounded_effects:
+            lower, upper = bounded_effects[col]
+            dev = np.clip(dev, lower, upper)
+        main_effects[col] = dev
 
     n = len(residual)
     effective_folds = min(cross_fit_folds, n)
@@ -1056,6 +1264,7 @@ def weak_learner_fit(
         pair_scores = {
             (a, b): _pair_interaction_score(zones[a], zones[b], screening_residual, n_zones[a], n_zones[b])
             for a, b in itertools.combinations(predictor_subset, 2)
+            if frozenset((a, b)) not in forbidden_interactions
         }
         kept_pairs = set(sorted(pair_scores, key=pair_scores.get, reverse=True)[:max_pair_interactions])
 
@@ -1067,9 +1276,16 @@ def weak_learner_fit(
             fit_pairs.add((a, b) if (a, b) in pair_scores else (b, a))
     else:
         kept_pairs = None
-        fit_pairs = list(itertools.combinations(predictor_subset, 2))
+        fit_pairs = [
+            (a, b)
+            for a, b in itertools.combinations(predictor_subset, 2)
+            if frozenset((a, b)) not in forbidden_interactions
+        ]
 
-    interactions_full = _fit_pairs(fit_pairs, zones, n_zones, main_effects, residual, shrinkage_m, quantile=quantile)
+    interactions_full = _fit_pairs(
+        fit_pairs, zones, n_zones, main_effects, residual, shrinkage_m,
+        quantile=quantile, monotonic_constraints=monotonic_constraints,
+    )
 
     if max_interaction_order >= 3:
         if not screen:
@@ -1086,6 +1302,8 @@ def weak_learner_fit(
             triple_min_gain,
             shrinkage_m,
             quantile=quantile,
+            monotonic_constraints=monotonic_constraints,
+            forbidden_pairs=forbidden_interactions,
         )
     else:
         triples = {}

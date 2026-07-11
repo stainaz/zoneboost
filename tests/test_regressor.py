@@ -521,3 +521,138 @@ def test_loss_quantile_predict_interval_raises():
     model = ZoneBoostRegressor(n_rounds=20, loss="quantile", quantile=0.9, random_state=0).fit(X, y)
     with pytest.raises(ValueError):
         model.predict_interval(X)
+
+
+def _non_monotonic_interaction_data(n=3000, seed=0):
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0, 10, n)
+    z = rng.uniform(-3, 3, n)
+    interaction_effect = np.where((x > 4) & (x < 6), -2.0, 0.0) * z
+    y = x + z + interaction_effect + rng.normal(0, 0.3, n)
+    return pd.DataFrame({"x": x, "z": z}), y
+
+
+def test_monotonic_constraints_inherited_by_interactions():
+    X, y = _non_monotonic_interaction_data()
+    model_unconstrained = ZoneBoostRegressor(
+        n_rounds=60, random_state=0, validation_fraction=0, max_zones=4
+    ).fit(X, y)
+    model_constrained = ZoneBoostRegressor(
+        n_rounds=60, random_state=0, validation_fraction=0, monotonic_constraints={"x": 1}, max_zones=4
+    ).fit(X, y)
+
+    grid = pd.DataFrame({"x": np.linspace(0.1, 9.9, 40), "z": np.full(40, 2.0)})
+    interaction_col = "x x z"
+
+    unconstrained_effect = model_unconstrained.explain(grid)[interaction_col].to_numpy()
+    constrained_effect = model_constrained.explain(grid)[interaction_col].to_numpy()
+    assert np.any(np.diff(unconstrained_effect) < -1e-9)
+    assert np.all(np.diff(constrained_effect) >= -1e-9)
+
+
+def _wiggly_data(n=3000, seed=0):
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(-5, 5, n)
+    true_effect = 0.5 * x**2 + np.where((x > -1) & (x < 1), 3.0, 0.0)
+    y = true_effect + rng.normal(0, 0.3, n)
+    return pd.DataFrame({"x": x}), y
+
+
+def test_convexity_constraints_forces_convex_main_effect_each_round():
+    # convexity_constraints projects each ROUND's own stored main-effect
+    # deviation to have non-decreasing divided-difference slopes across its
+    # own zone centroids -- checked directly on rounds_ (what the mechanism
+    # actually guarantees), since a round's own Lasso-stacked weight for
+    # this term can be negative, so the *cumulative*, multi-round curve
+    # explain() shows isn't itself guaranteed convex (a real limitation of
+    # combining per-round shape constraints with signed Lasso stacking).
+    X, y = _wiggly_data()
+    model = ZoneBoostRegressor(
+        n_rounds=60, random_state=0, validation_fraction=0, convexity_constraints={"x": 1}, max_zones=7
+    ).fit(X, y)
+    assert model.convexity_constraints_ == {"x": 1}
+    checked_any = False
+    for round_ in model.rounds_:
+        if "x" not in round_["main_effects"]:
+            continue
+        dev = round_["main_effects"]["x"]
+        centers = round_["zone_info"]["x"][2]
+        n_real = len(centers)
+        if n_real <= 2:
+            continue
+        gaps = np.diff(centers)
+        slopes = np.diff(dev[:n_real]) / gaps
+        assert np.all(np.diff(slopes) >= -1e-6)
+        checked_any = True
+    assert checked_any
+
+
+def test_convexity_constraints_default_none_reproduces_unconstrained_predictions():
+    X, y = _wiggly_data()
+    model_default = ZoneBoostRegressor(n_rounds=40, random_state=0).fit(X, y)
+    model_explicit = ZoneBoostRegressor(n_rounds=40, random_state=0, convexity_constraints=None).fit(X, y)
+    np.testing.assert_array_equal(model_default.predict(X), model_explicit.predict(X))
+
+
+def test_bounded_effects_clips_each_rounds_own_main_effect_contribution():
+    # bounded_effects clips each ROUND's own stored main-effect deviation,
+    # not the cumulative multi-round total -- so this checks rounds_
+    # directly (what the mechanism actually guarantees), not explain()'s
+    # summed-across-all-rounds column.
+    X, y = _synthetic_regression()
+    model = ZoneBoostRegressor(
+        n_rounds=60, random_state=0, validation_fraction=0, bounded_effects={"x1": (-5.0, 5.0)}
+    ).fit(X, y)
+    assert model.bounded_effects_ == {"x1": (-5.0, 5.0)}
+    checked_any = False
+    for round_ in model.rounds_:
+        if "x1" not in round_["main_effects"]:
+            continue
+        dev = round_["main_effects"]["x1"]
+        assert dev.min() >= -5.0 - 1e-9
+        assert dev.max() <= 5.0 + 1e-9
+        checked_any = True
+    assert checked_any
+
+
+def test_bounded_effects_default_none_reproduces_unconstrained_predictions():
+    X, y = _synthetic_regression()
+    model_default = ZoneBoostRegressor(n_rounds=40, random_state=0).fit(X, y)
+    model_explicit = ZoneBoostRegressor(n_rounds=40, random_state=0, bounded_effects=None).fit(X, y)
+    np.testing.assert_array_equal(model_default.predict(X), model_explicit.predict(X))
+
+
+def test_bounded_effects_invalid_bounds_raise():
+    X, y = _synthetic_regression()
+    with pytest.raises(ValueError):
+        ZoneBoostRegressor(n_rounds=10, bounded_effects={"x1": (5.0, -5.0)}).fit(X, y)
+
+
+def _forbidden_interaction_regressor_data(n=3000, seed=0):
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame({"a": rng.uniform(-3, 3, n), "b": rng.uniform(-3, 3, n)})
+    y = (X["a"] * X["b"] + rng.normal(0, 0.3, n)).to_numpy()
+    return X, y
+
+
+def test_forbidden_interactions_produces_zero_measured_interaction_importance():
+    X, y = _forbidden_interaction_regressor_data()
+    model = ZoneBoostRegressor(
+        n_rounds=60, random_state=0, validation_fraction=0, forbidden_interactions=[("a", "b")]
+    ).fit(X, y)
+    assert model.forbidden_interactions_ == {frozenset({"a", "b"})}
+    importance = model.feature_importance(X)
+    assert "a x b" not in importance.index
+
+
+def test_forbidden_interactions_default_none_reproduces_unconstrained_predictions():
+    X, y = _forbidden_interaction_regressor_data()
+    model_default = ZoneBoostRegressor(n_rounds=40, random_state=0).fit(X, y)
+    model_explicit = ZoneBoostRegressor(n_rounds=40, random_state=0, forbidden_interactions=None).fit(X, y)
+    np.testing.assert_array_equal(model_default.predict(X), model_explicit.predict(X))
+
+
+def test_forbidden_interactions_invalid_pair_raises():
+    X, y = _forbidden_interaction_regressor_data()
+    with pytest.raises(ValueError):
+        ZoneBoostRegressor(n_rounds=10, forbidden_interactions=[("a", "a")]).fit(X, y)
