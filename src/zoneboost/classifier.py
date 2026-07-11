@@ -20,7 +20,7 @@ from sklearn.utils.validation import check_is_fitted
 
 from ._common import ensure_dataframe, resolve_categorical_features
 from ._explain import explain_rounds
-from ._weak_learner import weak_learner_fit, weak_learner_score
+from ._weak_learner import _ols_scale, weak_learner_fit, weak_learner_score
 
 __all__ = ["ZoneBoostClassifier"]
 
@@ -43,7 +43,8 @@ class _LogOddsBooster:
 
     def __init__(self, n_rounds, learning_rate, row_subsample, col_subsample,
                  max_zones, min_zone_frac, categorical_features, n_iter_no_change,
-                 max_interaction_order, max_triple_interactions, triple_min_gain, random_state):
+                 max_interaction_order, max_triple_interactions, triple_min_gain,
+                 cross_fit_folds, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
         self.row_subsample = row_subsample
@@ -55,6 +56,7 @@ class _LogOddsBooster:
         self.max_interaction_order = max_interaction_order
         self.max_triple_interactions = max_triple_interactions
         self.triple_min_gain = triple_min_gain
+        self.cross_fit_folds = cross_fit_folds
         self.random_state = random_state
 
     def fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray, X_val=None, y_val=None):
@@ -85,19 +87,18 @@ class _LogOddsBooster:
             X_sub = X_fit.iloc[row_idx][col_subset]
             residual_sub = residual[row_idx]
 
-            zone_info, main_effects, interactions, triples, resid_mean = weak_learner_fit(
-                X_sub, residual_sub, col_subset, self.categorical_features,
+            zone_info, main_effects, interactions, triples, oof_raw = weak_learner_fit(
+                X_sub, residual_sub, col_subset, self.categorical_features, rng,
                 max_zones=self.max_zones, min_zone_frac=self.min_zone_frac,
                 max_interaction_order=self.max_interaction_order,
                 max_triple_interactions=self.max_triple_interactions,
                 triple_min_gain=self.triple_min_gain,
+                cross_fit_folds=self.cross_fit_folds,
             )
             raw = weak_learner_score(X_fit, zone_info, main_effects, interactions, triples)
-            raw_mean, raw_std = float(raw.mean()), float(raw.std())
-            resid_std = float(residual.std())
-            fitted_residual = (
-                resid_mean + (raw - raw_mean) * (resid_std / raw_std) if raw_std > 0 else np.zeros_like(raw)
-            )
+            raw[row_idx] = oof_raw
+            alpha, beta = _ols_scale(raw, residual)
+            fitted_residual = alpha + beta * raw
 
             current_score = current_score + self.learning_rate * fitted_residual
             self.rounds_.append(
@@ -106,19 +107,14 @@ class _LogOddsBooster:
                     "main_effects": main_effects,
                     "interactions": interactions,
                     "triples": triples,
-                    "raw_mean": raw_mean,
-                    "raw_std": raw_std,
-                    "resid_mean": resid_mean,
-                    "resid_std": resid_std,
+                    "alpha": alpha,
+                    "beta": beta,
                 }
             )
 
             if has_val:
                 val_raw = weak_learner_score(X_val, zone_info, main_effects, interactions, triples)
-                val_fitted = (
-                    resid_mean + (val_raw - raw_mean) * (resid_std / raw_std)
-                    if raw_std > 0 else np.zeros_like(val_raw)
-                )
+                val_fitted = alpha + beta * val_raw
                 current_val_score = current_val_score + self.learning_rate * val_fitted
                 self.val_logloss_.append(_log_loss(y_val, _sigmoid(current_val_score)))
 
@@ -138,11 +134,7 @@ class _LogOddsBooster:
             raw = weak_learner_score(
                 X, round_["zone_info"], round_["main_effects"], round_["interactions"], round_["triples"]
             )
-            raw_mean, raw_std = round_["raw_mean"], round_["raw_std"]
-            resid_mean, resid_std = round_["resid_mean"], round_["resid_std"]
-            fitted_residual = (
-                resid_mean + (raw - raw_mean) * (resid_std / raw_std) if raw_std > 0 else np.zeros_like(raw)
-            )
+            fitted_residual = round_["alpha"] + round_["beta"] * raw
             score = score + self.learning_rate * fitted_residual
         return _sigmoid(score)
 
@@ -210,6 +202,11 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         main-effect + pairwise fit for its three columns, expressed as a
         fraction of its strongest constituent pair's own importance. Only
         relevant when ``max_interaction_order=3``.
+    cross_fit_folds : int, default=5
+        Each round splits its rows into this many folds and scores each
+        fold only with zone tables built from the other folds, so no row's
+        own residual leaks into the zone mean it's judged against -- see
+        :class:`~zoneboost.ZoneBoostRegressor` for the full description.
     random_state : int, default=42
         Seed controlling the validation split and per-round subsampling.
 
@@ -259,6 +256,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         max_interaction_order: int = 2,
         max_triple_interactions: int = 5,
         triple_min_gain: float = 0.05,
+        cross_fit_folds: int = 5,
         random_state: int = 42,
     ):
         self.n_rounds = n_rounds
@@ -273,6 +271,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.max_interaction_order = max_interaction_order
         self.max_triple_interactions = max_triple_interactions
         self.triple_min_gain = triple_min_gain
+        self.cross_fit_folds = cross_fit_folds
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -291,6 +290,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             max_interaction_order=self.max_interaction_order,
             max_triple_interactions=self.max_triple_interactions,
             triple_min_gain=self.triple_min_gain,
+            cross_fit_folds=self.cross_fit_folds,
             random_state=self.random_state,
         )
 

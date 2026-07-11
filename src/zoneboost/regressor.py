@@ -15,7 +15,7 @@ from sklearn.utils.validation import check_is_fitted
 
 from ._common import ensure_dataframe, resolve_categorical_features
 from ._explain import explain_rounds
-from ._weak_learner import weak_learner_fit, weak_learner_score
+from ._weak_learner import _ols_scale, weak_learner_fit, weak_learner_score
 
 __all__ = ["ZoneBoostRegressor"]
 
@@ -119,6 +119,19 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         scale) -- to be judged genuine higher-order structure rather than
         something pairwise interactions already explain. Only relevant
         when ``max_interaction_order=3``.
+    cross_fit_folds : int, default=5
+        Every zone's cell mean is otherwise computed from the same rows a
+        round then scores -- each row's own residual partly determines the
+        zone mean it's then judged against, a leakage that biases the
+        boosting trajectory optimistic about sparse zones (small
+        ``min_zone_frac`` continuous zones, high-cardinality categoricals).
+        Each round instead splits its (already row/column-subsampled) rows
+        into this many folds and scores each fold only with zone tables
+        built from the *other* folds -- the same fix CatBoost's ordered
+        boosting applies to target statistics. Only the training signal is
+        affected; the tables stored in ``rounds_`` and used by `predict`
+        still use every available row. Falls back to no cross-fitting if a
+        round's row count is smaller than 2 folds.
     random_state : int, default=42
         Seed controlling the validation split and the per-round row/column
         subsampling.
@@ -138,10 +151,12 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
     rounds_ : list
         One entry per fitted boosting round, each a plain dict with keys
         ``"zone_info"``, ``"main_effects"``, ``"interactions"``,
-        ``"triples"`` (empty unless ``max_interaction_order=3``),
-        ``"raw_mean"``, ``"raw_std"``, ``"resid_mean"``, ``"resid_std"``.
-        Every value is plain data (dicts of numpy arrays or floats) --
-        fully inspectable, nothing hidden in an opaque model object.
+        ``"triples"`` (empty unless ``max_interaction_order=3``), and
+        ``"alpha"``/``"beta"`` -- the round's fitted intercept/slope
+        (``fitted_residual = alpha + beta * raw``, an ordinary-least-squares
+        fit of the residual on that round's raw zone-lookup score). Every
+        value is plain data (dicts of numpy arrays or floats) -- fully
+        inspectable, nothing hidden in an opaque model object.
     best_n_rounds_ : int
         The number of rounds actually used by `predict` (the early-stopped
         count, or ``n_rounds`` if early stopping was disabled or never
@@ -188,6 +203,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         max_interaction_order: int = 2,
         max_triple_interactions: int = 5,
         triple_min_gain: float = 0.05,
+        cross_fit_folds: int = 5,
         random_state: int = 42,
     ):
         # scikit-learn convention: __init__ only assigns parameters as-is,
@@ -205,6 +221,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.max_interaction_order = max_interaction_order
         self.max_triple_interactions = max_triple_interactions
         self.triple_min_gain = triple_min_gain
+        self.cross_fit_folds = cross_fit_folds
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -276,23 +293,32 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             X_sub = X_fit.iloc[row_idx][col_subset]
             residual_sub = residual[row_idx]
 
-            zone_info, main_effects, interactions, triples, resid_mean = weak_learner_fit(
+            zone_info, main_effects, interactions, triples, oof_raw = weak_learner_fit(
                 X_sub,
                 residual_sub,
                 col_subset,
                 self.categorical_features_,
+                rng,
                 max_zones=self.max_zones,
                 min_zone_frac=self.min_zone_frac,
                 max_interaction_order=self.max_interaction_order,
                 max_triple_interactions=self.max_triple_interactions,
                 triple_min_gain=self.triple_min_gain,
+                cross_fit_folds=self.cross_fit_folds,
             )
             raw = weak_learner_score(X_fit, zone_info, main_effects, interactions, triples)
-            raw_mean, raw_std = float(raw.mean()), float(raw.std())
-            resid_std = float(residual.std())
-            fitted_residual = (
-                resid_mean + (raw - raw_mean) * (resid_std / raw_std) if raw_std > 0 else np.zeros_like(raw)
-            )
+            # The round's own (sub)sampled rows would otherwise be scored by a
+            # table partly built from their own residual -- replace exactly
+            # those rows with their honest, cross-fitted score. Rows this
+            # round didn't sample were never part of the table, so they're
+            # already leak-free and left untouched.
+            raw[row_idx] = oof_raw
+            # OLS, not a std-ratio rescale: once raw is honestly cross-fitted,
+            # its variance can legitimately collapse toward zero when a round
+            # finds no real signal, and dividing by a near-zero std would
+            # explode the correction instead of correctly shrinking it.
+            alpha, beta = _ols_scale(raw, residual)
+            fitted_residual = alpha + beta * raw
 
             current_pred = current_pred + self.learning_rate * fitted_residual
             self.rounds_.append(
@@ -301,21 +327,15 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                     "main_effects": main_effects,
                     "interactions": interactions,
                     "triples": triples,
-                    "raw_mean": raw_mean,
-                    "raw_std": raw_std,
-                    "resid_mean": resid_mean,
-                    "resid_std": resid_std,
+                    "alpha": alpha,
+                    "beta": beta,
                 }
             )
             self.train_rmse_.append(float(np.sqrt(np.mean((y_fit - current_pred) ** 2))))
 
             if has_val:
                 val_raw = weak_learner_score(X_val, zone_info, main_effects, interactions, triples)
-                val_fitted = (
-                    resid_mean + (val_raw - raw_mean) * (resid_std / raw_std)
-                    if raw_std > 0
-                    else np.zeros_like(val_raw)
-                )
+                val_fitted = alpha + beta * val_raw
                 current_val_pred = current_val_pred + self.learning_rate * val_fitted
                 self.val_rmse_.append(float(np.sqrt(np.mean((y_val - current_val_pred) ** 2))))
 
@@ -337,11 +357,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             raw = weak_learner_score(
                 X, round_["zone_info"], round_["main_effects"], round_["interactions"], round_["triples"]
             )
-            raw_mean, raw_std = round_["raw_mean"], round_["raw_std"]
-            resid_mean, resid_std = round_["resid_mean"], round_["resid_std"]
-            fitted_residual = (
-                resid_mean + (raw - raw_mean) * (resid_std / raw_std) if raw_std > 0 else np.zeros_like(raw)
-            )
+            fitted_residual = round_["alpha"] + round_["beta"] * raw
             pred = pred + self.learning_rate * fitted_residual
         return pred
 

@@ -95,6 +95,7 @@
     { title: "Missing Values", crumb: "How It Works", url: "how-it-works.html#missing-values" },
     { title: "From Regression to Classification", crumb: "How It Works", url: "how-it-works.html#classification" },
     { title: "Adaptive Interaction Order", crumb: "How It Works", url: "how-it-works.html#adaptive-interaction-order" },
+    { title: "Cross-Fitted Cell Means", crumb: "How It Works", url: "how-it-works.html#cross-fitted-cell-means" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },

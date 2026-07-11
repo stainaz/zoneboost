@@ -155,6 +155,42 @@
     <code>" x "</code> — e.g. <code>"price x location x season"</code> — and its
     contribution still sums exactly into the prediction alongside every other term.</p>
 
+    <h2 id="cross-fitted-cell-means">Cross-Fitted Cell Means</h2>
+    <p>Every zone's mean (main effect, pairwise, or 3-way) is otherwise computed from the
+    same rows a round then scores — each row's own residual partly determines the zone
+    mean it's then judged against, the same in-sample leakage CatBoost's ordered boosting
+    was built to fix. Left alone, this biases the boosting trajectory optimistic about
+    sparse zones (small <code>min_zone_frac</code> continuous zones, high-cardinality
+    categoricals), since a zone with a handful of rows can end up mostly reconstructing
+    its own members' values rather than reflecting real structure.</p>
+    <p>Each round instead splits its (already row/column-subsampled) rows into
+    <code>cross_fit_folds</code> folds (default 5) and scores each fold only with zone
+    tables built from the <em>other</em> folds — no row is ever scored with a table that
+    included its own value. Only the training signal is affected; the tables actually
+    stored in <code>rounds_</code> and used by <code>predict</code>/<code>explain</code>
+    still use every available row, since new data was never part of the leakage to begin
+    with. This is on by default, not a <code>max_interaction_order</code>-style opt-in —
+    it's a correctness fix, not a feature.</p>
+    <div class="note">
+      Cross-fitting also exposed a related fragility: each round's raw zone-lookup score
+      is now rescaled to the residual's own units via an <strong>ordinary-least-squares
+      fit</strong> (<code>fitted = alpha + beta * raw</code>) rather than a std-ratio
+      rescale. A std-ratio rescale forces <code>raw</code>'s spread to match the
+      residual's regardless of how well the two actually correlate — harmless when
+      <code>raw</code> is in-sample-inflated (as it always was pre-cross-fitting), but
+      once cross-fitting honestly reveals a round found no real signal, <code>raw</code>'s
+      variance can legitimately collapse toward zero, and dividing by a near-zero value
+      amplifies noise instead of correctly damping it. OLS doesn't have this failure mode:
+      with weak or no correlation, <code>beta</code> is naturally small rather than
+      amplified.
+    </div>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>cross_fit_folds</code></td><td><code>5</code></td><td>Number of folds used to compute each round's training signal honestly. Falls back to no cross-fitting if a round's row count is smaller than 2 folds.</td></tr>
+      </tbody>
+    </table>
+
     <h2 id="how-it-compares">How It Compares</h2>
     <p>zoneboost sits at the intersection of additive models (GAMs), boosting frameworks
     (like XGBoost), and rule/bin-based models — combining the interpretable, additive

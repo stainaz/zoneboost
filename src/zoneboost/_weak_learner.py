@@ -81,23 +81,116 @@ def _term_importance(deviation: np.ndarray, confidence: np.ndarray) -> float:
     return float(np.mean(np.abs(deviation) * confidence))
 
 
-def _residualize(raw: np.ndarray, residual: np.ndarray) -> np.ndarray:
-    """Ordinary-least-squares residual of ``residual`` regressed on ``raw``
-    (a single predictor): ``residual - (alpha + beta * raw)``, the
-    variance-minimizing linear fit. Unlike a std-ratio rescale (which forces
-    ``raw``'s spread to match ``residual``'s regardless of how well the two
-    actually correlate, and can therefore *inflate* variance when ``raw``
-    is only weakly related to ``residual``), this is a proper "partial out"
-    step: its output variance is guaranteed no larger than
-    ``residual``'s. Used to measure how much of a candidate triple's
-    columns' signal is *not already captured* by main effects + pairwise
-    interactions alone."""
+def _ols_scale(raw: np.ndarray, residual: np.ndarray) -> tuple:
+    """Ordinary-least-squares fit of ``residual`` on ``raw`` (a single
+    predictor): returns ``(alpha, beta)`` minimizing
+    ``sum((residual - (alpha + beta*raw))**2)``.
+
+    This replaces a std-ratio rescale (``resid_mean + (raw - raw_mean) *
+    (resid_std / raw_std)``), which forces ``raw``'s spread to match
+    ``residual``'s regardless of how well the two actually correlate.  That
+    is safe as long as ``raw`` is itself in-sample-inflated (which it always
+    was before cross-fitting), but once ``raw`` is honestly cross-fitted and
+    carries little real signal, its variance can legitimately collapse
+    toward zero -- and dividing by a near-zero ``raw_std`` explodes the
+    correction instead of correctly producing "this round found nothing,
+    barely move the prediction." OLS doesn't have this failure mode: with
+    weak or no correlation, ``beta`` is naturally small, not amplified.
+    """
     raw_mean, raw_var = float(raw.mean()), float(raw.var())
     if raw_var <= 0:
-        return residual - float(residual.mean())
+        return float(residual.mean()), 0.0
     beta = float(np.mean((raw - raw_mean) * (residual - residual.mean()))) / raw_var
     alpha = float(residual.mean()) - beta * raw_mean
+    return alpha, beta
+
+
+def _residualize(raw: np.ndarray, residual: np.ndarray) -> np.ndarray:
+    """The part of ``residual`` left over after regressing out ``raw``
+    (see :func:`_ols_scale`) -- a proper "partial out" step, whose output
+    variance is guaranteed no larger than ``residual``'s. Used to measure
+    how much of a candidate triple's columns' signal is *not already
+    captured* by main effects + pairwise interactions alone."""
+    alpha, beta = _ols_scale(raw, residual)
     return residual - (alpha + beta * raw)
+
+
+def _make_folds(rng: np.random.Generator, n: int, n_folds: int) -> np.ndarray:
+    """Randomly assign each of ``n`` rows to one of ``n_folds`` folds, as
+    evenly as possible. Every fold index is guaranteed non-empty as long as
+    ``n_folds <= n``."""
+    perm = rng.permutation(n)
+    fold_ids = np.empty(n, dtype=int)
+    fold_ids[perm] = np.arange(n) % n_folds
+    return fold_ids
+
+
+def _cross_fitted_raw(
+    zones: dict,
+    n_zones: dict,
+    residual: np.ndarray,
+    main_effect_keys: list,
+    interaction_keys: list,
+    triple_keys: list,
+    fold_ids: np.ndarray,
+    n_folds: int,
+) -> np.ndarray:
+    """Leakage-free version of what ``weak_learner_score`` would compute for
+    the exact rows used to build this round's tables: for each fold, every
+    term's ``(deviation, confidence)`` is recomputed from the *other* folds'
+    rows only (reusing ``_zone_deviation_confidence``/
+    ``_pair_deviation_confidence``/``_triple_deviation_confidence`` unchanged
+    on fold-restricted slices), then used to score that fold's own held-out
+    rows. No row is ever scored with a table that included its own value --
+    the CatBoost ordered-target-statistics fix, applied to zoneboost's zone
+    grids. Which terms exist (main effects / which pairs / which triples) is
+    decided once from the full subsample elsewhere; this only recomputes the
+    numeric cell means used to score training rows honestly.
+    """
+    n = len(residual)
+    n_terms = len(main_effect_keys) + len(interaction_keys) + len(triple_keys)
+    contributions = np.empty((n, n_terms))
+
+    for k in range(n_folds):
+        out_mask = fold_ids != k
+        in_mask = fold_ids == k
+        if not np.any(in_mask):
+            continue
+        overall_mean_k = float(residual[out_mask].mean())
+
+        col = 0
+        for name in main_effect_keys:
+            dev, conf = _zone_deviation_confidence(
+                zones[name][out_mask], residual[out_mask], overall_mean_k, n_zones[name]
+            )
+            z_in = zones[name][in_mask]
+            contributions[in_mask, col] = dev[z_in] * conf[z_in]
+            col += 1
+
+        for a, b in interaction_keys:
+            dev, conf = _pair_deviation_confidence(
+                zones[a][out_mask], zones[b][out_mask], residual[out_mask], overall_mean_k, n_zones[a], n_zones[b]
+            )
+            za_in, zb_in = zones[a][in_mask], zones[b][in_mask]
+            contributions[in_mask, col] = dev[za_in, zb_in] * conf[za_in, zb_in]
+            col += 1
+
+        for a, b, c in triple_keys:
+            dev, conf = _triple_deviation_confidence(
+                zones[a][out_mask],
+                zones[b][out_mask],
+                zones[c][out_mask],
+                residual[out_mask],
+                overall_mean_k,
+                n_zones[a],
+                n_zones[b],
+                n_zones[c],
+            )
+            za_in, zb_in, zc_in = zones[a][in_mask], zones[b][in_mask], zones[c][in_mask]
+            contributions[in_mask, col] = dev[za_in, zb_in, zc_in] * conf[za_in, zb_in, zc_in]
+            col += 1
+
+    return contributions.mean(axis=1)
 
 
 def _get_pair(interactions: dict, x: str, y: str):
@@ -217,11 +310,13 @@ def weak_learner_fit(
     residual: np.ndarray,
     predictor_subset: list,
     categorical_features: set,
+    rng: np.random.Generator,
     max_zones: int = 7,
     min_zone_frac: float = 0.02,
     max_interaction_order: int = 2,
     max_triple_interactions: int = 5,
     triple_min_gain: float = 0.05,
+    cross_fit_folds: int = 5,
 ):
     """Fit one boosting round's weak learner: zone info (adaptive-continuous
     or exact-categorical per column), main effects, interactions, and
@@ -229,8 +324,18 @@ def weak_learner_fit(
     ALL derived fresh from this round's (already row/column-subsampled)
     residual.
 
+    Also returns ``oof_raw``: an honest, cross-fitted version of this
+    round's own raw score for exactly these rows, used by the caller to
+    replace the (leaky, in-sample) score it would otherwise compute for the
+    same rows when updating the running prediction -- see
+    :func:`_cross_fitted_raw`.
+
     Parameters
     ----------
+    rng : numpy.random.Generator
+        Used only to assign rows to cross-fitting folds -- the same
+        generator the caller already uses for row/column subsampling, so
+        results stay fully reproducible under a fixed ``random_state``.
     max_interaction_order : int, default=2
         ``2`` fits main effects + pairwise interactions only (identical to
         every prior release). ``3`` additionally attempts a bounded search
@@ -247,6 +352,10 @@ def weak_learner_fit(
         against the residual's raw scale) -- to be judged genuine
         higher-order structure rather than something pairwise interactions
         already explain.
+    cross_fit_folds : int, default=5
+        Number of folds used to compute ``oof_raw`` honestly (see above).
+        Falls back to the in-sample score (no cross-fitting) if the round's
+        row count is smaller than 2 folds.
 
     Returns
     -------
@@ -260,8 +369,9 @@ def weak_learner_fit(
         ``(col_a, col_b, col_c)`` -> ``(deviation, confidence)`` 3D arrays.
         Empty unless ``max_interaction_order >= 3`` and evidence clears
         ``triple_min_gain``.
-    overall_mean : float
-        The residual's mean this round -- the weak learner's own baseline.
+    oof_raw : ndarray
+        Cross-fitted raw score for this round's own rows, aligned to
+        ``residual``'s order.
     """
     zone_info = {
         c: _column_zone_info(X[c], residual, c in categorical_features, max_zones, min_zone_frac)
@@ -292,7 +402,24 @@ def weak_learner_fit(
         if max_interaction_order >= 3
         else {}
     )
-    return zone_info, main_effects, interactions, triples, overall_mean
+
+    n = len(residual)
+    effective_folds = min(cross_fit_folds, n)
+    if effective_folds < 2:
+        oof_raw = weak_learner_score(X, zone_info, main_effects, interactions, triples)
+    else:
+        fold_ids = _make_folds(rng, n, effective_folds)
+        oof_raw = _cross_fitted_raw(
+            zones,
+            n_zones,
+            residual,
+            list(main_effects.keys()),
+            list(interactions.keys()),
+            list(triples.keys()),
+            fold_ids,
+            effective_folds,
+        )
+    return zone_info, main_effects, interactions, triples, oof_raw
 
 
 def weak_learner_score(

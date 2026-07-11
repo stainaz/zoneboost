@@ -160,6 +160,46 @@ def test_max_interaction_order_2_is_default_and_never_produces_triples():
     assert all(round_["triples"] == {} for round_ in model.rounds_)
 
 
+def test_cross_fitting_does_not_overfit_pure_noise_high_cardinality_categorical():
+    # Classic leakage-prone shape: a high-cardinality categorical with only
+    # a handful of rows per zone, against a target with zero real signal.
+    # Without cross-fitted cell means, each sparse zone's mean partly
+    # encodes its own training rows' noise, which the boosting loop would
+    # chase round after round. With it, the model shouldn't find spurious
+    # structure in pure noise.
+    rng = np.random.default_rng(0)
+    n_train, n_test, n_categories = 600, 300, 150
+    X_train = pd.DataFrame({"id": rng.integers(0, n_categories, n_train).astype(str)})
+    X_test = pd.DataFrame({"id": rng.integers(0, n_categories, n_test).astype(str)})
+    y_train = rng.normal(size=n_train)
+    y_test = rng.normal(size=n_test)
+
+    model = ZoneBoostRegressor(n_rounds=100, categorical_features=["id"], random_state=0).fit(X_train, y_train)
+    test_r2 = model.score(X_test, y_test)
+    assert test_r2 > -0.5
+
+
+def test_ols_rescale_stays_stable_on_pure_noise_without_early_stopping():
+    # The decisive case: with early stopping disabled, all rounds are
+    # forced through unchecked. A std-ratio rescale explodes here once
+    # cross-fitting honestly reveals near-zero signal (raw_std -> 0,
+    # dividing by it amplifies noise instead of shrinking to it); OLS
+    # naturally produces a small beta instead, keeping the model stable.
+    rng = np.random.default_rng(0)
+    n_train, n_test, n_categories = 600, 300, 150
+    X_train = pd.DataFrame({"id": rng.integers(0, n_categories, n_train).astype(str)})
+    X_test = pd.DataFrame({"id": rng.integers(0, n_categories, n_test).astype(str)})
+    y_train = rng.normal(size=n_train)
+    y_test = rng.normal(size=n_test)
+
+    model = ZoneBoostRegressor(
+        n_rounds=100, categorical_features=["id"], random_state=0, validation_fraction=0
+    ).fit(X_train, y_train)
+    assert model.best_n_rounds_ == 100  # confirms early stopping really was off
+    test_r2 = model.score(X_test, y_test)
+    assert test_r2 > -0.5
+
+
 def test_max_interaction_order_3_improves_fit_on_genuine_triple_interaction():
     # col_subsample=1.0: with only 3 predictors, the default 0.7 subsample
     # rounds down to 2 columns per round, which never gives a 3-way search

@@ -126,6 +126,38 @@ clears the bar in a given round, no triples are added that round — this is
 why the default (`max_interaction_order=2`) produces identical models to
 every prior release: the 3-way search is strictly opt-in.
 
+### Cross-fitted cell means
+
+Every zone's mean (main effect, pairwise, or 3-way) is otherwise computed
+from the same rows a round then scores — each row's own residual partly
+determines the zone mean it's then judged against, the same in-sample
+leakage CatBoost's ordered boosting was built to fix. Left alone, this
+biases the boosting trajectory optimistic about sparse zones (small
+`min_zone_frac` continuous zones, high-cardinality categoricals), since a
+zone with a handful of rows can end up mostly reconstructing its own
+members' values rather than reflecting real structure.
+
+Each round instead splits its (already row/column-subsampled) rows into
+`cross_fit_folds` folds (default 5) and scores each fold only with zone
+tables built from the *other* folds — no row is ever scored with a table
+that included its own value. Only the training signal is affected; the
+tables actually stored in `rounds_` and used by `predict`/`explain` still
+use every available row, since new data was never part of the leakage to
+begin with. This is on by default (not a `max_interaction_order`-style
+opt-in) — it's a correctness fix, not a feature.
+
+Cross-fitting also exposed a related fragility worth knowing about: each
+round's raw zone-lookup score is rescaled to the residual's own units via
+an **ordinary-least-squares fit** (`fitted = alpha + beta * raw`) rather
+than a std-ratio rescale. A std-ratio rescale forces `raw`'s spread to
+match the residual's regardless of how well the two actually correlate —
+harmless when `raw` is in-sample-inflated (as it always was pre-cross-fitting),
+but once cross-fitting honestly reveals a round found no real signal,
+`raw`'s variance can legitimately collapse toward zero, and dividing by a
+near-zero value amplifies noise instead of correctly damping it. OLS
+doesn't have this failure mode: with weak or no correlation, `beta` is
+naturally small rather than amplified.
+
 ## Parameters
 
 Identical parameter set on both estimators.
@@ -144,6 +176,7 @@ Identical parameter set on both estimators.
 | `max_interaction_order` | 2 | Set to 3 to enable an adaptive search for 3-way interactions |
 | `max_triple_interactions` | 5 | Cap on how many 3-way terms a single round may add (only relevant when `max_interaction_order=3`) |
 | `triple_min_gain` | 0.05 | Minimum residual-explained evidence, relative to a candidate's strongest constituent pair, required to keep a 3-way interaction |
+| `cross_fit_folds` | 5 | Number of folds used to compute each round's training signal honestly (see "Cross-fitted cell means" above); falls back to no cross-fitting if a round's row count is smaller than 2 folds |
 | `random_state` | 42 | Seed for the validation split and subsampling |
 
 **On `max_zones` and `categorical_features`:** if a variable genuinely has
@@ -188,8 +221,10 @@ After `fit`, `ZoneBoostRegressor` exposes (among others):
 
 - `rounds_` — one entry per boosting round, each a plain dict with keys
   `"zone_info"`, `"main_effects"`, `"interactions"`, `"triples"` (empty
-  unless `max_interaction_order=3`), and that round's rescaling stats.
-  Nothing hidden in an opaque object.
+  unless `max_interaction_order=3`), and `"alpha"`/`"beta"` — the round's
+  fitted intercept/slope (`fitted_residual = alpha + beta * raw`, an OLS fit
+  of the residual on that round's raw zone-lookup score). Nothing hidden in
+  an opaque object.
 - `best_n_rounds_` — the round count actually used by `predict`.
 - `val_rmse_` / `train_rmse_` — RMSE after each round.
 - `categorical_features_` — the resolved set of categorical columns

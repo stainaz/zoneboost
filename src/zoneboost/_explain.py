@@ -4,19 +4,20 @@ Unlike SHAP or LIME, this isn't a post-hoc approximation of a black-box
 model -- it's an algebraic decomposition of what the boosting loop already
 computed. Each round's contribution to the running score is
 
-    resid_mean + (raw - raw_mean) * scale,   scale = resid_std / raw_std
+    alpha + beta * raw
 
 where raw is the *mean* of that round's per-term zone lookups (main
-effects + interactions + any adaptively-selected 3-way interactions).
-Because mean is linear, this expands exactly into
+effects + interactions + any adaptively-selected 3-way interactions), and
+(alpha, beta) is the round's own OLS fit of the residual on raw (see
+``_weak_learner._ols_scale``). Because mean is linear, this expands exactly
+into
 
-    round_baseline + sum_i( (scale / n_terms) * term_i )
+    round_baseline + sum_i( (beta / n_terms) * term_i )
 
-with round_baseline = resid_mean - scale * raw_mean, a fixed per-round
-constant. Summing that across rounds gives, for every row, a set of
-per-term contributions that add up EXACTLY to the model's prediction (or,
-for the classifier, to the pre-sigmoid log-odds score) -- not an estimate
-of it.
+with round_baseline = alpha, a fixed per-round constant. Summing that
+across rounds gives, for every row, a set of per-term contributions that
+add up EXACTLY to the model's prediction (or, for the classifier, to the
+pre-sigmoid log-odds score) -- not an estimate of it.
 """
 
 from __future__ import annotations
@@ -61,25 +62,23 @@ def explain_rounds(X: pd.DataFrame, rounds: list, baseline: float, learning_rate
         main_effects = round_["main_effects"]
         interactions = round_["interactions"]
         triples = round_["triples"]
-        raw_mean, raw_std = round_["raw_mean"], round_["raw_std"]
-        resid_mean, resid_std = round_["resid_mean"], round_["resid_std"]
+        alpha, beta = round_["alpha"], round_["beta"]
 
         n_terms = len(main_effects) + len(interactions) + len(triples)
         if n_terms == 0:
             continue
-        scale = (resid_std / raw_std) if raw_std > 0 else 0.0
-        baseline_total += learning_rate * (resid_mean - scale * raw_mean)
+        baseline_total += learning_rate * alpha
 
         for col, (deviation, confidence) in main_effects.items():
             z = _column_zone_index(X[col], zone_info[col])
-            share = learning_rate * (scale / n_terms) * (deviation[z] * confidence[z])
+            share = learning_rate * (beta / n_terms) * (deviation[z] * confidence[z])
             term_totals.setdefault(col, np.zeros(n))
             term_totals[col] += share
 
         for (a, b), (deviation, confidence) in interactions.items():
             za = _column_zone_index(X[a], zone_info[a])
             zb = _column_zone_index(X[b], zone_info[b])
-            share = learning_rate * (scale / n_terms) * (deviation[za, zb] * confidence[za, zb])
+            share = learning_rate * (beta / n_terms) * (deviation[za, zb] * confidence[za, zb])
             # Canonicalize: a pair's fit order varies round to round (each
             # round samples/orders columns independently), so without
             # sorting, "A x B" and "B x A" would fragment into separate
@@ -92,7 +91,7 @@ def explain_rounds(X: pd.DataFrame, rounds: list, baseline: float, learning_rate
             za = _column_zone_index(X[a], zone_info[a])
             zb = _column_zone_index(X[b], zone_info[b])
             zc = _column_zone_index(X[c], zone_info[c])
-            share = learning_rate * (scale / n_terms) * (deviation[za, zb, zc] * confidence[za, zb, zc])
+            share = learning_rate * (beta / n_terms) * (deviation[za, zb, zc] * confidence[za, zb, zc])
             key = " x ".join(sorted((a, b, c)))
             term_totals.setdefault(key, np.zeros(n))
             term_totals[key] += share
