@@ -213,6 +213,10 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         found a better round than the last).
     val_rmse_ : list of float
         Held-out RMSE after each round (empty if ``validation_fraction=0``).
+    conformal_scores_ : ndarray or None
+        Sorted absolute residuals on the held-out validation split, at
+        ``best_n_rounds_`` -- the nonconformity scores :meth:`predict_interval`
+        draws its margin from. ``None`` if ``validation_fraction=0``.
 
     Examples
     --------
@@ -412,6 +416,17 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                         break
 
         self.best_n_rounds_ = int(np.argmin(self.val_rmse_)) + 1 if has_val and self.val_rmse_ else len(self.rounds_)
+
+        # Split-conformal calibration: nonconformity scores from the same
+        # held-out validation split already used for early stopping, at the
+        # exact round count `predict` will use by default -- see
+        # `predict_interval`. Never computed from training rows.
+        if has_val:
+            val_pred_at_best = self._raw_predict(X_val, self.best_n_rounds_)
+            self.conformal_scores_ = np.sort(np.abs(y_val - val_pred_at_best))
+        else:
+            self.conformal_scores_ = None
+
         return self
 
     def _raw_predict(self, X: pd.DataFrame, n_rounds: int) -> np.ndarray:
@@ -444,6 +459,48 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         n_rounds = n_rounds if n_rounds is not None else self.best_n_rounds_
         X = self._ensure_dataframe(X)
         return self._raw_predict(X, n_rounds)
+
+    def predict_interval(self, X, alpha: float = 0.1) -> tuple:
+        """Split-conformal prediction interval: a constant-width margin
+        around ``predict(X)`` with a distribution-free marginal coverage
+        guarantee -- ``P(y in interval) >= 1 - alpha``, assuming the held-out
+        validation rows and future ``X`` rows are exchangeable (the standard
+        split-conformal assumption; see Vovk et al. / Lei et al.).
+
+        The margin is a *fixed* quantile of nonconformity scores (absolute
+        residuals) measured on the same held-out ``validation_fraction``
+        split already used for early stopping -- never training rows, so the
+        margin isn't optimistic about how well the model fits its own
+        training data. Reusing that same split (rather than a third,
+        separate calibration split) is a disclosed simplification: the round
+        count `predict` uses was itself chosen to minimize error on this
+        exact set, which can understate the true margin slightly. Requires
+        ``validation_fraction > 0`` at `fit` time.
+
+        Parameters
+        ----------
+        X : DataFrame or array-like of shape (n_samples, n_features)
+        alpha : float, default=0.1
+            Miscoverage rate -- e.g. ``0.1`` targets 90% coverage.
+
+        Returns
+        -------
+        lower, upper : ndarray of shape (n_samples,)
+        """
+        check_is_fitted(self, "rounds_")
+        if self.conformal_scores_ is None:
+            raise ValueError(
+                "predict_interval requires validation_fraction > 0 at fit time "
+                "(no held-out data to calibrate a conformal margin against)."
+            )
+        if not 0 < alpha < 1:
+            raise ValueError(f"alpha must be in (0, 1), got {alpha!r}")
+
+        point_pred = self.predict(X)
+        n = len(self.conformal_scores_)
+        k = min(int(np.ceil((n + 1) * (1 - alpha))), n)
+        margin = self.conformal_scores_[k - 1]
+        return point_pred - margin, point_pred + margin
 
     def explain(self, X, n_rounds: int = None) -> pd.DataFrame:
         """Exact per-row, per-term prediction attribution -- not a SHAP/LIME

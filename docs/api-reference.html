@@ -44,7 +44,8 @@
   <article class="docs-content">
     <h1>API Reference</h1>
     <p class="subtitle">Identical parameter set on <code>ZoneBoostRegressor</code> and
-    <code>ZoneBoostClassifier</code>.</p>
+    <code>ZoneBoostClassifier</code>, except <code>calibrate</code>
+    (classifier-only).</p>
 
     <h2 id="parameters">Parameters</h2>
     <table>
@@ -67,6 +68,7 @@
         <tr><td><code>stacking_alpha</code></td><td><code>0.01</code></td><td>Lasso regularization strength for combining a round's terms — see <a href="how-it-works.html#lasso-stacking">Lasso Stacking</a></td></tr>
         <tr><td><code>monotonic_constraints</code></td><td><code>None</code></td><td><code>{column: +1 or -1}</code> — forces a continuous column's main effect to be non-decreasing/non-increasing; opt-in — see <a href="how-it-works.html#monotonic-constraints">Monotonic Constraints</a></td></tr>
         <tr><td><code>max_pair_interactions</code></td><td><code>None</code></td><td>Cap on how many pairwise interactions a round keeps, ranked by importance; opt-in — see <a href="how-it-works.html#pair-screening">Pair Screening</a></td></tr>
+        <tr><td><code>calibrate</code></td><td><code>False</code></td><td><strong>Classifier only.</strong> Isotonic-recalibrate <code>predict_proba</code>; opt-in — see <a href="how-it-works.html#probability-calibration">Probability Calibration</a></td></tr>
         <tr><td><code>random_state</code></td><td><code>42</code></td><td>Seed for the validation split and subsampling</td></tr>
       </tbody>
     </table>
@@ -80,6 +82,7 @@
         <tr><td><code>val_rmse_</code> / <code>train_rmse_</code></td><td>RMSE after each round.</td></tr>
         <tr><td><code>categorical_features_</code></td><td>The resolved set of categorical columns (declared ∪ auto-detected).</td></tr>
         <tr><td><code>monotonic_constraints_</code></td><td>The resolved <code>{column: +1 or -1}</code> dict actually in effect (categorical columns dropped).</td></tr>
+        <tr><td><code>conformal_scores_</code></td><td>Sorted absolute residuals on the held-out validation split at <code>best_n_rounds_</code> — the nonconformity scores <code>predict_interval</code> draws its margin from (<code>None</code> if <code>validation_fraction=0</code>). See <a href="how-it-works.html#prediction-intervals">Prediction Intervals</a>.</td></tr>
       </tbody>
     </table>
 
@@ -89,7 +92,7 @@
       <tbody>
         <tr><td><code>classes_</code></td><td>Distinct class labels seen during <code>fit</code>.</td></tr>
         <tr><td><code>multiclass_</code></td><td>Whether one-vs-rest (3+ classes) was used.</td></tr>
-        <tr><td><code>booster_</code> (binary) or <code>boosters_</code> (3+ classes)</td><td>An internal log-odds booster (or a <code>{class_label: booster}</code> dict) — each with its own <code>rounds_</code> and <code>best_n_rounds_</code>, same plain-data structure as the regressor's.</td></tr>
+        <tr><td><code>booster_</code> (binary) or <code>boosters_</code> (3+ classes)</td><td>An internal log-odds booster (or a <code>{class_label: booster}</code> dict) — each with its own <code>rounds_</code>, <code>best_n_rounds_</code>, and <code>calibrator_</code> (the fitted isotonic calibrator, or <code>None</code> if <code>calibrate=False</code>) — same plain-data structure as the regressor's.</td></tr>
       </tbody>
     </table>
 

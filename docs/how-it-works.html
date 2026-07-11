@@ -369,6 +369,52 @@
       pair — the exact same behavior as before this change, verified bit-for-bit.
     </div>
 
+    <h2 id="prediction-intervals">Prediction Intervals (Regressor)</h2>
+    <p><code>ZoneBoostRegressor.predict_interval(X, alpha=0.1)</code> returns a
+    constant-width <code>(lower, upper)</code> band around <code>predict(X)</code> via
+    <strong>split conformal prediction</strong> — a distribution-free marginal coverage
+    guarantee, <code>P(y in interval) &gt;= 1 - alpha</code>, assuming exchangeability
+    (Vovk / Lei et al.'s standard split-conformal setup), not a heteroscedasticity-aware
+    or locally-adaptive variant. The margin is the finite-sample-corrected
+    <code>ceil((n+1)*(1-alpha))</code>-th smallest absolute residual measured on the same
+    held-out <code>validation_fraction</code> split already used for early stopping —
+    never training rows. Purely additive: no new <code>__init__</code> parameter, and
+    every existing method's output is unaffected. Requires
+    <code>validation_fraction &gt; 0</code>; raises <code>ValueError</code>
+    otherwise.</p>
+    <div class="note">
+      On a synthetic noisy quadratic, <code>alpha=0.1</code> achieved ~90.2% empirical
+      coverage on held-out data.
+      <br><br>
+      <strong>Disclosed tradeoff:</strong> reusing the early-stopping validation split
+      for conformal calibration (rather than a third, separate split) is a mild
+      deviation from pure split-conformal exchangeability — the round count
+      <code>predict</code> uses was itself chosen to minimize error on this exact set,
+      which can understate the true margin slightly. Shipped as the honestly-scoped
+      simple version rather than adding a third data split for a first cut.
+    </div>
+
+    <h2 id="probability-calibration">Probability Calibration (Classifier)</h2>
+    <p><code>ZoneBoostClassifier(calibrate=True)</code> recalibrates each booster's raw
+    probability with an <strong>isotonic regression</strong> fit on the same held-out
+    validation split used for early stopping — the same recipe
+    <code>sklearn.calibration.CalibratedClassifierCV(method="isotonic")</code> uses, so
+    predicted probabilities better match empirical frequencies. Binary: one calibrator
+    on <code>booster_</code>. Multiclass: one per one-vs-rest booster in
+    <code>boosters_</code>, calibrated <em>before</em> the existing cross-class
+    normalization step. Requires <code>validation_fraction &gt; 0</code>; raises
+    <code>ValueError</code> at <code>fit</code> otherwise. Only affects
+    <code>predict_proba</code> — <code>explain()</code>/<code>feature_importance()</code>
+    still decompose the raw log-odds score unchanged.</p>
+    <div class="note">
+      On synthetic noisy-sigmoid data, calibration cut binned reliability error roughly
+      5x (0.091 → 0.017). This is <strong>opt-in</strong> (default
+      <code>calibrate=False</code> reproduces today's exact <code>predict_proba</code>
+      output, verified bit-for-bit) and is the <strong>first parameter that differs
+      between the two estimators</strong> — every other parameter is identical across
+      both.
+    </div>
+
     <h2 id="how-it-compares">How It Compares</h2>
     <p>zoneboost sits at the intersection of additive models (GAMs), boosting frameworks
     (like XGBoost), and rule/bin-based models — combining the interpretable, additive

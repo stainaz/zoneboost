@@ -16,6 +16,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.isotonic import IsotonicRegression
 from sklearn.utils.validation import check_is_fitted
 
 from ._common import ensure_dataframe, resolve_categorical_features, resolve_monotonic_constraints
@@ -45,7 +46,7 @@ class _LogOddsBooster:
                  max_zones, min_zone_frac, categorical_features, n_iter_no_change,
                  max_interaction_order, max_triple_interactions, triple_min_gain,
                  cross_fit_folds, shrinkage_m, stacking_alpha, monotonic_constraints,
-                 max_pair_interactions, random_state):
+                 max_pair_interactions, calibrate, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
         self.row_subsample = row_subsample
@@ -62,7 +63,9 @@ class _LogOddsBooster:
         self.stacking_alpha = stacking_alpha
         self.monotonic_constraints = monotonic_constraints
         self.max_pair_interactions = max_pair_interactions
+        self.calibrate = calibrate
         self.random_state = random_state
+        self.calibrator_ = None
 
     def fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray, X_val=None, y_val=None):
         predictor_names = list(X_fit.columns)
@@ -133,10 +136,21 @@ class _LogOddsBooster:
                         break
 
         self.best_n_rounds_ = int(np.argmin(self.val_logloss_)) + 1 if has_val and self.val_logloss_ else len(self.rounds_)
+
+        # Isotonic probability calibration: fit on the same held-out
+        # validation split already used for early stopping (never training
+        # rows), mapping this booster's own raw held-out probability to the
+        # actual label -- the standard isotonic-calibration recipe (same
+        # idea sklearn.calibration.CalibratedClassifierCV(method="isotonic")
+        # uses). Only changes predict_proba's output, not explain()'s raw
+        # log-odds decomposition.
+        if self.calibrate and has_val:
+            raw_p_val = self._raw_predict_proba(X_val, self.best_n_rounds_)
+            self.calibrator_ = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0).fit(raw_p_val, y_val)
+
         return self
 
-    def predict_proba(self, X: pd.DataFrame, n_rounds: int = None) -> np.ndarray:
-        n_rounds = n_rounds if n_rounds is not None else self.best_n_rounds_
+    def _raw_predict_proba(self, X: pd.DataFrame, n_rounds: int) -> np.ndarray:
         score = np.full(len(X), self.baseline_)
         for round_ in self.rounds_[:n_rounds]:
             contributions = weak_learner_contributions(
@@ -145,6 +159,13 @@ class _LogOddsBooster:
             fitted_residual = round_["intercept"] + contributions @ round_["weights"]
             score = score + self.learning_rate * fitted_residual
         return _sigmoid(score)
+
+    def predict_proba(self, X: pd.DataFrame, n_rounds: int = None) -> np.ndarray:
+        n_rounds = n_rounds if n_rounds is not None else self.best_n_rounds_
+        raw_p = self._raw_predict_proba(X, n_rounds)
+        if self.calibrator_ is not None:
+            return self.calibrator_.predict(raw_p)
+        return raw_p
 
 
 class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
@@ -237,6 +258,18 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         to be non-decreasing/non-increasing across its zones. Opt-in
         (encodes domain knowledge, not a general improvement) -- see
         :class:`~zoneboost.ZoneBoostRegressor` for the full description.
+    calibrate : bool, default=False
+        If ``True``, recalibrate each booster's raw probability with an
+        isotonic regression fit on the held-out validation split (the same
+        split used for early stopping), so predicted probabilities better
+        match empirical frequencies -- the standard isotonic-calibration
+        recipe (``sklearn.calibration.CalibratedClassifierCV(method=
+        "isotonic")`` uses the same idea). Only changes :meth:`predict_proba`
+        -- :meth:`explain`/:meth:`feature_importance` still decompose the raw
+        log-odds score, unaffected. Requires ``validation_fraction > 0``;
+        raises ``ValueError`` at `fit` otherwise. This is the one parameter
+        that differs from :class:`~zoneboost.ZoneBoostRegressor` -- every
+        other parameter is identical across both estimators.
     random_state : int, default=42
         Seed controlling the validation split and per-round subsampling.
 
@@ -293,6 +326,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         stacking_alpha: float = 0.01,
         monotonic_constraints=None,
         max_pair_interactions=None,
+        calibrate: bool = False,
         random_state: int = 42,
     ):
         self.n_rounds = n_rounds
@@ -312,6 +346,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.stacking_alpha = stacking_alpha
         self.monotonic_constraints = monotonic_constraints
         self.max_pair_interactions = max_pair_interactions
+        self.calibrate = calibrate
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -335,6 +370,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             stacking_alpha=self.stacking_alpha,
             monotonic_constraints=self.monotonic_constraints_,
             max_pair_interactions=self.max_pair_interactions,
+            calibrate=self.calibrate,
             random_state=self.random_state,
         )
 
@@ -372,6 +408,8 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
 
         rng = np.random.default_rng(self.random_state)
         has_val = self.validation_fraction and self.validation_fraction > 0
+        if self.calibrate and not has_val:
+            raise ValueError("calibrate=True requires validation_fraction > 0 (no held-out data to calibrate against).")
         if has_val:
             n_total = len(X)
             perm = rng.permutation(n_total)
@@ -449,11 +487,13 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         probability contributions don't add linearly through a sigmoid.
 
         For 3+ classes: ``sigmoid(explain(X)[k].sum(axis=1))`` reproduces
-        that class's booster's *raw*, pre-normalization one-vs-rest
-        probability (``boosters_[k].predict_proba(X)``) -- not the final
-        ``predict_proba(X)[:, k]``, which additionally normalizes across
-        all K boosters so they sum to 1. The two are related but not
-        numerically equal.
+        that class's booster's *raw*, pre-calibration, pre-normalization
+        one-vs-rest probability -- equal to ``boosters_[k].predict_proba(X)``
+        only when ``calibrate=False`` (the default); with ``calibrate=True``,
+        ``predict_proba`` additionally applies the fitted isotonic calibrator
+        on top of this raw value, and then normalizes across all K boosters
+        so ``predict_proba(X)[:, k]`` sums to 1 across classes. ``explain``
+        always reflects the raw, uncalibrated log-odds score either way.
 
         Parameters
         ----------

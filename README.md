@@ -331,9 +331,52 @@ in the model. Leaving `max_pair_interactions=None` (the default) keeps
 every pair — the exact same behavior as before this change, verified
 bit-for-bit.
 
+### Prediction intervals (regressor)
+
+`ZoneBoostRegressor.predict_interval(X, alpha=0.1)` returns a constant-width
+`(lower, upper)` band around `predict(X)` via **split conformal
+prediction** — a distribution-free marginal coverage guarantee,
+`P(y in interval) >= 1 - alpha`, assuming exchangeability (Vovk / Lei et
+al.'s standard split-conformal setup), not a heteroscedasticity-aware or
+locally-adaptive variant. The margin is the finite-sample-corrected
+`ceil((n+1)*(1-alpha))`-th smallest absolute residual measured on the same
+held-out `validation_fraction` split already used for early stopping —
+never training rows, so the margin isn't optimistic about training fit.
+Purely additive: no new `__init__` parameter, and every existing method's
+output is unaffected. Requires `validation_fraction > 0`; raises
+`ValueError` otherwise. On a synthetic noisy quadratic, `alpha=0.1` achieved
+~90.2% empirical coverage on held-out data.
+
+**Disclosed tradeoff:** reusing the early-stopping validation split for
+conformal calibration (rather than a third, separate split) is a mild
+deviation from pure split-conformal exchangeability — the round count
+`predict` uses was itself chosen to minimize error on this exact set,
+which can understate the true margin slightly. Shipped as the honestly-
+scoped simple version rather than adding a third data split for a first
+cut.
+
+### Probability calibration (classifier)
+
+`ZoneBoostClassifier(calibrate=True)` recalibrates each booster's raw
+probability with an **isotonic regression** fit on the same held-out
+validation split used for early stopping — the same recipe
+`sklearn.calibration.CalibratedClassifierCV(method="isotonic")` uses, so
+predicted probabilities better match empirical frequencies. Binary: one
+calibrator on `booster_`. Multiclass: one per one-vs-rest booster in
+`boosters_`, calibrated *before* the existing cross-class normalization
+step. On synthetic noisy-sigmoid data, calibration cut binned reliability
+error roughly 5x (0.091 → 0.017). Requires `validation_fraction > 0`;
+raises `ValueError` at `fit` otherwise. Only affects `predict_proba` —
+`explain()`/`feature_importance()` still decompose the raw log-odds score
+unchanged. This is **opt-in** (default `calibrate=False` reproduces
+today's exact `predict_proba` output, verified bit-for-bit) and is the
+**first parameter that differs between the two estimators** — every other
+parameter is identical across both.
+
 ## Parameters
 
-Identical parameter set on both estimators.
+Identical parameter set on both estimators, except `calibrate`
+(classifier-only — see "Probability calibration" above).
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -354,6 +397,7 @@ Identical parameter set on both estimators.
 | `stacking_alpha` | 0.01 | Lasso regularization strength for combining a round's terms; see "Lasso stacking" above |
 | `monotonic_constraints` | None | `{column: +1 or -1}` — forces a continuous column's main effect to be non-decreasing/non-increasing; opt-in, see "Monotonic constraints" above |
 | `max_pair_interactions` | None | Cap on how many pairwise interactions a round keeps, ranked by importance; opt-in, see "Pair screening" above |
+| `calibrate` | False | **Classifier only.** Isotonic-recalibrate `predict_proba`; opt-in, see "Probability calibration" above |
 | `random_state` | 42 | Seed for the validation split and subsampling |
 
 **On `max_zones` and `categorical_features`:** if a variable genuinely has
@@ -389,8 +433,10 @@ score, not the probability directly (probability contributions don't add
 linearly through a sigmoid — the same convention SHAP uses for logistic
 models); for 3+ classes it returns a `{class_label: DataFrame}` dict, one
 per one-vs-rest booster, and `sigmoid(explain(X)[k].sum(axis=1))`
-reproduces that booster's *raw* probability before the final
-cross-class normalization `predict_proba` applies.
+reproduces that booster's *raw, pre-calibration* probability — equal to
+`boosters_[k].predict_proba(X)` only when `calibrate=False` (the default);
+with `calibrate=True`, `predict_proba` additionally applies the fitted
+isotonic calibrator before the final cross-class normalization.
 
 ## Fitted attributes
 
@@ -409,14 +455,20 @@ After `fit`, `ZoneBoostRegressor` exposes (among others):
   (declared ∪ auto-detected).
 - `monotonic_constraints_` — the resolved `{column: +1 or -1}` dict
   actually in effect (categorical columns dropped).
+- `conformal_scores_` — sorted absolute residuals on the held-out
+  validation split at `best_n_rounds_`, the nonconformity scores
+  `predict_interval` draws its margin from (`None` if
+  `validation_fraction=0`); see "Prediction intervals" above.
 
 `ZoneBoostClassifier` exposes the same `categorical_features_`, plus:
 
 - `classes_` — distinct class labels seen during `fit`.
 - `multiclass_` — whether one-vs-rest (3+ classes) was used.
 - `booster_` (binary) or `boosters_` (a `{class_label: booster}` dict, 3+
-  classes) — each an internal log-odds booster with its own `rounds_` and
-  `best_n_rounds_`, same plain-data structure as the regressor's.
+  classes) — each an internal log-odds booster with its own `rounds_`,
+  `best_n_rounds_`, and `calibrator_` (the fitted isotonic calibrator, or
+  `None` if `calibrate=False`) — same plain-data structure as the
+  regressor's.
 
 ## Scope
 

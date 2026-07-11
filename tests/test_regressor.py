@@ -382,3 +382,43 @@ def test_cyclic_backfitting_keeps_pair_importance_small_when_no_real_interaction
     model = ZoneBoostRegressor(n_rounds=60, random_state=0, validation_fraction=0).fit(X, y)
     importance = model.feature_importance(X)
     assert importance["x1 x x2"] < 0.2 * importance["x1"]
+
+
+def _noisy_quadratic(n=2000, seed=0):
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(-3, 3, n)
+    y = x**2 + rng.normal(0, 1.0, n)
+    return pd.DataFrame({"x": x}), y
+
+
+def test_predict_interval_bounds_contain_point_prediction_and_match_stored_scores():
+    X, y = _noisy_quadratic()
+    model = ZoneBoostRegressor(n_rounds=60, random_state=0).fit(X, y)
+    pred = model.predict(X)
+    lower, upper = model.predict_interval(X, alpha=0.1)
+    assert np.all(lower <= pred) and np.all(pred <= upper)
+
+    n = len(model.conformal_scores_)
+    k = min(int(np.ceil((n + 1) * 0.9)), n)
+    expected_margin = model.conformal_scores_[k - 1]
+    np.testing.assert_allclose(upper - pred, expected_margin)
+    np.testing.assert_allclose(pred - lower, expected_margin)
+
+
+def test_predict_interval_achieves_target_coverage_on_held_out_data():
+    X, y = _noisy_quadratic(n=2500)
+    X_train, y_train = X.iloc[:2000], y[:2000]
+    X_test, y_test = X.iloc[2000:].reset_index(drop=True), y[2000:]
+
+    model = ZoneBoostRegressor(n_rounds=60, random_state=0).fit(X_train, y_train)
+    lower, upper = model.predict_interval(X_test, alpha=0.1)
+    coverage = np.mean((y_test >= lower) & (y_test <= upper))
+    assert 0.80 <= coverage <= 0.98
+
+
+def test_predict_interval_raises_without_validation_split():
+    X, y = _noisy_quadratic()
+    model = ZoneBoostRegressor(n_rounds=30, random_state=0, validation_fraction=0).fit(X, y)
+    assert model.conformal_scores_ is None
+    with pytest.raises(ValueError):
+        model.predict_interval(X)

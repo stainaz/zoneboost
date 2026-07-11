@@ -102,6 +102,8 @@
     { title: "Cyclic Backfitting", crumb: "How It Works", url: "how-it-works.html#cyclic-backfitting" },
     { title: "Monotonic Constraints", crumb: "How It Works", url: "how-it-works.html#monotonic-constraints" },
     { title: "Pair Screening", crumb: "How It Works", url: "how-it-works.html#pair-screening" },
+    { title: "Prediction Intervals (Regressor)", crumb: "How It Works", url: "how-it-works.html#prediction-intervals" },
+    { title: "Probability Calibration (Classifier)", crumb: "How It Works", url: "how-it-works.html#probability-calibration" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },

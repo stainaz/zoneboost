@@ -164,3 +164,73 @@ def test_max_interaction_order_3_improves_accuracy_on_genuine_triple_interaction
     acc_triples = model_triples.score(X, y)
     assert acc_triples >= acc_pairwise
     assert any(len(round_["triples"]) > 0 for round_ in model_triples.booster_.rounds_)
+
+
+def _probabilistic_binary_data(n=3000, seed=0):
+    # Noisy sigmoid labels (not a deterministic threshold) -- leaves real
+    # room for a calibration step to measurably improve reliability, unlike
+    # _binary_data's confident near-0/1 labels.
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(-3, 3, n)
+    p_true = 1 / (1 + np.exp(-x))
+    y = (rng.uniform(size=n) < p_true).astype(int)
+    return pd.DataFrame({"x": x}), y
+
+
+def _reliability_error(p, y, bins=10):
+    edges = np.linspace(0, 1, bins + 1)
+    idx = np.clip(np.digitize(p, edges) - 1, 0, bins - 1)
+    weighted_err, total = 0.0, 0
+    for b in range(bins):
+        mask = idx == b
+        if not np.any(mask):
+            continue
+        weighted_err += mask.sum() * abs(p[mask].mean() - y[mask].mean())
+        total += mask.sum()
+    return weighted_err / total
+
+
+def test_calibrate_raises_without_validation_split():
+    X, y = _probabilistic_binary_data()
+    with pytest.raises(ValueError):
+        ZoneBoostClassifier(n_rounds=30, random_state=0, calibrate=True, validation_fraction=0).fit(X, y)
+
+
+def test_calibrate_improves_reliability_on_probabilistic_data():
+    X, y = _probabilistic_binary_data()
+    model_raw = ZoneBoostClassifier(n_rounds=60, random_state=0, calibrate=False).fit(X, y)
+    model_cal = ZoneBoostClassifier(n_rounds=60, random_state=0, calibrate=True).fit(X, y)
+
+    p_raw = model_raw.predict_proba(X)[:, 1]
+    p_cal = model_cal.predict_proba(X)[:, 1]
+    assert _reliability_error(p_cal, y) < _reliability_error(p_raw, y)
+    assert model_cal.booster_.calibrator_ is not None
+    assert model_raw.booster_.calibrator_ is None
+
+
+def test_calibrate_multiclass_probabilities_still_sum_to_one():
+    X, y = _multiclass_data()
+    model = ZoneBoostClassifier(n_rounds=30, categorical_features=["cat"], random_state=0, calibrate=True).fit(X, y)
+    proba = model.predict_proba(X)
+    assert proba.shape == (len(y), 3)
+    np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-9)
+    assert all(b.calibrator_ is not None for b in model.boosters_.values())
+
+
+def test_calibrate_default_false_is_unaffected():
+    X, y = _binary_data()
+    model_default = ZoneBoostClassifier(n_rounds=20, categorical_features=["cat"], random_state=0).fit(X, y)
+    model_explicit = ZoneBoostClassifier(
+        n_rounds=20, categorical_features=["cat"], random_state=0, calibrate=False
+    ).fit(X, y)
+    np.testing.assert_array_equal(model_default.predict_proba(X), model_explicit.predict_proba(X))
+    assert model_default.booster_.calibrator_ is None
+
+
+def test_calibrate_does_not_change_explain_or_feature_importance():
+    X, y = _probabilistic_binary_data()
+    model_raw = ZoneBoostClassifier(n_rounds=40, random_state=0, calibrate=False).fit(X, y)
+    model_cal = ZoneBoostClassifier(n_rounds=40, random_state=0, calibrate=True).fit(X, y)
+
+    pd.testing.assert_frame_equal(model_raw.explain(X), model_cal.explain(X))
+    pd.testing.assert_series_equal(model_raw.feature_importance(X), model_cal.feature_importance(X))

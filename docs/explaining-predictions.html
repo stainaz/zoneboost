@@ -71,8 +71,12 @@ contrib.sum(axis=1)                    # == model.predict(X), exactly</code></pr
     logistic models. For 3+ classes it returns a <code>{class_label: DataFrame}</code>
     dict, one per one-vs-rest booster, and</p>
     <pre><code>sigmoid(explain(X)[k].sum(axis=1))</code></pre>
-    <p>reproduces that booster's <em>raw</em> probability before the final cross-class
-    normalization <code>predict_proba</code> applies.</p>
+    <p>reproduces that booster's <em>raw, pre-calibration</em> probability — equal to
+    <code>boosters_[k].predict_proba(X)</code> only when <code>calibrate=False</code>
+    (the default); with <code>calibrate=True</code>, <code>predict_proba</code>
+    additionally applies the fitted isotonic calibrator before the final cross-class
+    normalization. See <a href="how-it-works.html#probability-calibration">Probability
+    Calibration</a>.</p>
 
     <h2 id="vs-shap-lime">How This Differs from SHAP/LIME</h2>
     <ul>
