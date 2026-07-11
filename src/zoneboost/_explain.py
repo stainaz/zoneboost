@@ -7,7 +7,8 @@ computed. Each round's contribution to the running score is
     resid_mean + (raw - raw_mean) * scale,   scale = resid_std / raw_std
 
 where raw is the *mean* of that round's per-term zone lookups (main
-effects + interactions). Because mean is linear, this expands exactly into
+effects + interactions + any adaptively-selected 3-way interactions).
+Because mean is linear, this expands exactly into
 
     round_baseline + sum_i( (scale / n_terms) * term_i )
 
@@ -46,16 +47,24 @@ def explain_rounds(X: pd.DataFrame, rounds: list, baseline: float, learning_rate
     -------
     DataFrame of shape (len(X), n_terms + 1)
         One column per term that appeared in any round -- each predictor's
-        own name for its main effect, ``"A x B"`` for an interaction pair
-        -- plus a ``"baseline"`` column. Row sums equal the model's raw
-        prediction (regression) or log-odds score (classification) exactly.
+        own name for its main effect, ``"A x B"`` for an interaction pair,
+        ``"A x B x C"`` for a 3-way interaction -- plus a ``"baseline"``
+        column. Row sums equal the model's raw prediction (regression) or
+        log-odds score (classification) exactly.
     """
     n = len(X)
     baseline_total = float(baseline)
     term_totals: dict[str, np.ndarray] = {}
 
-    for zone_info, main_effects, interactions, raw_mean, raw_std, resid_mean, resid_std in rounds:
-        n_terms = len(main_effects) + len(interactions)
+    for round_ in rounds:
+        zone_info = round_["zone_info"]
+        main_effects = round_["main_effects"]
+        interactions = round_["interactions"]
+        triples = round_["triples"]
+        raw_mean, raw_std = round_["raw_mean"], round_["raw_std"]
+        resid_mean, resid_std = round_["resid_mean"], round_["resid_std"]
+
+        n_terms = len(main_effects) + len(interactions) + len(triples)
         if n_terms == 0:
             continue
         scale = (resid_std / raw_std) if raw_std > 0 else 0.0
@@ -76,6 +85,15 @@ def explain_rounds(X: pd.DataFrame, rounds: list, baseline: float, learning_rate
             # sorting, "A x B" and "B x A" would fragment into separate
             # columns instead of accumulating as the same term.
             key = " x ".join(sorted((a, b)))
+            term_totals.setdefault(key, np.zeros(n))
+            term_totals[key] += share
+
+        for (a, b, c), (deviation, confidence) in triples.items():
+            za = _column_zone_index(X[a], zone_info[a])
+            zb = _column_zone_index(X[b], zone_info[b])
+            zc = _column_zone_index(X[c], zone_info[c])
+            share = learning_rate * (scale / n_terms) * (deviation[za, zb, zc] * confidence[za, zb, zc])
+            key = " x ".join(sorted((a, b, c)))
             term_totals.setdefault(key, np.zeros(n))
             term_totals[key] += share
 

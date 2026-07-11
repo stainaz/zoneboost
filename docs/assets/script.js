@@ -94,7 +94,8 @@
     { title: "Continuous vs. Categorical Zones", crumb: "How It Works", url: "how-it-works.html#continuous-vs-categorical" },
     { title: "Missing Values", crumb: "How It Works", url: "how-it-works.html#missing-values" },
     { title: "From Regression to Classification", crumb: "How It Works", url: "how-it-works.html#classification" },
-    { title: "Possible Future Enhancement: Adaptive Interaction Order", crumb: "How It Works", url: "how-it-works.html#future-work" },
+    { title: "Adaptive Interaction Order", crumb: "How It Works", url: "how-it-works.html#adaptive-interaction-order" },
+    { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },
     { title: "Parameters", crumb: "API Reference", url: "api-reference.html#parameters" },

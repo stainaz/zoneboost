@@ -46,6 +46,13 @@
     <p class="subtitle">No decision trees, no gradient descent, no neural weights — just
     zones and averages, boosted.</p>
 
+    <figure class="docs-figure">
+      <img src="assets/images/zoneboost-explanation.png" alt="Overview diagram: zoneboost splits each feature into data-driven zones, scores each zone from the average outcome of rows that fall in it, models pairwise zone-grid interactions, and boosts these main effects and interactions together in steps, focusing each round on the remaining error. A worked customer example shows how the zone lookups for age, income, and affordability sum with their pairwise interactions and a baseline into a final log-odds prediction, with every contribution traceable back to a simple zone statistic.">
+      <figcaption>The full mechanism end to end: zones → per-zone scores → pairwise
+      interactions → boosting rounds → a worked prediction with its exact contribution
+      breakdown.</figcaption>
+    </figure>
+
     <h2 id="weak-learner">The Weak Learner</h2>
     <p>Each boosting round fits a weak learner made of two transparent pieces, both built
     by splitting each predictor's axis into a small number of data-driven zones and
@@ -115,22 +122,53 @@
     to 1 at predict time — multiclass is not a different mechanism, just K independent
     copies of the same binary booster.</p>
 
-    <h2 id="future-work">Possible Future Enhancement: Adaptive Interaction Order</h2>
-    <p>zoneboost currently learns main effects and every pairwise interaction. A promising
-    extension, not yet implemented, is <strong>adaptive interaction order</strong>:</p>
+    <h2 id="adaptive-interaction-order">Adaptive Interaction Order</h2>
+    <p>By default zoneboost learns main effects and every pairwise interaction
+    (<code>max_interaction_order=2</code>). Setting <code>max_interaction_order=3</code>
+    additionally attempts a bounded, adaptive search for 3-way interactions each round:</p>
     <ol>
-      <li>Start with main effects.</li>
-      <li>Learn all pairwise interactions.</li>
-      <li>Measure how much unexplained error remains.</li>
-      <li>Only if there's strong evidence of a genuine higher-order pattern, learn a small
-      number of carefully selected 3-way interactions.</li>
-      <li>Ignore the rest.</li>
+      <li>Main effects and pairwise interactions are fit exactly as always.</li>
+      <li>Candidate triples are seeded from the columns appearing in that round's
+      strongest pairs — not every possible <code>(a, b, c)</code> triple, which would be
+      combinatorially expensive for datasets with many predictors.</li>
+      <li>Each candidate is checked against what main effects and its three constituent
+      pairwise interactions would already predict. Only if a joint 3-way zone grouping
+      still explains meaningful residual variance <em>beyond that</em> — evidence of a
+      genuine higher-order pattern, not something pairwise terms already cover — does it
+      clear the bar.</li>
+      <li>Surviving candidates are ranked by that evidence, and only the strongest
+      <code>max_triple_interactions</code> are kept per round.</li>
     </ol>
-    <p>That would preserve interpretability while avoiding the combinatorial explosion of
-    trying every possible 3D or 4D interaction. In fact, that kind of adaptive interaction
-    selection could become a distinctive feature of zoneboost, giving it the ability to
-    capture complex relationships only when the data justify them, rather than assuming
-    every higher-order interaction is worth learning.</p>
+    <p>If nothing clears the bar in a given round, no triples are added that round — this
+    is why the default (<code>max_interaction_order=2</code>) produces identical models to
+    every prior release: the 3-way search is strictly opt-in.</p>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>max_interaction_order</code></td><td><code>2</code></td><td>Set to <code>3</code> to enable the 3-way search above.</td></tr>
+        <tr><td><code>max_triple_interactions</code></td><td><code>5</code></td><td>Cap on how many 3-way terms a single round may add.</td></tr>
+        <tr><td><code>triple_min_gain</code></td><td><code>0.05</code></td><td>How much residual-explained evidence, relative to a candidate's strongest constituent pair, is required to accept it.</td></tr>
+      </tbody>
+    </table>
+    <p>A 3-way term shows up in <a href="explaining-predictions.html">explain()</a> output
+    exactly like a pairwise one, just with three predictor names joined by
+    <code>" x "</code> — e.g. <code>"price x location x season"</code> — and its
+    contribution still sums exactly into the prediction alongside every other term.</p>
+
+    <h2 id="how-it-compares">How It Compares</h2>
+    <p>zoneboost sits at the intersection of additive models (GAMs), boosting frameworks
+    (like XGBoost), and rule/bin-based models — combining the interpretable, additive
+    spirit of GAMs and Explainable Boosting Machines (EBM) with the power of boosting, but
+    using adaptive zones and zone-grid statistics instead of trees or splines. EBM is the
+    closest existing model: both are additive, use boosting, and are highly interpretable
+    with pairwise interactions — the difference is that EBM learns smooth functions with
+    tiny regression trees inside each feature, while zoneboost learns adaptive zones and
+    plain descriptive statistics (counts, means, log-odds) inside those zones.</p>
+    <figure class="docs-figure">
+      <img src="assets/images/zoneboost-model-comparison.png" alt="Comparison diagram positioning zoneboost among decision trees, XGBoost, GAMs, RuleFit, and EBM (Explainable Boosting Machine). A table shows zoneboost has boosting, additive main effects, pairwise interactions, adaptive zones, high interpretability, and exact (not approximate) explanations, unlike models based on opaque trees or SHAP approximations. A worked customer example compares how a decision tree, GAM, EBM, and zoneboost each arrive at the same prediction, and a deeper dive contrasts EBM's smooth tiny-tree functions against zoneboost's adaptive zones and density-weighted statistics.">
+      <figcaption>Where zoneboost fits relative to decision trees, XGBoost, GAMs, RuleFit,
+      and EBM — and a closer look at its nearest relative, EBM.</figcaption>
+    </figure>
   </article>
 </div>
 

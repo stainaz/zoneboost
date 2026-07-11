@@ -59,6 +59,9 @@
         <tr><td><code>categorical_features</code></td><td><code>None</code></td><td>Column names/indices to treat as nominal categories</td></tr>
         <tr><td><code>validation_fraction</code></td><td><code>0.2</code></td><td>Held-out fraction used to pick the best round count</td></tr>
         <tr><td><code>n_iter_no_change</code></td><td><code>None</code></td><td>Early-stopping patience, in rounds</td></tr>
+        <tr><td><code>max_interaction_order</code></td><td><code>2</code></td><td>Set to <code>3</code> to enable an adaptive search for 3-way interactions — see <a href="how-it-works.html#adaptive-interaction-order">Adaptive Interaction Order</a></td></tr>
+        <tr><td><code>max_triple_interactions</code></td><td><code>5</code></td><td>Cap on how many 3-way terms a single round may add (only relevant when <code>max_interaction_order=3</code>)</td></tr>
+        <tr><td><code>triple_min_gain</code></td><td><code>0.05</code></td><td>Minimum residual-explained evidence, relative to a candidate's strongest constituent pair, required to keep a 3-way interaction</td></tr>
         <tr><td><code>random_state</code></td><td><code>42</code></td><td>Seed for the validation split and subsampling</td></tr>
       </tbody>
     </table>
@@ -67,7 +70,7 @@
     <p>After <code>fit</code>, <code>ZoneBoostRegressor</code> exposes (among others):</p>
     <table>
       <tbody>
-        <tr><td><code>rounds_</code></td><td>One entry per boosting round: that round's zone boundaries/category maps, main effects, interactions, and rescaling stats. Plain dicts of numpy arrays, nothing hidden in an opaque object.</td></tr>
+        <tr><td><code>rounds_</code></td><td>One entry per boosting round, each a plain dict with keys <code>"zone_info"</code>, <code>"main_effects"</code>, <code>"interactions"</code>, <code>"triples"</code> (empty unless <code>max_interaction_order=3</code>), and that round's rescaling stats. Nothing hidden in an opaque object.</td></tr>
         <tr><td><code>best_n_rounds_</code></td><td>The round count actually used by <code>predict</code>.</td></tr>
         <tr><td><code>val_rmse_</code> / <code>train_rmse_</code></td><td>RMSE after each round.</td></tr>
         <tr><td><code>categorical_features_</code></td><td>The resolved set of categorical columns (declared ∪ auto-detected).</td></tr>

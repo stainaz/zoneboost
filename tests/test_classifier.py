@@ -129,3 +129,38 @@ def test_missing_values_in_continuous_and_categorical_columns_do_not_crash():
     model.fit(X_missing, y)
     proba = model.predict_proba(X_missing)
     assert np.all(np.isfinite(proba))
+
+
+def _three_way_interaction_data(n=600, seed=0):
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame(
+        {
+            "x1": rng.uniform(-3, 3, n),
+            "x2": rng.uniform(-3, 3, n),
+            "x3": rng.uniform(-3, 3, n),
+        }
+    )
+    score = X["x1"] * X["x2"] + X["x1"] * X["x3"] + X["x2"] * X["x3"] + 2.0 * X["x1"] * X["x2"] * X["x3"]
+    y = (score > score.median()).astype(int).to_numpy()
+    return X, y
+
+
+def test_max_interaction_order_2_is_default_and_never_produces_triples():
+    X, y = _three_way_interaction_data()
+    model = ZoneBoostClassifier(n_rounds=20, col_subsample=1.0, random_state=0).fit(X, y)
+    assert all(round_["triples"] == {} for round_ in model.booster_.rounds_)
+
+
+def test_max_interaction_order_3_improves_accuracy_on_genuine_triple_interaction():
+    X, y = _three_way_interaction_data()
+    model_pairwise = ZoneBoostClassifier(
+        n_rounds=60, random_state=0, col_subsample=1.0, max_interaction_order=2
+    ).fit(X, y)
+    model_triples = ZoneBoostClassifier(
+        n_rounds=60, random_state=0, col_subsample=1.0, max_interaction_order=3
+    ).fit(X, y)
+
+    acc_pairwise = model_pairwise.score(X, y)
+    acc_triples = model_triples.score(X, y)
+    assert acc_triples >= acc_pairwise
+    assert any(len(round_["triples"]) > 0 for round_ in model_triples.booster_.rounds_)

@@ -10,6 +10,8 @@ and `ZoneBoostClassifier` (binary and multiclass). Both are
 scikit-learn-compatible: they work with `Pipeline`, `GridSearchCV`,
 `cross_val_score`, and `clone`.
 
+![Overview of zoneboost's mechanism: zones, per-zone scoring, pairwise interactions, boosting rounds, and a worked prediction with its exact contribution breakdown](docs/assets/images/zoneboost-explanation.png)
+
 ## Installation
 
 ```bash
@@ -107,6 +109,23 @@ probabilities are normalized to sum to 1 at predict time — multiclass is
 not a different mechanism, just K independent copies of the same binary
 booster.
 
+### Adaptive interaction order
+
+By default zoneboost learns main effects and every pairwise interaction
+(`max_interaction_order=2`). Setting `max_interaction_order=3` additionally
+attempts a bounded, adaptive search for 3-way interactions each round:
+candidates are seeded from the columns appearing in that round's strongest
+pairs (not every possible `(a, b, c)` triple, which would be
+combinatorially expensive), and a candidate is only kept if a joint 3-way
+zone grouping still explains meaningful residual variance beyond what main
+effects and its three constituent pairwise interactions already predict —
+evidence of a genuine higher-order pattern, not something pairwise terms
+already cover. Surviving candidates are ranked by that evidence and only
+the strongest `max_triple_interactions` are kept per round. If nothing
+clears the bar in a given round, no triples are added that round — this is
+why the default (`max_interaction_order=2`) produces identical models to
+every prior release: the 3-way search is strictly opt-in.
+
 ## Parameters
 
 Identical parameter set on both estimators.
@@ -122,6 +141,9 @@ Identical parameter set on both estimators.
 | `categorical_features` | None | Column names/indices to treat as nominal categories |
 | `validation_fraction` | 0.2 | Held-out fraction used to pick the best round count |
 | `n_iter_no_change` | None | Early-stopping patience, in rounds |
+| `max_interaction_order` | 2 | Set to 3 to enable an adaptive search for 3-way interactions |
+| `max_triple_interactions` | 5 | Cap on how many 3-way terms a single round may add (only relevant when `max_interaction_order=3`) |
+| `triple_min_gain` | 0.05 | Minimum residual-explained evidence, relative to a candidate's strongest constituent pair, required to keep a 3-way interaction |
 | `random_state` | 42 | Seed for the validation split and subsampling |
 
 **On `max_zones` and `categorical_features`:** if a variable genuinely has
@@ -148,9 +170,10 @@ contrib.sum(axis=1)                    # == model.predict(X), exactly
 model.feature_importance(X)            # mean |contribution| per term, sorted
 ```
 
-Each column is either a predictor's own name (its main effect) or
-`"A x B"` (that pair's interaction) — never split further, so an
-interaction's contribution isn't arbitrarily divided between its two
+Each column is either a predictor's own name (its main effect), `"A x B"`
+(that pair's interaction), or `"A x B x C"` (an adaptively-selected 3-way
+interaction, when `max_interaction_order=3`) — never split further, so an
+interaction's contribution isn't arbitrarily divided between its
 variables. For `ZoneBoostClassifier`, `explain(X)` sums to the **log-odds**
 score, not the probability directly (probability contributions don't add
 linearly through a sigmoid — the same convention SHAP uses for logistic
@@ -163,9 +186,10 @@ cross-class normalization `predict_proba` applies.
 
 After `fit`, `ZoneBoostRegressor` exposes (among others):
 
-- `rounds_` — one entry per boosting round: that round's zone boundaries/
-  category maps, main effects, interactions, and rescaling stats. Plain
-  dicts of numpy arrays, nothing hidden in an opaque object.
+- `rounds_` — one entry per boosting round, each a plain dict with keys
+  `"zone_info"`, `"main_effects"`, `"interactions"`, `"triples"` (empty
+  unless `max_interaction_order=3`), and that round's rescaling stats.
+  Nothing hidden in an opaque object.
 - `best_n_rounds_` — the round count actually used by `predict`.
 - `val_rmse_` / `train_rmse_` — RMSE after each round.
 - `categorical_features_` — the resolved set of categorical columns

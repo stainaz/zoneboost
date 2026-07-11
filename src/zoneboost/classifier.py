@@ -42,7 +42,8 @@ class _LogOddsBooster:
     validation set stay consistent across classes."""
 
     def __init__(self, n_rounds, learning_rate, row_subsample, col_subsample,
-                 max_zones, min_zone_frac, categorical_features, n_iter_no_change, random_state):
+                 max_zones, min_zone_frac, categorical_features, n_iter_no_change,
+                 max_interaction_order, max_triple_interactions, triple_min_gain, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
         self.row_subsample = row_subsample
@@ -51,6 +52,9 @@ class _LogOddsBooster:
         self.min_zone_frac = min_zone_frac
         self.categorical_features = categorical_features
         self.n_iter_no_change = n_iter_no_change
+        self.max_interaction_order = max_interaction_order
+        self.max_triple_interactions = max_triple_interactions
+        self.triple_min_gain = triple_min_gain
         self.random_state = random_state
 
     def fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray, X_val=None, y_val=None):
@@ -81,11 +85,14 @@ class _LogOddsBooster:
             X_sub = X_fit.iloc[row_idx][col_subset]
             residual_sub = residual[row_idx]
 
-            zone_info, main_effects, interactions, resid_mean = weak_learner_fit(
+            zone_info, main_effects, interactions, triples, resid_mean = weak_learner_fit(
                 X_sub, residual_sub, col_subset, self.categorical_features,
                 max_zones=self.max_zones, min_zone_frac=self.min_zone_frac,
+                max_interaction_order=self.max_interaction_order,
+                max_triple_interactions=self.max_triple_interactions,
+                triple_min_gain=self.triple_min_gain,
             )
-            raw = weak_learner_score(X_fit, zone_info, main_effects, interactions)
+            raw = weak_learner_score(X_fit, zone_info, main_effects, interactions, triples)
             raw_mean, raw_std = float(raw.mean()), float(raw.std())
             resid_std = float(residual.std())
             fitted_residual = (
@@ -93,10 +100,21 @@ class _LogOddsBooster:
             )
 
             current_score = current_score + self.learning_rate * fitted_residual
-            self.rounds_.append((zone_info, main_effects, interactions, raw_mean, raw_std, resid_mean, resid_std))
+            self.rounds_.append(
+                {
+                    "zone_info": zone_info,
+                    "main_effects": main_effects,
+                    "interactions": interactions,
+                    "triples": triples,
+                    "raw_mean": raw_mean,
+                    "raw_std": raw_std,
+                    "resid_mean": resid_mean,
+                    "resid_std": resid_std,
+                }
+            )
 
             if has_val:
-                val_raw = weak_learner_score(X_val, zone_info, main_effects, interactions)
+                val_raw = weak_learner_score(X_val, zone_info, main_effects, interactions, triples)
                 val_fitted = (
                     resid_mean + (val_raw - raw_mean) * (resid_std / raw_std)
                     if raw_std > 0 else np.zeros_like(val_raw)
@@ -116,8 +134,12 @@ class _LogOddsBooster:
     def predict_proba(self, X: pd.DataFrame, n_rounds: int = None) -> np.ndarray:
         n_rounds = n_rounds if n_rounds is not None else self.best_n_rounds_
         score = np.full(len(X), self.baseline_)
-        for zone_info, main_effects, interactions, raw_mean, raw_std, resid_mean, resid_std in self.rounds_[:n_rounds]:
-            raw = weak_learner_score(X, zone_info, main_effects, interactions)
+        for round_ in self.rounds_[:n_rounds]:
+            raw = weak_learner_score(
+                X, round_["zone_info"], round_["main_effects"], round_["interactions"], round_["triples"]
+            )
+            raw_mean, raw_std = round_["raw_mean"], round_["raw_std"]
+            resid_mean, resid_std = round_["resid_mean"], round_["resid_std"]
             fitted_residual = (
                 resid_mean + (raw - raw_mean) * (resid_std / raw_std) if raw_std > 0 else np.zeros_like(raw)
             )
@@ -173,6 +195,21 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
     n_iter_no_change : int, default=None
         If set, a booster stops adding rounds once its held-out log-loss
         has not improved for this many consecutive rounds.
+    max_interaction_order : int, default=2
+        ``2`` fits main effects + pairwise interactions only (the behavior
+        of every prior release). ``3`` additionally attempts a bounded,
+        adaptive search for 3-way interactions each round. See
+        :class:`~zoneboost.ZoneBoostRegressor` for the full description --
+        the mechanism is identical here.
+    max_triple_interactions : int, default=5
+        Cap on how many 3-way terms a single round may add. Only relevant
+        when ``max_interaction_order=3``.
+    triple_min_gain : float, default=0.05
+        Minimum confidence-weighted residual-explained magnitude a
+        candidate 3-way interaction must retain after subtracting the
+        main-effect + pairwise fit for its three columns, expressed as a
+        fraction of its strongest constituent pair's own importance. Only
+        relevant when ``max_interaction_order=3``.
     random_state : int, default=42
         Seed controlling the validation split and per-round subsampling.
 
@@ -219,6 +256,9 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         categorical_features=None,
         validation_fraction: float = 0.2,
         n_iter_no_change: int = None,
+        max_interaction_order: int = 2,
+        max_triple_interactions: int = 5,
+        triple_min_gain: float = 0.05,
         random_state: int = 42,
     ):
         self.n_rounds = n_rounds
@@ -230,6 +270,9 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.categorical_features = categorical_features
         self.validation_fraction = validation_fraction
         self.n_iter_no_change = n_iter_no_change
+        self.max_interaction_order = max_interaction_order
+        self.max_triple_interactions = max_triple_interactions
+        self.triple_min_gain = triple_min_gain
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -245,6 +288,9 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             min_zone_frac=self.min_zone_frac,
             categorical_features=self.categorical_features_,
             n_iter_no_change=self.n_iter_no_change,
+            max_interaction_order=self.max_interaction_order,
+            max_triple_interactions=self.max_triple_interactions,
+            triple_min_gain=self.triple_min_gain,
             random_state=self.random_state,
         )
 

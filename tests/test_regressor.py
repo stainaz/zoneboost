@@ -131,3 +131,49 @@ def test_explain_sums_exactly_to_predict_with_missing_values_present():
     pred = model.predict(X_missing)
     contrib = model.explain(X_missing)
     np.testing.assert_allclose(contrib.sum(axis=1).to_numpy(), pred, atol=1e-6)
+
+
+def _three_way_interaction_data(n=600, seed=0):
+    # x1/x2/x3 carry real pairwise structure plus a genuine 3-way term
+    # pairwise interactions alone cannot represent.
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame(
+        {
+            "x1": rng.uniform(-3, 3, n),
+            "x2": rng.uniform(-3, 3, n),
+            "x3": rng.uniform(-3, 3, n),
+        }
+    )
+    y = (
+        X["x1"] * X["x2"]
+        + X["x1"] * X["x3"]
+        + X["x2"] * X["x3"]
+        + 2.0 * X["x1"] * X["x2"] * X["x3"]
+        + rng.normal(0, 0.5, n)
+    ).to_numpy()
+    return X, y
+
+
+def test_max_interaction_order_2_is_default_and_never_produces_triples():
+    X, y = _three_way_interaction_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0).fit(X, y)
+    assert all(round_["triples"] == {} for round_ in model.rounds_)
+
+
+def test_max_interaction_order_3_improves_fit_on_genuine_triple_interaction():
+    # col_subsample=1.0: with only 3 predictors, the default 0.7 subsample
+    # rounds down to 2 columns per round, which never gives a 3-way search
+    # a chance -- using all 3 columns every round is the realistic setting
+    # for a model with this few predictors.
+    X, y = _three_way_interaction_data()
+    model_pairwise = ZoneBoostRegressor(
+        n_rounds=60, random_state=0, col_subsample=1.0, max_interaction_order=2
+    ).fit(X, y)
+    model_triples = ZoneBoostRegressor(
+        n_rounds=60, random_state=0, col_subsample=1.0, max_interaction_order=3
+    ).fit(X, y)
+
+    rmse_pairwise = np.sqrt(np.mean((y - model_pairwise.predict(X)) ** 2))
+    rmse_triples = np.sqrt(np.mean((y - model_triples.predict(X)) ** 2))
+    assert rmse_triples < rmse_pairwise
+    assert any(len(round_["triples"]) > 0 for round_ in model_triples.rounds_)

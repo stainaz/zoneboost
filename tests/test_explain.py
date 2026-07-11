@@ -87,3 +87,40 @@ def test_classifier_feature_importance_multiclass_is_averaged():
     importance = model.feature_importance(X)
     assert "baseline" not in importance.index
     assert (importance >= 0).all()
+
+
+def _three_way_data(n=600, seed=0):
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame(
+        {
+            "x1": rng.uniform(-3, 3, n),
+            "x2": rng.uniform(-3, 3, n),
+            "x3": rng.uniform(-3, 3, n),
+        }
+    )
+    y = (
+        X["x1"] * X["x2"]
+        + X["x1"] * X["x3"]
+        + X["x2"] * X["x3"]
+        + 2.0 * X["x1"] * X["x2"] * X["x3"]
+        + rng.normal(0, 0.5, n)
+    ).to_numpy()
+    return X, y
+
+
+def test_explain_with_triples_sums_exactly_to_predict_and_has_one_triple_column():
+    X, y = _three_way_data()
+    model = ZoneBoostRegressor(
+        n_rounds=60, random_state=0, col_subsample=1.0, max_interaction_order=3
+    ).fit(X, y)
+    assert any(len(round_["triples"]) > 0 for round_ in model.rounds_)
+
+    pred = model.predict(X)
+    contrib = model.explain(X)
+    np.testing.assert_allclose(contrib.sum(axis=1).to_numpy(), pred, atol=1e-6)
+
+    terms = [c for c in contrib.columns if c != "baseline"]
+    assert len(terms) == len(set(terms))
+    triple_cols = [t for t in terms if "x1" in t and "x2" in t and "x3" in t]
+    assert len(triple_cols) == 1
+    assert triple_cols[0] == "x1 x x2 x x3"
