@@ -20,6 +20,15 @@ see :func:`_pair_shrunk_deviation`/:func:`_triple_shrunk_deviation`). This
 keeps a pair/triple's stored value genuinely interaction-only rather than
 redundantly re-encoding signal a lower-order term already captures -- on by
 default (a correctness/attribution fix, not a tunable knob).
+
+Pair discovery is exhaustive by default (every C(p, 2) pair is fully fit),
+but when ``max_pair_interactions`` is set, ``weak_learner_fit`` switches to
+cheap-then-exact hierarchical discovery: every candidate pair is scored with
+:func:`_pair_interaction_score` (a fast ANOVA-style statistic, not the full
+shrinkage machinery) on an honest, cross-fitted main-effects-only residual,
+and only the survivors ever pay the cost of a full :func:`_pair_shrunk_
+deviation` fit -- see :func:`_seed_candidate_columns` and the parameter's own
+docstring for how this stays consistent with 3-way interaction discovery.
 """
 
 from __future__ import annotations
@@ -161,6 +170,34 @@ def _term_importance(deviation: np.ndarray) -> float:
     """A term's own average magnitude -- used to rank pairs/triples by how
     much signal they carry, independent of ndim."""
     return float(np.mean(np.abs(deviation)))
+
+
+def _pair_interaction_score(
+    za: np.ndarray, zb: np.ndarray, residual: np.ndarray, n_zones_a: int, n_zones_b: int
+) -> float:
+    """Cheap screening proxy for how much genuine pairwise interaction signal
+    a candidate pair carries -- a classic weighted two-way ANOVA interaction
+    sum-of-squares, via a single 2D ``bincount`` pass. Deliberately *not*
+    :func:`_pair_shrunk_deviation`: no recursive marginal-prior calls, no
+    per-cell empirical-Bayes shrinkage -- just "does this joint cell's mean
+    deviate from what the row/column marginals alone would predict," weighted
+    by each cell's own row count so sparse cells don't dominate. Used to
+    screen every ``C(p, 2)`` candidate pair cheaply, before paying the much
+    higher cost of :func:`_pair_shrunk_deviation` on only the survivors --
+    see the module docstring.
+    """
+    combined = za * n_zones_b + zb
+    size = n_zones_a * n_zones_b
+    counts = np.bincount(combined, minlength=size).astype(float).reshape(n_zones_a, n_zones_b)
+    sums = np.bincount(combined, weights=residual, minlength=size).reshape(n_zones_a, n_zones_b)
+    cell_mean = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
+
+    row_counts, col_counts = counts.sum(axis=1), counts.sum(axis=0)
+    row_mean = np.divide(sums.sum(axis=1), row_counts, out=np.zeros(n_zones_a), where=row_counts > 0)
+    col_mean = np.divide(sums.sum(axis=0), col_counts, out=np.zeros(n_zones_b), where=col_counts > 0)
+
+    additive = row_mean[:, None] + col_mean[None, :] - float(residual.mean())
+    return float(np.sum(counts * (cell_mean - additive) ** 2) / len(residual))
 
 
 def _blend_1d(deviation: np.ndarray, z_lo, z_hi, w: np.ndarray) -> np.ndarray:
@@ -407,8 +444,41 @@ def _get_pair(interactions: dict, x: str, y: str):
     return interactions[(x, y)] if (x, y) in interactions else interactions[(y, x)]
 
 
+def _fit_pairs(pairs, zones: dict, n_zones: dict, main_effects: dict, residual: np.ndarray, m: float) -> dict:
+    """Fully fit (backfit against mains, see module docstring) exactly the
+    given ``pairs`` -- shared by ``weak_learner_fit``'s screened and
+    unscreened paths so there's a single place that does the expensive
+    per-pair work."""
+    interactions = {}
+    for a, b in pairs:
+        partial = residual - main_effects[a][zones[a]] - main_effects[b][zones[b]]
+        interactions[(a, b)] = _pair_shrunk_deviation(
+            zones[a], zones[b], partial, float(partial.mean()), n_zones[a], n_zones[b], m
+        )
+    return interactions
+
+
+def _seed_candidate_columns(pair_importance: dict, max_triple_interactions: int) -> list:
+    """Extract up to 10 columns worth trying together as 3-way candidates,
+    seeded from the strongest pairs by ``pair_importance`` -- either the
+    cheap screening score (:func:`_pair_interaction_score`) or a full fit's
+    own :func:`_term_importance`, so :func:`_select_triples` always receives
+    a candidate set whose own ``C(candidate_cols, 2)`` pairs are guaranteed
+    already present in whatever ``interactions`` dict it's given (the caller
+    is responsible for that guarantee -- see ``weak_learner_fit``)."""
+    if not pair_importance:
+        return []
+    k_pairs = min(len(pair_importance), max(2 * max_triple_interactions, 6))
+    top_pairs = sorted(pair_importance, key=pair_importance.get, reverse=True)[:k_pairs]
+    col_scores: dict = {}
+    for a, b in top_pairs:
+        col_scores[a] = max(col_scores.get(a, 0.0), pair_importance[(a, b)])
+        col_scores[b] = max(col_scores.get(b, 0.0), pair_importance[(a, b)])
+    return sorted(col_scores, key=col_scores.get, reverse=True)[:10]
+
+
 def _select_triples(
-    predictor_subset: list,
+    candidate_cols: list,
     zones: dict,
     n_zones: dict,
     main_effects: dict,
@@ -424,15 +494,19 @@ def _select_triples(
     structure that main effects and pairwise interactions alone don't
     already explain -- rather than trying every possible triple.
 
-    Candidates are seeded from the columns that appear in this round's
-    strongest pairs (not the full C(p, 3) space), then each candidate is
-    kept only if, after subtracting what main effects + its three
-    constituent pairs would already predict, a joint 3-way zone grouping
-    still carries a signal worth at least ``triple_min_gain`` times its
-    strongest constituent pair's own importance -- comparing the triple's
-    leftover signal to a pair's signal (both computed identically via
-    ``_term_importance``) rather than to the residual's raw scale, since a
-    zone-averaged, shrunk importance score is not on the same scale as a
+    ``candidate_cols`` (up to 10 columns) is computed by the caller via
+    :func:`_seed_candidate_columns`, seeded from the columns that appear in
+    this round's strongest pairs (not the full C(p, 3) space) -- not derived
+    here, so both ``weak_learner_fit``'s screened and unscreened paths can
+    guarantee every ``C(candidate_cols, 2)`` pair the loop below needs is
+    already present in ``interactions`` before calling this function. Each
+    candidate is kept only if, after subtracting what main effects + its
+    three constituent pairs would already predict, a joint 3-way zone
+    grouping still carries a signal worth at least ``triple_min_gain`` times
+    its strongest constituent pair's own importance -- comparing the
+    triple's leftover signal to a pair's signal (both computed identically
+    via ``_term_importance``) rather than to the residual's raw scale, since
+    a zone-averaged, shrunk importance score is not on the same scale as a
     raw standard deviation.
 
     An accepted triple's *stored* value is backfit against mains only
@@ -445,20 +519,12 @@ def _select_triples(
     a mains-removed target, so the accepted triple's coefficients end up
     interaction-only rather than re-encoding lower-order signal.
     """
-    if len(predictor_subset) < 3 or not interactions:
+    if len(candidate_cols) < 3 or not interactions:
         return {}
     if float(residual.std()) <= 0:
         return {}
 
     pair_importance = {pair: _term_importance(interactions[pair]) for pair in interactions}
-    k_pairs = min(len(pair_importance), max(2 * max_triple_interactions, 6))
-    top_pairs = sorted(pair_importance, key=pair_importance.get, reverse=True)[:k_pairs]
-
-    col_scores: dict = {}
-    for a, b in top_pairs:
-        col_scores[a] = max(col_scores.get(a, 0.0), pair_importance[(a, b)])
-        col_scores[b] = max(col_scores.get(b, 0.0), pair_importance[(a, b)])
-    candidate_cols = sorted(col_scores, key=col_scores.get, reverse=True)[:10]
 
     scored = []
     for a, b, c in itertools.combinations(candidate_cols, 3):
@@ -503,26 +569,6 @@ def _select_triples(
 
     scored.sort(key=lambda item: item[1], reverse=True)
     return {key: dev for key, _, dev in scored[:max_triple_interactions]}
-
-
-def _screen_pairs(interactions: dict, max_pair_interactions: int) -> dict:
-    """Keep only the ``max_pair_interactions`` pairs with the largest
-    ``_term_importance`` -- for datasets with enough predictors that
-    cross-fitting and stacking every ``C(p, 2)`` pair becomes the per-round
-    bottleneck. Must be called *after* :func:`_select_triples` has already
-    seen the full, unfiltered dict: triples are self-contained (their own
-    3D grid and gain test recompute marginal priors fresh from ``zones``/
-    ``residual``) and don't depend on a constituent pair still being present
-    here, so screening pairs afterward doesn't disturb triple selection.
-    A no-op when ``max_pair_interactions`` is ``None`` or already covers
-    every pair -- ties broken by original insertion order (stable sort), so
-    results are deterministic without any new randomness.
-    """
-    if max_pair_interactions is None or len(interactions) <= max_pair_interactions:
-        return interactions
-    ranked = sorted(interactions, key=lambda pair: _term_importance(interactions[pair]), reverse=True)
-    keep = set(ranked[:max_pair_interactions])
-    return {pair: dev for pair, dev in interactions.items() if pair in keep}
 
 
 def _column_zone_info(x_col: pd.Series, residual: np.ndarray, is_categorical: bool, max_zones: int, min_zone_frac: float):
@@ -681,13 +727,21 @@ def weak_learner_fit(
         domain knowledge the model can't infer on its own, so there's no
         default direction -- an unlisted column is simply unconstrained.
     max_pair_interactions : int, default=None
-        Cap on how many pairwise interactions a round keeps, ranked by
-        :func:`_term_importance` -- see :func:`_screen_pairs`. Applied after
-        triple selection so it never affects which triples are found.
-        ``None`` (default) keeps every pair, identical to every prior
-        release; only relevant once ``C(len(predictor_subset), 2)`` is large
-        enough that cross-fitting/stacking every pair becomes the
-        per-round bottleneck.
+        Cap on how many pairwise interactions a round keeps. ``None``
+        (default) fits every pair exhaustively, identical to every prior
+        release. When set, pairs are found via cheap, hierarchical
+        discovery rather than fitting every ``C(len(predictor_subset), 2)``
+        pair in full: every candidate pair is scored with
+        :func:`_pair_interaction_score` (a cheap ANOVA-style statistic) on an
+        honest, cross-fitted main-effects-only residual, and only the
+        top-scoring pairs (plus whatever pairs :func:`_select_triples`'s own
+        candidate columns need, when ``max_interaction_order >= 3``) are
+        ever fully fit via :func:`_pair_shrunk_deviation` -- turning an
+        ``O(p²)`` expensive-fit problem into ``O(p²)`` cheap screening plus
+        ``O(k)`` expensive fits, ``k`` bounded by ``max_pair_interactions``
+        and the triple-candidate search, not by ``p``. Falls back to fitting
+        every pair (then trimming by the full fit's own importance) when the
+        round has too few rows for cross-fitting to screen against.
 
     Returns
     -------
@@ -720,39 +774,89 @@ def weak_learner_fit(
         )
         for col in predictor_subset
     }
-    interactions = {}
-    for a, b in itertools.combinations(predictor_subset, 2):
-        # Backfit: subtract each pair's own two main effects first, so the
-        # stored deviation is interaction-only rather than re-encoding signal
-        # main_effects[a]/[b] already capture -- see module docstring.
-        partial = residual - main_effects[a][zones[a]] - main_effects[b][zones[b]]
-        interactions[(a, b)] = _pair_shrunk_deviation(
-            zones[a], zones[b], partial, float(partial.mean()), n_zones[a], n_zones[b], shrinkage_m
+
+    n = len(residual)
+    effective_folds = min(cross_fit_folds, n)
+    if effective_folds < 2:
+        fold_ids = None
+        soft = None
+    else:
+        fold_ids = _make_folds(rng, n, effective_folds)
+        soft = {c: _column_soft_zone_index(X[c], zone_info[c]) for c in predictor_subset}
+
+    screen = max_pair_interactions is not None and fold_ids is not None
+    if screen:
+        # Cheap-then-exact hierarchical discovery: score every C(p, 2)
+        # candidate pair with a fast ANOVA-style statistic on an honest,
+        # cross-fitted main-effects-only residual, and only pay the full
+        # backfitting cost for the survivors (plus whatever pairs the triple
+        # candidate search needs) -- see module docstring.
+        oof_main_pred = _cross_fitted_contributions(
+            zones,
+            soft,
+            n_zones,
+            residual,
+            list(main_effects.keys()),
+            [],
+            [],
+            fold_ids,
+            effective_folds,
+            shrinkage_m,
+            monotonic_constraints,
+        ).sum(axis=1)
+        screening_residual = residual - oof_main_pred
+
+        pair_scores = {
+            (a, b): _pair_interaction_score(zones[a], zones[b], screening_residual, n_zones[a], n_zones[b])
+            for a, b in itertools.combinations(predictor_subset, 2)
+        }
+        kept_pairs = set(sorted(pair_scores, key=pair_scores.get, reverse=True)[:max_pair_interactions])
+
+        candidate_cols = (
+            _seed_candidate_columns(pair_scores, max_triple_interactions) if max_interaction_order >= 3 else []
         )
-    triples = (
-        _select_triples(
-            predictor_subset,
+        fit_pairs = set(kept_pairs)
+        for a, b in itertools.combinations(candidate_cols, 2):
+            fit_pairs.add((a, b) if (a, b) in pair_scores else (b, a))
+    else:
+        kept_pairs = None
+        fit_pairs = list(itertools.combinations(predictor_subset, 2))
+
+    interactions_full = _fit_pairs(fit_pairs, zones, n_zones, main_effects, residual, shrinkage_m)
+
+    if max_interaction_order >= 3:
+        if not screen:
+            pair_importance_for_seeding = {p: _term_importance(d) for p, d in interactions_full.items()}
+            candidate_cols = _seed_candidate_columns(pair_importance_for_seeding, max_triple_interactions)
+        triples = _select_triples(
+            candidate_cols,
             zones,
             n_zones,
             main_effects,
-            interactions,
+            interactions_full,
             residual,
             max_triple_interactions,
             triple_min_gain,
             shrinkage_m,
         )
-        if max_interaction_order >= 3
-        else {}
-    )
-    interactions = _screen_pairs(interactions, max_pair_interactions)
+    else:
+        triples = {}
 
-    n = len(residual)
-    effective_folds = min(cross_fit_folds, n)
+    if kept_pairs is None and max_pair_interactions is not None and len(interactions_full) > max_pair_interactions:
+        # max_pair_interactions was requested but the round had too few rows
+        # for cross-fitting (no honest residual to screen against) -- fall
+        # back to trimming the already-fully-fit pairs by their own
+        # importance, same as every pre-0.14 release did unconditionally.
+        ranked = sorted(interactions_full, key=lambda p: _term_importance(interactions_full[p]), reverse=True)
+        kept_pairs = set(ranked[:max_pair_interactions])
+
+    interactions = (
+        {pair: interactions_full[pair] for pair in kept_pairs} if kept_pairs is not None else interactions_full
+    )
+
     if effective_folds < 2:
         oof_contributions = weak_learner_contributions(X, zone_info, main_effects, interactions, triples)
     else:
-        fold_ids = _make_folds(rng, n, effective_folds)
-        soft = {c: _column_soft_zone_index(X[c], zone_info[c]) for c in predictor_subset}
         oof_contributions = _cross_fitted_contributions(
             zones,
             soft,

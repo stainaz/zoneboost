@@ -8,8 +8,9 @@ from zoneboost._weak_learner import (
     _column_zone_info,
     _fit_lasso_weights,
     _make_folds,
+    _pair_interaction_score,
     _pair_shrunk_deviation,
-    _screen_pairs,
+    _seed_candidate_columns,
     _term_importance,
     _triple_shrunk_deviation,
     _zone_shrunk_deviation,
@@ -272,26 +273,41 @@ def test_high_triple_min_gain_rejects_weak_candidates():
     assert triples == {}
 
 
-def test_screen_pairs_keeps_top_k_by_importance():
-    interactions = {
-        ("a", "b"): np.array([[10.0, -10.0]]),  # importance 10
-        ("a", "c"): np.array([[1.0, -1.0]]),  # importance 1
-        ("b", "c"): np.array([[5.0, -5.0]]),  # importance 5
+def test_pair_interaction_score_high_for_genuine_interaction():
+    rng = np.random.default_rng(0)
+    n = 2000
+    za = rng.integers(0, 5, n)
+    zb = rng.integers(0, 5, n)
+    # Genuine interaction: residual depends on the JOINT (za, zb) cell, not
+    # on either marginal alone.
+    residual = (za == zb).astype(float) * 3.0 + rng.normal(0, 0.2, n)
+    score = _pair_interaction_score(za, zb, residual, 5, 5)
+    assert score > 0.5
+
+
+def test_pair_interaction_score_low_for_independent_noise():
+    rng = np.random.default_rng(0)
+    n = 2000
+    za = rng.integers(0, 5, n)
+    zb = rng.integers(0, 5, n)
+    residual = rng.normal(0, 1.0, n)  # no dependence on za or zb at all
+    score = _pair_interaction_score(za, zb, residual, 5, 5)
+    assert score < 0.05
+
+
+def test_seed_candidate_columns_picks_strongest_pairs_columns():
+    pair_importance = {
+        ("a", "b"): 10.0,
+        ("a", "c"): 1.0,
+        ("b", "c"): 5.0,
+        ("d", "e"): 0.1,
     }
-    screened = _screen_pairs(interactions, max_pair_interactions=2)
-    assert set(screened.keys()) == {("a", "b"), ("b", "c")}
+    candidate_cols = _seed_candidate_columns(pair_importance, max_triple_interactions=1)
+    assert {"a", "b", "c"} <= set(candidate_cols)
 
 
-def test_screen_pairs_is_noop_when_cap_is_none():
-    interactions = {("a", "b"): np.array([[1.0]]), ("a", "c"): np.array([[2.0]])}
-    screened = _screen_pairs(interactions, max_pair_interactions=None)
-    assert screened is interactions
-
-
-def test_screen_pairs_is_noop_when_cap_covers_every_pair():
-    interactions = {("a", "b"): np.array([[1.0]]), ("a", "c"): np.array([[2.0]])}
-    screened = _screen_pairs(interactions, max_pair_interactions=5)
-    assert screened is interactions
+def test_seed_candidate_columns_empty_when_no_pairs():
+    assert _seed_candidate_columns({}, max_triple_interactions=5) == []
 
 
 def test_weak_learner_fit_max_pair_interactions_keeps_only_the_strongest_pair():
@@ -315,9 +331,13 @@ def test_weak_learner_fit_max_pair_interactions_keeps_only_the_strongest_pair():
 
 def test_max_pair_interactions_does_not_affect_triple_selection():
     # Same setup as test_max_interaction_order_3_finds_the_genuine_triple, but
-    # with max_pair_interactions low enough to drop weak pairs -- triple
-    # selection sees the full, unfiltered interactions dict internally, so
-    # the genuine triple must still be found regardless of pair screening.
+    # with max_pair_interactions=1 (only one pair ever kept in the final
+    # model). Triple candidate-column seeding is derived from the cheap
+    # pair_scores computed for *every* candidate pair (not just the kept
+    # ones), and weak_learner_fit fully fits every pair among those
+    # candidate columns to support _select_triples -- so the genuine triple
+    # must still be found even though only one pair survives into the final
+    # interactions dict.
     X, y = _three_way_data()
     residual = y - y.mean()
     rng = np.random.default_rng(0)
