@@ -470,6 +470,42 @@ After `fit`, `ZoneBoostRegressor` exposes (among others):
   `None` if `calibrate=False`) — same plain-data structure as the
   regressor's.
 
+## Benchmarks
+
+Not a leaderboard zoneboost is trying to win — its actual value proposition is
+exact, zero-approximation attribution (`explain()`), not necessarily topping
+accuracy on tabular benchmarks the way gradient boosting often does. This
+reports the real gap (or lack of one) rather than assuming it.
+
+**Regression, California Housing** (3,000-row random subsample, fixed seed,
+3-fold cross-validation; each model at its own library's out-of-the-box
+defaults — only `random_state` set, no tuning favoring either one):
+
+| Model | RMSE | R² | Fit time (s) | Predict time (s) |
+|---|---|---|---|---|
+| `ZoneBoostRegressor` | 0.5510 ± 0.0212 | 0.7677 ± 0.0107 | 5.26 | 0.267 |
+| `LGBMRegressor` | 0.5221 ± 0.0275 | 0.7912 ± 0.0166 | 1.11 | 0.003 |
+
+LightGBM's RMSE is about 5% lower and it fits roughly 5x faster. zoneboost's
+own value here isn't matching or beating LightGBM's raw accuracy — every one
+of its predictions decomposes *exactly* into main effects and named
+interaction terms via `explain()`, with no sampling and no approximation,
+which LightGBM has no built-in equivalent for.
+
+InterpretML's Explainable Boosting Machine (EBM) — architecturally the
+closest existing interpretable model — was deliberately left out of this
+comparison: its default `outer_bags=8` spawns a separate parallel worker
+process per bag per CV fold, and the fixed process-spawn overhead in the
+environment this was run in dominated wall-clock time independent of any
+real compute cost. That's an environment/parallelism-backend artifact, not a
+finding about EBM's accuracy, so it isn't reported here as a misleading
+number.
+
+Reproduce with `pip install -e ".[benchmark]"` then
+`python benchmarks/compare_lightgbm.py` — see [benchmarks/](benchmarks/) and
+the [full write-up](https://stainaz.github.io/zoneboost/benchmarks.html) for
+methodology details and how to extend it.
+
 ## Scope
 
 This estimator targets practical scikit-learn compatibility —

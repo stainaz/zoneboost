@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Benchmarks — zoneboost docs</title>
+<meta name="description" content="Honest, reproducible benchmark results comparing ZoneBoostRegressor against LightGBM on real data.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="container">
+    <a class="wordmark" href="index.html">
+      <span class="mark"><img src="assets/favicon.svg" alt="" width="22" height="22"></span>
+      zoneboost
+    </a>
+    <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false">☰</button>
+    <nav class="main-nav">
+      <a href="getting-started.html" aria-current="page">Docs</a>
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+    </nav>
+  </div>
+</header>
+
+<div class="docs-layout container">
+  <button class="sidebar-toggle" aria-expanded="false">☰ Docs menu</button>
+  <aside class="docs-sidebar">
+    <div class="docs-search">
+      <input type="text" placeholder="Search docs…" aria-label="Search docs" autocomplete="off">
+      <div class="search-results"></div>
+    </div>
+    <p class="docs-nav-label">Docs</p>
+    <nav>
+      <a href="getting-started.html">Getting Started</a>
+      <a href="how-it-works.html">How It Works</a>
+      <a href="api-reference.html">API Reference</a>
+      <a href="explaining-predictions.html">Explaining Predictions</a>
+      <a href="benchmarks.html" aria-current="page">Benchmarks</a>
+    </nav>
+  </aside>
+
+  <article class="docs-content">
+    <h1>Benchmarks</h1>
+    <p class="subtitle">Not a leaderboard zoneboost is trying to win — its actual value
+    proposition is exact, zero-approximation attribution (<code>explain()</code>), not
+    necessarily topping accuracy on tabular benchmarks the way gradient boosting often
+    does. This page reports the real gap (or lack of one) rather than assuming it.</p>
+
+    <h2 id="methodology">Methodology</h2>
+    <ul>
+      <li>Each model uses its own library's <strong>out-of-the-box defaults</strong> —
+      only <code>random_state</code> is set for reproducibility, no tuning that favors
+      either one.</li>
+      <li><strong>Cross-validation</strong>, not a single train/test split, so results
+      reflect genuine variance across splits rather than one split's luck — the same
+      "never grade yourself on your own homework" principle already central to
+      zoneboost's own cross-fitting.</li>
+      <li><strong>Real data</strong>: California Housing (a standard tabular-regression
+      benchmark, randomly subsampled to 3,000 rows with a fixed seed purely so the
+      comparison runs in a couple of minutes — a disclosed speed tradeoff, not a
+      hyperparameter change to either model).</li>
+      <li>Compared against <strong>LightGBM</strong>. InterpretML's Explainable Boosting
+      Machine (EBM) — architecturally the closest existing interpretable model, see
+      <a href="how-it-works.html#how-it-compares">How It Compares</a> — was deliberately
+      left out of this comparison: its default <code>outer_bags=8</code> spawns a
+      separate parallel worker process per bag per CV fold, and the fixed process-spawn
+      overhead in the environment this was run in dominated wall-clock time even on
+      small datasets, independent of any real compute cost. That's an
+      environment/parallelism-backend artifact, not a finding about EBM's accuracy, so
+      it isn't reported here as a misleading number.</li>
+    </ul>
+
+    <h2 id="regression">Regression: California Housing</h2>
+    <p>3,000-row random subsample, 3-fold cross-validation.</p>
+    <table>
+      <thead><tr><th>Model</th><th>RMSE</th><th>R²</th><th>Fit time (s)</th><th>Predict time (s)</th></tr></thead>
+      <tbody>
+        <tr><td>ZoneBoostRegressor</td><td>0.5510 ± 0.0212</td><td>0.7677 ± 0.0107</td><td>5.26</td><td>0.267</td></tr>
+        <tr><td>LGBMRegressor</td><td>0.5221 ± 0.0275</td><td>0.7912 ± 0.0166</td><td>1.11</td><td>0.003</td></tr>
+      </tbody>
+    </table>
+    <div class="note">
+      LightGBM's out-of-the-box RMSE is about 5% lower and fits roughly 5x faster.
+      Neither model was tuned. zoneboost's own value here isn't matching or beating
+      LightGBM's raw accuracy — it's that every one of those predictions decomposes
+      <em>exactly</em> into main effects and named interaction terms via
+      <code>explain()</code>, with no sampling and no approximation, which LightGBM has
+      no built-in equivalent for.
+    </div>
+
+    <h2 id="reproduce">Reproducing</h2>
+    <pre><code>pip install -e ".[benchmark]"
+python benchmarks/compare_lightgbm.py</code></pre>
+    <p>The script also includes a classification comparison (Breast Cancer Wisconsin)
+    and a synthetic-data demonstration of <code>ZoneBoostRegressor.explain()</code>
+    correctly attributing a known interaction that LightGBM has no way to name —
+    see <a href="https://github.com/stainaz/zoneboost/blob/main/benchmarks">benchmarks/</a>
+    in the repository for the full, runnable script and its documented scope.</p>
+  </article>
+</div>
+
+<footer class="site-footer">
+  <div class="container">
+    <span>MIT licensed — © zoneboost contributors</span>
+    <div class="footer-links">
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://github.com/stainaz/zoneboost/issues">Issues</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+      <a href="https://github.com/stainaz/zoneboost/blob/main/LICENSE">License</a>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/script.js"></script>
+</body>
+</html>

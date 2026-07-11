@@ -116,7 +116,12 @@
     { title: "explain(X)", crumb: "Explaining Predictions", url: "explaining-predictions.html#explain" },
     { title: "feature_importance(X)", crumb: "Explaining Predictions", url: "explaining-predictions.html#feature-importance" },
     { title: "Classification Semantics", crumb: "Explaining Predictions", url: "explaining-predictions.html#classification-semantics" },
-    { title: "How This Differs from SHAP/LIME", crumb: "Explaining Predictions", url: "explaining-predictions.html#vs-shap-lime" }
+    { title: "How This Differs from SHAP/LIME", crumb: "Explaining Predictions", url: "explaining-predictions.html#vs-shap-lime" },
+
+    { title: "Benchmarks", crumb: "Docs", url: "benchmarks.html" },
+    { title: "Methodology", crumb: "Benchmarks", url: "benchmarks.html#methodology" },
+    { title: "Regression: California Housing", crumb: "Benchmarks", url: "benchmarks.html#regression" },
+    { title: "Reproducing", crumb: "Benchmarks", url: "benchmarks.html#reproduce" }
   ];
 
   function initDocsSearch() {
