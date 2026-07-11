@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 
 from zoneboost._weak_learner import (
+    _column_soft_zone_index,
+    _column_zone_info,
     _fit_lasso_weights,
     _make_folds,
     _pair_shrunk_deviation,
@@ -202,3 +204,72 @@ def test_fit_lasso_weights_degenerate_residual_returns_zero_weights():
     intercept, weights = _fit_lasso_weights(contributions, residual, alpha=0.05)
     assert intercept == 2.0
     np.testing.assert_array_equal(weights, np.zeros(3))
+
+
+def _step_data(n=200, seed=0):
+    # A clean step at x=10 forces exactly one boundary/two real zones, so
+    # the centers are known and predictable for testing interpolation.
+    rng = np.random.default_rng(seed)
+    x = pd.Series(rng.uniform(0, 20, n))
+    y = (x > 10).astype(float) * 5.0 + rng.normal(0, 0.1, n)
+    return x, y.to_numpy()
+
+
+def test_soft_zone_index_weight_is_zero_at_its_own_centroid():
+    x, y = _step_data()
+    info = _column_zone_info(x, y, is_categorical=False, max_zones=2, min_zone_frac=0.02)
+    _, boundaries, centers = info
+    assert len(centers) == 2
+
+    probe = pd.Series([centers[0], centers[1]])
+    z_lo, z_hi, w = _column_soft_zone_index(probe, info)
+    np.testing.assert_allclose(w, [0.0, 0.0])  # exactly at its own centroid
+    assert z_lo[0] == 0 and z_lo[1] == 1
+
+
+def test_soft_zone_index_blend_is_continuous_across_the_hard_boundary():
+    # The whole point of soft boundaries: the blended VALUE (not just the
+    # weight) must be continuous exactly at the hard zone_index switchover
+    # -- approaching a boundary from zone 0's side and from zone 1's side
+    # must agree, rather than jumping.
+    x, y = _step_data()
+    info = _column_zone_info(x, y, is_categorical=False, max_zones=2, min_zone_frac=0.02)
+    _, boundaries, centers = info
+    b = boundaries[0]
+    deviation = np.array([-3.0, 7.0])  # arbitrary distinct per-zone values
+
+    eps = 1e-6
+    just_below = pd.Series([b - eps])
+    just_above = pd.Series([b + eps])
+    z_lo_below, z_hi_below, w_below = _column_soft_zone_index(just_below, info)
+    z_lo_above, z_hi_above, w_above = _column_soft_zone_index(just_above, info)
+
+    value_below = (1 - w_below[0]) * deviation[z_lo_below[0]] + w_below[0] * deviation[z_hi_below[0]]
+    value_above = (1 - w_above[0]) * deviation[z_lo_above[0]] + w_above[0] * deviation[z_hi_above[0]]
+    assert abs(value_below - value_above) < 1e-3
+
+
+def test_soft_zone_index_clamps_past_the_edge_zones():
+    x, y = _step_data()
+    info = _column_zone_info(x, y, is_categorical=False, max_zones=2, min_zone_frac=0.02)
+    _, boundaries, centers = info
+    # Further left than zone 0's own centroid, and further right than the
+    # last zone's own centroid -- no phantom neighbor to blend toward.
+    probe = pd.Series([centers[0] - 100.0, centers[-1] + 100.0])
+    _, _, w = _column_soft_zone_index(probe, info)
+    np.testing.assert_allclose(w, [0.0, 0.0])
+
+
+def test_soft_zone_index_categorical_and_missing_always_weight_zero():
+    x, y = _step_data()
+    info = _column_zone_info(x, y, is_categorical=False, max_zones=2, min_zone_frac=0.02)
+    probe = pd.Series([np.nan])
+    z_lo, z_hi, w = _column_soft_zone_index(probe, info)
+    assert w[0] == 0.0
+    assert z_lo[0] == z_hi[0]
+
+    cat_series = pd.Series(["a", "b", "a"])
+    cat_info = _column_zone_info(cat_series, np.array([1.0, 2.0, 1.0]), is_categorical=True, max_zones=7, min_zone_frac=0.02)
+    z_lo_c, z_hi_c, w_c = _column_soft_zone_index(cat_series, cat_info)
+    np.testing.assert_array_equal(z_lo_c, z_hi_c)
+    np.testing.assert_allclose(w_c, 0.0)

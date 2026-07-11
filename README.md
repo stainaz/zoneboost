@@ -216,6 +216,38 @@ unrecoverable blend (test R² ≈ 0); Lasso stacking recovered it cleanly
 (test R² > 0.85) — the gap the reviewer's roadmap predicted this would
 close. Like the two changes above, this is on by default.
 
+### Soft zone boundaries
+
+Continuous zone boundaries were hard cuts: a value one unit below a cut point and one
+unit above it land in completely different zones with independently-shrunk means — a
+"cliff edge" discontinuity in the prediction at the exact boundary, which doesn't match
+how a genuinely continuous relationship should behave. Every real zone now also gets a
+**centroid** — the empirical mean training-x-value of the rows that landed in it — and a
+lookup blends between a value's own zone and whichever neighboring zone its centroid
+points toward, rather than hard-assigning it to exactly one:
+
+- 0 exactly at its own zone's centroid, 1 exactly at the neighbor's, linear between,
+  clamped past either end (leftmost/rightmost zone, or a single-zone column) so it never
+  reaches past a non-existent neighbor.
+- Main effects become a 2-point linear blend; pairwise interactions become the standard
+  4-corner bilinear blend; triples become the 8-corner trilinear analog.
+- Categorical columns and missing values are an exact no-op (always fully their own hard
+  zone) — there's no meaningful "distance" to interpolate along a nominal category, so
+  only continuous-column lookups change. A pair/triple with a categorical member
+  naturally interpolates only along its continuous member(s).
+
+Zone *construction* (the adaptive split search, `min_zone_frac`, `max_zones`) and each
+zone's own fitted mean (still computed by hard-grouping training rows, unchanged) are
+untouched — only how a value is *looked up* against an already-fitted grid changes. On a
+sharp step function, the largest single-step prediction change across an infinitesimal
+step over the true boundary dropped from ~3.9 (almost the full step size) to ~0.2 — and,
+consistent with "helps generalisation," a continuous-interaction test case's held-out R²
+improved further on top of what cross-fitting/shrinkage/stacking already delivered. Like
+the three changes above, this is on by default; there's no natural partial-strength knob
+to expose as a parameter, so no new one was added. Fitting cost is meaningfully higher
+than before (roughly +40% wall-clock in benchmarks) — a real, disclosed tradeoff for
+eliminating the discontinuity, not a free change like cross-fitting/shrinkage were.
+
 ## Parameters
 
 Identical parameter set on both estimators.

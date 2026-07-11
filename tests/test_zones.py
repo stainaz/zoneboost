@@ -5,6 +5,7 @@ from zoneboost._zones import (
     adaptive_zone_boundaries,
     categorical_zone_index,
     categorical_zone_map,
+    zone_centers,
     zone_index,
 )
 
@@ -115,3 +116,20 @@ def test_categorical_zone_map_excludes_missing_values():
     cat_map = categorical_zone_map(series)
     assert set(cat_map.keys()) == {"a", "b"}
     assert len(cat_map) == 2
+
+
+def test_zone_centers_matches_hand_computed_means():
+    bounds = np.array([5.0])  # 2 real zones: [<=5], [>5]
+    x = np.array([1.0, 2.0, 3.0, 10.0, 11.0, 12.0, np.nan])
+    centers = zone_centers(x, bounds)
+    np.testing.assert_allclose(centers, [2.0, 11.0])
+
+
+def test_zone_centers_empty_zone_falls_back_to_boundary_midpoint_without_crashing():
+    bounds = np.array([5.0, 100.0])  # zone 1 (between 5 and 100) will be empty
+    x = np.array([1.0, 2.0, 3.0, 200.0, 201.0])
+    centers = zone_centers(x, bounds)
+    assert np.all(np.isfinite(centers))
+    assert centers[0] < 5.0  # zone 0's real mean
+    assert 5.0 < centers[1] < 100.0  # empty zone's fallback midpoint
+    assert centers[2] > 100.0  # zone 2's real mean

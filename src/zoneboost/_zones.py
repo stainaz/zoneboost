@@ -25,6 +25,7 @@ import pandas as pd
 
 __all__ = [
     "zone_index",
+    "zone_centers",
     "adaptive_zone_boundaries",
     "categorical_zone_map",
     "categorical_zone_index",
@@ -56,6 +57,51 @@ def zone_index(values, boundaries: np.ndarray) -> np.ndarray:
     idx = np.searchsorted(boundaries, arr, side="right")
     missing_idx = len(boundaries) + 1
     return np.where(is_missing, missing_idx, idx)
+
+
+def zone_centers(x, boundaries: np.ndarray) -> np.ndarray:
+    """Each *real* zone's centroid: the empirical mean training-x-value of
+    the rows that landed in it (via :func:`zone_index`) -- one entry per
+    real zone (``len(boundaries) + 1`` of them; the missing zone has no
+    centroid, since it's never interpolated into or out of).
+
+    Used to interpolate a lookup between two zones' fitted values rather
+    than hard-assigning a value to exactly one zone (see
+    ``_weak_learner._column_soft_zone_index``) -- a value exactly at its
+    own zone's centroid is fully that zone; moving toward a neighboring
+    zone's centroid blends linearly toward it.
+
+    Parameters
+    ----------
+    x : array-like of shape (n_samples,)
+        The same training column ``boundaries`` was fit from.
+    boundaries : ndarray of shape (n_cuts,)
+
+    Returns
+    -------
+    ndarray of shape (n_cuts + 1,)
+        A pathologically empty zone (shouldn't normally happen given
+        :func:`adaptive_zone_boundaries`'s own min-size guards) falls back
+        to its own boundary midpoint rather than producing NaN.
+    """
+    x_arr = np.asarray(x, dtype=float)
+    x_present = x_arr[~np.isnan(x_arr)]
+    n_real = len(boundaries) + 1
+    z = np.searchsorted(boundaries, x_present, side="right")
+
+    sums = np.bincount(z, weights=x_present, minlength=n_real)
+    counts = np.bincount(z, minlength=n_real)
+    centers = np.divide(sums, counts, out=np.full(n_real, np.nan), where=counts > 0)
+
+    empty = counts == 0
+    if np.any(empty):
+        if len(boundaries) > 0:
+            edges = np.concatenate(([boundaries[0] - 1.0], boundaries, [boundaries[-1] + 1.0]))
+        else:
+            edges = np.array([-1.0, 1.0])
+        midpoints = (edges[:-1] + edges[1:]) / 2.0
+        centers = np.where(empty, midpoints, centers)
+    return centers
 
 
 def _best_split(y_sorted_seg: np.ndarray, x_sorted_seg: np.ndarray, min_size: int):

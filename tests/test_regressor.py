@@ -246,17 +246,38 @@ def test_lasso_stacking_separates_real_interaction_from_noise_pairs():
     assert importance.iloc[0] > 5 * top_noise_importance
 
 
+def test_soft_zone_boundaries_kill_the_cliff_edge_at_a_real_split():
+    # A sharp step function forces exactly one real zone boundary. Without
+    # soft boundaries, predict() jumps almost the full step size (~5) over
+    # an infinitesimal step across it; with them, the jump should be a
+    # small fraction of that.
+    rng = np.random.default_rng(0)
+    n = 800
+    X = pd.DataFrame({"x": rng.uniform(0, 20, n)})
+    y = (X["x"] > 10).astype(float).to_numpy() * 5.0 + rng.normal(0, 0.2, n)
+
+    model = ZoneBoostRegressor(n_rounds=50, random_state=0, validation_fraction=0).fit(X, y)
+    grid = pd.DataFrame({"x": np.linspace(9.5, 10.5, 41)})
+    preds = model.predict(grid)
+    biggest_jump = np.max(np.abs(np.diff(preds)))
+    assert biggest_jump < 1.0  # well under the ~5.0 jump hard boundaries would produce
+
+
 def test_max_interaction_order_3_improves_fit_on_genuine_triple_interaction():
     # col_subsample=1.0: with only 3 predictors, the default 0.7 subsample
     # rounds down to 2 columns per round, which never gives a 3-way search
     # a chance -- using all 3 columns every round is the realistic setting
     # for a model with this few predictors.
+    # n_rounds=100: at 60 (the previous value) the two models' RMSE are close
+    # enough that soft zone boundaries' small change to per-round dynamics
+    # can flip which one edges out the other by noise; 100 rounds gives the
+    # genuine triple signal enough rounds to clearly separate out.
     X, y = _three_way_interaction_data()
     model_pairwise = ZoneBoostRegressor(
-        n_rounds=60, random_state=0, col_subsample=1.0, max_interaction_order=2
+        n_rounds=100, random_state=0, col_subsample=1.0, max_interaction_order=2
     ).fit(X, y)
     model_triples = ZoneBoostRegressor(
-        n_rounds=60, random_state=0, col_subsample=1.0, max_interaction_order=3
+        n_rounds=100, random_state=0, col_subsample=1.0, max_interaction_order=3
     ).fit(X, y)
 
     rmse_pairwise = np.sqrt(np.mean((y - model_pairwise.predict(X)) ** 2))

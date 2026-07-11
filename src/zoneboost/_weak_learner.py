@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import Lasso
 
-from ._zones import adaptive_zone_boundaries, categorical_zone_index, categorical_zone_map, zone_index
+from ._zones import adaptive_zone_boundaries, categorical_zone_index, categorical_zone_map, zone_centers, zone_index
 
 __all__ = ["weak_learner_fit", "weak_learner_contributions"]
 
@@ -121,6 +121,40 @@ def _term_importance(deviation: np.ndarray) -> float:
     return float(np.mean(np.abs(deviation)))
 
 
+def _blend_1d(deviation: np.ndarray, z_lo, z_hi, w: np.ndarray) -> np.ndarray:
+    """Linear interpolation between a zone's own value and its neighbor's
+    (see ``_column_soft_zone_index``) -- degenerates to the plain hard
+    lookup ``deviation[z_lo]`` whenever ``w`` is 0 (categorical columns,
+    missing values, or a continuous value at/beyond its own centroid)."""
+    return (1 - w) * deviation[z_lo] + w * deviation[z_hi]
+
+
+def _blend_2d(deviation: np.ndarray, za_lo, za_hi, wa, zb_lo, zb_hi, wb) -> np.ndarray:
+    """Standard bilinear interpolation across the four surrounding cells.
+    A categorical/missing axis has ``w == 0`` there, so this collapses to
+    plain 1D interpolation along whichever axis is actually continuous."""
+    return (
+        (1 - wa) * (1 - wb) * deviation[za_lo, zb_lo]
+        + wa * (1 - wb) * deviation[za_hi, zb_lo]
+        + (1 - wa) * wb * deviation[za_lo, zb_hi]
+        + wa * wb * deviation[za_hi, zb_hi]
+    )
+
+
+def _blend_3d(deviation: np.ndarray, za_lo, za_hi, wa, zb_lo, zb_hi, wb, zc_lo, zc_hi, wc) -> np.ndarray:
+    """Trilinear interpolation across the eight surrounding cells."""
+    return (
+        (1 - wa) * (1 - wb) * (1 - wc) * deviation[za_lo, zb_lo, zc_lo]
+        + wa * (1 - wb) * (1 - wc) * deviation[za_hi, zb_lo, zc_lo]
+        + (1 - wa) * wb * (1 - wc) * deviation[za_lo, zb_hi, zc_lo]
+        + (1 - wa) * (1 - wb) * wc * deviation[za_lo, zb_lo, zc_hi]
+        + wa * wb * (1 - wc) * deviation[za_hi, zb_hi, zc_lo]
+        + wa * (1 - wb) * wc * deviation[za_hi, zb_lo, zc_hi]
+        + (1 - wa) * wb * wc * deviation[za_lo, zb_hi, zc_hi]
+        + wa * wb * wc * deviation[za_hi, zb_hi, zc_hi]
+    )
+
+
 def _ols_scale(raw: np.ndarray, residual: np.ndarray) -> tuple:
     """Ordinary-least-squares fit of ``residual`` on ``raw`` (a single
     predictor): returns ``(alpha, beta)`` minimizing
@@ -204,6 +238,7 @@ def _make_folds(rng: np.random.Generator, n: int, n_folds: int) -> np.ndarray:
 
 def _cross_fitted_contributions(
     zones: dict,
+    soft: dict,
     n_zones: dict,
     residual: np.ndarray,
     main_effect_keys: list,
@@ -219,13 +254,17 @@ def _cross_fitted_contributions(
     folds' rows only (reusing ``_zone_shrunk_deviation``/
     ``_pair_shrunk_deviation``/``_triple_shrunk_deviation`` unchanged on
     fold-restricted slices), then used to score that fold's own held-out
-    rows. No row is ever scored with a table that included its own value --
-    the CatBoost ordered-target-statistics fix, applied to zoneboost's zone
-    grids. Which terms exist (main effects / which pairs / which triples)
-    is decided once from the full subsample elsewhere; this only
-    recomputes the numeric cell means used to score training rows
-    honestly. Returns the full ``(n, n_terms)`` per-term matrix (not
-    pooled), so the caller can fit per-term stacking weights on it.
+    rows -- via the same soft, interpolated blend ``weak_learner_
+    contributions`` uses (zone boundaries/centroids are fixed for the
+    round, so a row's interpolation weights don't depend on which fold
+    computed the values being blended). No row is ever scored with a table
+    that included its own value -- the CatBoost ordered-target-statistics
+    fix, applied to zoneboost's zone grids. Which terms exist (main
+    effects / which pairs / which triples) is decided once from the full
+    subsample elsewhere; this only recomputes the numeric cell means used
+    to score training rows honestly. Returns the full ``(n, n_terms)``
+    per-term matrix (not pooled), so the caller can fit per-term stacking
+    weights on it.
     """
     n = len(residual)
     n_terms = len(main_effect_keys) + len(interaction_keys) + len(triple_keys)
@@ -241,16 +280,19 @@ def _cross_fitted_contributions(
         col = 0
         for name in main_effect_keys:
             dev = _zone_shrunk_deviation(zones[name][out_mask], residual[out_mask], overall_mean_k, n_zones[name], m)
-            z_in = zones[name][in_mask]
-            contributions[in_mask, col] = dev[z_in]
+            z_lo, z_hi, w = soft[name]
+            contributions[in_mask, col] = _blend_1d(dev, z_lo[in_mask], z_hi[in_mask], w[in_mask])
             col += 1
 
         for a, b in interaction_keys:
             dev = _pair_shrunk_deviation(
                 zones[a][out_mask], zones[b][out_mask], residual[out_mask], overall_mean_k, n_zones[a], n_zones[b], m
             )
-            za_in, zb_in = zones[a][in_mask], zones[b][in_mask]
-            contributions[in_mask, col] = dev[za_in, zb_in]
+            za_lo, za_hi, wa = soft[a]
+            zb_lo, zb_hi, wb = soft[b]
+            contributions[in_mask, col] = _blend_2d(
+                dev, za_lo[in_mask], za_hi[in_mask], wa[in_mask], zb_lo[in_mask], zb_hi[in_mask], wb[in_mask]
+            )
             col += 1
 
         for a, b, c in triple_keys:
@@ -265,8 +307,21 @@ def _cross_fitted_contributions(
                 n_zones[c],
                 m,
             )
-            za_in, zb_in, zc_in = zones[a][in_mask], zones[b][in_mask], zones[c][in_mask]
-            contributions[in_mask, col] = dev[za_in, zb_in, zc_in]
+            za_lo, za_hi, wa = soft[a]
+            zb_lo, zb_hi, wb = soft[b]
+            zc_lo, zc_hi, wc = soft[c]
+            contributions[in_mask, col] = _blend_3d(
+                dev,
+                za_lo[in_mask],
+                za_hi[in_mask],
+                wa[in_mask],
+                zb_lo[in_mask],
+                zb_hi[in_mask],
+                wb[in_mask],
+                zc_lo[in_mask],
+                zc_hi[in_mask],
+                wc[in_mask],
+            )
             col += 1
 
     return contributions
@@ -361,25 +416,82 @@ def _select_triples(
 
 
 def _column_zone_info(x_col: pd.Series, residual: np.ndarray, is_categorical: bool, max_zones: int, min_zone_frac: float):
-    """Returns a ``("continuous", boundaries)`` or ``("categorical",
+    """Returns a ``("continuous", boundaries, centers)`` or ``("categorical",
     category_map)`` tagged tuple -- the one place that decides which zone
-    mechanism a column uses."""
+    mechanism a column uses. ``centers`` (one per real zone) is what lets
+    a continuous column's lookup interpolate between neighboring zones
+    instead of hard-assigning a value to exactly one -- see
+    :func:`_column_soft_zone_index`."""
     if is_categorical:
         return ("categorical", categorical_zone_map(x_col))
     col_cap = min(max_zones, x_col.nunique())
     bounds = adaptive_zone_boundaries(x_col, residual, max_zones=col_cap, min_zone_frac=min_zone_frac)
-    return ("continuous", bounds)
+    centers = zone_centers(x_col, bounds)
+    return ("continuous", bounds, centers)
 
 
 def _column_zone_index(x_col: pd.Series, info: tuple) -> np.ndarray:
-    kind, payload = info
+    """Hard (single-zone) lookup -- still used for zone construction itself
+    and by :func:`_select_triples`'s self-contained candidate-gain test.
+    Production scoring uses the soft, interpolated lookup instead; see
+    :func:`_column_soft_zone_index`."""
+    kind = info[0]
     if kind == "categorical":
-        return categorical_zone_index(x_col, payload)
-    return zone_index(x_col, payload)
+        return categorical_zone_index(x_col, info[1])
+    return zone_index(x_col, info[1])
+
+
+def _column_soft_zone_index(x_col: pd.Series, info: tuple):
+    """Interpolated lookup for a continuous column: instead of hard-
+    assigning a value to exactly one zone, find its own zone's centroid
+    and the neighboring zone in whichever direction the value sits from
+    that centroid, and return how far toward that neighbor to blend.
+
+    Categorical columns and missing continuous values are a trivial
+    no-op case (``z_lo == z_hi``, ``weight_hi == 0``) so the *same* blend
+    formula works uniformly downstream regardless of column type -- see
+    ``weak_learner_contributions``.
+
+    Returns
+    -------
+    z_lo, z_hi : ndarray of int
+        The value's own zone, and the neighboring zone to blend toward
+        (equal to ``z_lo`` when there's nothing to blend into).
+    weight_hi : ndarray of float
+        0 at ``z_lo``'s own centroid, 1 at ``z_hi``'s centroid, linear
+        between, clamped to ``[0, 1]`` past either end (leftmost/rightmost
+        zone, or a single-zone column) so it never reaches past a
+        non-existent neighbor.
+    """
+    if info[0] == "categorical":
+        z = categorical_zone_index(x_col, info[1])
+        zero = np.zeros(len(z))
+        return z, z, zero
+
+    boundaries, centers = info[1], info[2]
+    x_arr = np.asarray(x_col, dtype=float)
+    is_missing = np.isnan(x_arr)
+    n_real = len(centers)
+
+    z_lo = np.clip(zone_index(x_arr, boundaries), 0, n_real - 1)
+    own_center = centers[z_lo]
+    go_right = x_arr > own_center
+    z_hi = np.where(go_right, np.minimum(z_lo + 1, n_real - 1), np.maximum(z_lo - 1, 0))
+    neighbor_center = centers[z_hi]
+
+    denom = neighbor_center - own_center
+    weight_hi = np.divide(x_arr - own_center, denom, out=np.zeros_like(x_arr), where=denom != 0)
+    weight_hi = np.clip(weight_hi, 0.0, 1.0)
+
+    missing_idx = n_real  # one past the last real zone, matching zone_index's convention
+    z_lo = np.where(is_missing, missing_idx, z_lo)
+    z_hi = np.where(is_missing, missing_idx, z_hi)
+    weight_hi = np.where(is_missing, 0.0, weight_hi)
+    return z_lo, z_hi, weight_hi
 
 
 def _column_n_zones(info: tuple) -> int:
-    kind, payload = info
+    kind, payload = info[0], info[1]
     if kind == "categorical":
         return len(payload) + 2  # +2: dedicated "missing" zone, dedicated "unseen category" zone
     return len(payload) + 2  # +2: last cut point, dedicated "missing" zone
@@ -495,8 +607,10 @@ def weak_learner_fit(
         oof_contributions = weak_learner_contributions(X, zone_info, main_effects, interactions, triples)
     else:
         fold_ids = _make_folds(rng, n, effective_folds)
+        soft = {c: _column_soft_zone_index(X[c], zone_info[c]) for c in predictor_subset}
         oof_contributions = _cross_fitted_contributions(
             zones,
+            soft,
             n_zones,
             residual,
             list(main_effects.keys()),
@@ -534,16 +648,19 @@ def weak_learner_contributions(
         needed_cols.add(a)
         needed_cols.add(b)
         needed_cols.add(c)
-    zones = {c: _column_zone_index(X[c], zone_info[c]) for c in needed_cols}
+    soft = {c: _column_soft_zone_index(X[c], zone_info[c]) for c in needed_cols}
 
     contributions = []
     for col, deviation in main_effects.items():
-        z = zones[col]
-        contributions.append(deviation[z])
+        z_lo, z_hi, w = soft[col]
+        contributions.append(_blend_1d(deviation, z_lo, z_hi, w))
     for (a, b), deviation in interactions.items():
-        za, zb = zones[a], zones[b]
-        contributions.append(deviation[za, zb])
+        za_lo, za_hi, wa = soft[a]
+        zb_lo, zb_hi, wb = soft[b]
+        contributions.append(_blend_2d(deviation, za_lo, za_hi, wa, zb_lo, zb_hi, wb))
     for (a, b, c), deviation in triples.items():
-        za, zb, zc = zones[a], zones[b], zones[c]
-        contributions.append(deviation[za, zb, zc])
+        za_lo, za_hi, wa = soft[a]
+        zb_lo, zb_hi, wb = soft[b]
+        zc_lo, zc_hi, wc = soft[c]
+        contributions.append(_blend_3d(deviation, za_lo, za_hi, wa, zb_lo, zb_hi, wb, zc_lo, zc_hi, wc))
     return np.column_stack(contributions)

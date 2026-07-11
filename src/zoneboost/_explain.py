@@ -19,6 +19,12 @@ with round_baseline = intercept, a fixed per-round constant. Summing that
 across rounds gives, for every row, a set of per-term contributions that
 add up EXACTLY to the model's prediction (or, for the classifier, to the
 pre-sigmoid log-odds score) -- not an estimate of it.
+
+Each ``term_i`` itself is a soft, interpolated lookup for continuous
+columns (see ``_weak_learner._column_soft_zone_index`` and
+``_blend_1d``/``_blend_2d``/``_blend_3d``) rather than a hard single-zone
+value -- this module must use the exact same blend `predict` does, or the
+row-sum-equals-prediction invariant above would break.
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from ._weak_learner import _column_zone_index
+from ._weak_learner import _blend_1d, _blend_2d, _blend_3d, _column_soft_zone_index
 
 __all__ = ["explain_rounds"]
 
@@ -76,16 +82,16 @@ def explain_rounds(X: pd.DataFrame, rounds: list, baseline: float, learning_rate
         # the order the round's weights were fit against.
         i = 0
         for col, deviation in main_effects.items():
-            z = _column_zone_index(X[col], zone_info[col])
-            share = learning_rate * weights[i] * deviation[z]
+            z_lo, z_hi, w = _column_soft_zone_index(X[col], zone_info[col])
+            share = learning_rate * weights[i] * _blend_1d(deviation, z_lo, z_hi, w)
             term_totals.setdefault(col, np.zeros(n))
             term_totals[col] += share
             i += 1
 
         for (a, b), deviation in interactions.items():
-            za = _column_zone_index(X[a], zone_info[a])
-            zb = _column_zone_index(X[b], zone_info[b])
-            share = learning_rate * weights[i] * deviation[za, zb]
+            za_lo, za_hi, wa = _column_soft_zone_index(X[a], zone_info[a])
+            zb_lo, zb_hi, wb = _column_soft_zone_index(X[b], zone_info[b])
+            share = learning_rate * weights[i] * _blend_2d(deviation, za_lo, za_hi, wa, zb_lo, zb_hi, wb)
             # Canonicalize: a pair's fit order varies round to round (each
             # round samples/orders columns independently), so without
             # sorting, "A x B" and "B x A" would fragment into separate
@@ -96,10 +102,12 @@ def explain_rounds(X: pd.DataFrame, rounds: list, baseline: float, learning_rate
             i += 1
 
         for (a, b, c), deviation in triples.items():
-            za = _column_zone_index(X[a], zone_info[a])
-            zb = _column_zone_index(X[b], zone_info[b])
-            zc = _column_zone_index(X[c], zone_info[c])
-            share = learning_rate * weights[i] * deviation[za, zb, zc]
+            za_lo, za_hi, wa = _column_soft_zone_index(X[a], zone_info[a])
+            zb_lo, zb_hi, wb = _column_soft_zone_index(X[b], zone_info[b])
+            zc_lo, zc_hi, wc = _column_soft_zone_index(X[c], zone_info[c])
+            share = learning_rate * weights[i] * _blend_3d(
+                deviation, za_lo, za_hi, wa, zb_lo, zb_hi, wb, zc_lo, zc_hi, wc
+            )
             key = " x ".join(sorted((a, b, c)))
             term_totals.setdefault(key, np.zeros(n))
             term_totals[key] += share
