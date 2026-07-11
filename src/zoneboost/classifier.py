@@ -18,7 +18,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.utils.validation import check_is_fitted
 
-from ._common import ensure_dataframe, resolve_categorical_features
+from ._common import ensure_dataframe, resolve_categorical_features, resolve_monotonic_constraints
 from ._explain import explain_rounds
 from ._weak_learner import _fit_lasso_weights, weak_learner_contributions, weak_learner_fit
 
@@ -44,7 +44,7 @@ class _LogOddsBooster:
     def __init__(self, n_rounds, learning_rate, row_subsample, col_subsample,
                  max_zones, min_zone_frac, categorical_features, n_iter_no_change,
                  max_interaction_order, max_triple_interactions, triple_min_gain,
-                 cross_fit_folds, shrinkage_m, stacking_alpha, random_state):
+                 cross_fit_folds, shrinkage_m, stacking_alpha, monotonic_constraints, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
         self.row_subsample = row_subsample
@@ -59,6 +59,7 @@ class _LogOddsBooster:
         self.cross_fit_folds = cross_fit_folds
         self.shrinkage_m = shrinkage_m
         self.stacking_alpha = stacking_alpha
+        self.monotonic_constraints = monotonic_constraints
         self.random_state = random_state
 
     def fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray, X_val=None, y_val=None):
@@ -97,6 +98,7 @@ class _LogOddsBooster:
                 triple_min_gain=self.triple_min_gain,
                 cross_fit_folds=self.cross_fit_folds,
                 shrinkage_m=self.shrinkage_m,
+                monotonic_constraints=self.monotonic_constraints,
             )
             contributions = weak_learner_contributions(X_fit, zone_info, main_effects, interactions, triples)
             contributions[row_idx, :] = oof_contributions
@@ -221,6 +223,11 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         term's weight gets zeroed and a strong term gets its own learned
         weight -- see :class:`~zoneboost.ZoneBoostRegressor` for the full
         description.
+    monotonic_constraints : dict, default=None
+        ``{column: +1 or -1}`` -- forces a continuous column's main effect
+        to be non-decreasing/non-increasing across its zones. Opt-in
+        (encodes domain knowledge, not a general improvement) -- see
+        :class:`~zoneboost.ZoneBoostRegressor` for the full description.
     random_state : int, default=42
         Seed controlling the validation split and per-round subsampling.
 
@@ -232,6 +239,8 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
     feature_names_in_ : ndarray
     categorical_features_ : set
         Resolved set of columns treated as categorical.
+    monotonic_constraints_ : dict
+        Resolved ``{column: +1 or -1}`` constraints actually in effect.
     multiclass_ : bool
         Whether one-vs-rest (3+ classes) was used.
 
@@ -273,6 +282,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         cross_fit_folds: int = 5,
         shrinkage_m: float = 10.0,
         stacking_alpha: float = 0.01,
+        monotonic_constraints=None,
         random_state: int = 42,
     ):
         self.n_rounds = n_rounds
@@ -290,6 +300,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.cross_fit_folds = cross_fit_folds
         self.shrinkage_m = shrinkage_m
         self.stacking_alpha = stacking_alpha
+        self.monotonic_constraints = monotonic_constraints
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -311,6 +322,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             cross_fit_folds=self.cross_fit_folds,
             shrinkage_m=self.shrinkage_m,
             stacking_alpha=self.stacking_alpha,
+            monotonic_constraints=self.monotonic_constraints_,
             random_state=self.random_state,
         )
 
@@ -342,6 +354,9 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.feature_names_in_ = np.array(X.columns)
         self.predictor_names_ = list(X.columns)
         self.categorical_features_ = resolve_categorical_features(X, self.categorical_features)
+        self.monotonic_constraints_ = resolve_monotonic_constraints(
+            X, self.monotonic_constraints, self.categorical_features_
+        )
 
         rng = np.random.default_rng(self.random_state)
         has_val = self.validation_fraction and self.validation_fraction > 0

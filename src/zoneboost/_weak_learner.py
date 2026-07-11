@@ -17,6 +17,7 @@ import itertools
 
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import Lasso
 
 from ._zones import adaptive_zone_boundaries, categorical_zone_index, categorical_zone_map, zone_centers, zone_index
@@ -24,7 +25,14 @@ from ._zones import adaptive_zone_boundaries, categorical_zone_index, categorica
 __all__ = ["weak_learner_fit", "weak_learner_contributions"]
 
 
-def _zone_shrunk_deviation(zone_values: np.ndarray, target_values: np.ndarray, overall_mean: float, n_zones: int, m: float):
+def _zone_shrunk_deviation(
+    zone_values: np.ndarray,
+    target_values: np.ndarray,
+    overall_mean: float,
+    n_zones: int,
+    m: float,
+    monotonic: int = 0,
+):
     """For each zone: an empirical-Bayes (m-estimate) shrunk average target
     among fit-rows in that zone, minus the overall mean.
 
@@ -36,12 +44,35 @@ def _zone_shrunk_deviation(zone_values: np.ndarray, target_values: np.ndarray, o
     there, so this naturally reduces to ``deviation = 0`` (the prior) with
     no special-casing needed -- replaces a flat ``counts / counts.max()``
     confidence discount with a principled, hierarchical estimate. O(n) via
-    bincount."""
+    bincount.
+
+    ``monotonic`` (0 = none, +1 = non-decreasing, -1 = non-increasing) is
+    only ever passed for a column's own main effect (continuous columns,
+    whose zones are meaningfully ordered by construction) -- never from
+    ``_pair_shrunk_deviation``/``_triple_shrunk_deviation``'s internal calls
+    for their own hierarchical priors, so interaction terms stay
+    unconstrained. When set, the *real* zones (all but the last index --
+    for a continuous column that's always the dedicated missing-value
+    bucket, which isn't part of the ordered continuum and is left alone)
+    are projected onto the nearest monotonic sequence via
+    ``sklearn.isotonic.IsotonicRegression``, weighted by each zone's own
+    row count so sparse zones don't distort the fit -- the same
+    density-aware spirit as the shrinkage above.
+    """
     counts = np.bincount(zone_values, minlength=n_zones).astype(float)
     sums = np.bincount(zone_values, weights=target_values, minlength=n_zones)
     cell_mean = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
     shrunk_mean = (counts * cell_mean + m * overall_mean) / (counts + m)
-    return shrunk_mean - overall_mean
+    deviation = shrunk_mean - overall_mean
+
+    if monotonic != 0:
+        n_real = n_zones - 1
+        real_counts = counts[:n_real]
+        if real_counts.sum() > 0:
+            iso = IsotonicRegression(increasing=monotonic > 0, out_of_bounds="clip")
+            deviation[:n_real] = iso.fit_transform(np.arange(n_real), deviation[:n_real], sample_weight=real_counts)
+
+    return deviation
 
 
 def _pair_shrunk_deviation(
@@ -247,6 +278,7 @@ def _cross_fitted_contributions(
     fold_ids: np.ndarray,
     n_folds: int,
     m: float,
+    monotonic_constraints: dict = None,
 ) -> np.ndarray:
     """Leakage-free version of what ``weak_learner_contributions`` would
     compute for the exact rows used to build this round's tables: for each
@@ -266,6 +298,7 @@ def _cross_fitted_contributions(
     per-term matrix (not pooled), so the caller can fit per-term stacking
     weights on it.
     """
+    monotonic_constraints = monotonic_constraints or {}
     n = len(residual)
     n_terms = len(main_effect_keys) + len(interaction_keys) + len(triple_keys)
     contributions = np.empty((n, n_terms))
@@ -279,7 +312,14 @@ def _cross_fitted_contributions(
 
         col = 0
         for name in main_effect_keys:
-            dev = _zone_shrunk_deviation(zones[name][out_mask], residual[out_mask], overall_mean_k, n_zones[name], m)
+            dev = _zone_shrunk_deviation(
+                zones[name][out_mask],
+                residual[out_mask],
+                overall_mean_k,
+                n_zones[name],
+                m,
+                monotonic_constraints.get(name, 0),
+            )
             z_lo, z_hi, w = soft[name]
             contributions[in_mask, col] = _blend_1d(dev, z_lo[in_mask], z_hi[in_mask], w[in_mask])
             col += 1
@@ -510,6 +550,7 @@ def weak_learner_fit(
     triple_min_gain: float = 0.05,
     cross_fit_folds: int = 5,
     shrinkage_m: float = 10.0,
+    monotonic_constraints: dict = None,
 ):
     """Fit one boosting round's weak learner: zone info (adaptive-continuous
     or exact-categorical per column), main effects, interactions, and
@@ -552,6 +593,14 @@ def weak_learner_fit(
         Empirical-Bayes shrinkage strength -- a zone needs about this many
         rows of its own before it's trusted as much as its (hierarchical)
         prior; see :func:`_zone_shrunk_deviation`.
+    monotonic_constraints : dict, default=None
+        ``{column: +1 or -1}`` -- forces a continuous column's *main
+        effect* to be non-decreasing (+1) or non-increasing (-1) across
+        its zones, via isotonic regression (see
+        :func:`_zone_shrunk_deviation`). Interaction terms are never
+        constrained. Unlike every other tuning knob here, this encodes
+        domain knowledge the model can't infer on its own, so there's no
+        default direction -- an unlisted column is simply unconstrained.
 
     Returns
     -------
@@ -569,6 +618,7 @@ def weak_learner_fit(
         aligned to ``residual``'s row order and to the column order
         ``weak_learner_contributions`` would produce for the same tables.
     """
+    monotonic_constraints = monotonic_constraints or {}
     zone_info = {
         c: _column_zone_info(X[c], residual, c in categorical_features, max_zones, min_zone_frac)
         for c in predictor_subset
@@ -578,7 +628,9 @@ def weak_learner_fit(
     overall_mean = float(residual.mean())
 
     main_effects = {
-        col: _zone_shrunk_deviation(zones[col], residual, overall_mean, n_zones[col], shrinkage_m)
+        col: _zone_shrunk_deviation(
+            zones[col], residual, overall_mean, n_zones[col], shrinkage_m, monotonic_constraints.get(col, 0)
+        )
         for col in predictor_subset
     }
     interactions = {
@@ -619,6 +671,7 @@ def weak_learner_fit(
             fold_ids,
             effective_folds,
             shrinkage_m,
+            monotonic_constraints,
         )
     return zone_info, main_effects, interactions, triples, oof_contributions
 

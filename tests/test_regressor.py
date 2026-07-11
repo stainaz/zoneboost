@@ -284,3 +284,57 @@ def test_max_interaction_order_3_improves_fit_on_genuine_triple_interaction():
     rmse_triples = np.sqrt(np.mean((y - model_triples.predict(X)) ** 2))
     assert rmse_triples < rmse_pairwise
     assert any(len(round_["triples"]) > 0 for round_ in model_triples.rounds_)
+
+
+def _non_monotonic_looking_data(n=800, seed=0):
+    # An overall increasing trend in x with a real, noisy dip in the
+    # middle -- without a constraint the fitted main effect should NOT
+    # be monotonic; with monotonic_constraints={"x": 1} it should be.
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0, 10, n)
+    true_effect = x + np.where((x > 4) & (x < 6), -2.0, 0.0)
+    y = true_effect + rng.normal(0, 0.3, n)
+    return pd.DataFrame({"x": x}), y
+
+
+def test_monotonic_constraints_forces_non_decreasing_main_effect():
+    X, y = _non_monotonic_looking_data()
+    model = ZoneBoostRegressor(
+        n_rounds=80, random_state=0, validation_fraction=0, monotonic_constraints={"x": 1}
+    ).fit(X, y)
+    assert model.monotonic_constraints_ == {"x": 1}
+
+    grid = pd.DataFrame({"x": np.linspace(0.1, 9.9, 60)})
+    contrib = model.explain(grid)
+    effect = contrib["x"].to_numpy()
+    assert np.all(np.diff(effect) >= -1e-9)
+
+
+def test_without_monotonic_constraints_the_same_data_fits_a_non_monotonic_effect():
+    X, y = _non_monotonic_looking_data()
+    model = ZoneBoostRegressor(n_rounds=80, random_state=0, validation_fraction=0).fit(X, y)
+    assert model.monotonic_constraints_ == {}
+
+    grid = pd.DataFrame({"x": np.linspace(0.1, 9.9, 60)})
+    contrib = model.explain(grid)
+    effect = contrib["x"].to_numpy()
+    assert np.any(np.diff(effect) < -1e-9)
+
+
+def test_monotonic_constraints_explain_still_sums_exactly_to_predict():
+    X, y = _non_monotonic_looking_data()
+    model = ZoneBoostRegressor(
+        n_rounds=40, random_state=0, validation_fraction=0, monotonic_constraints={"x": 1}
+    ).fit(X, y)
+    pred = model.predict(X)
+    contrib = model.explain(X)
+    np.testing.assert_allclose(contrib.sum(axis=1).to_numpy(), pred, atol=1e-6)
+
+
+def test_monotonic_constraints_default_none_reproduces_unconstrained_predictions():
+    X, y = _non_monotonic_looking_data()
+    model_default = ZoneBoostRegressor(n_rounds=40, random_state=0, validation_fraction=0).fit(X, y)
+    model_explicit_none = ZoneBoostRegressor(
+        n_rounds=40, random_state=0, validation_fraction=0, monotonic_constraints=None
+    ).fit(X, y)
+    np.testing.assert_array_equal(model_default.predict(X), model_explicit_none.predict(X))

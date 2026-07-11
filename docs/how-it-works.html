@@ -288,6 +288,35 @@
       the discontinuity, not a free change like cross-fitting/shrinkage were.
     </div>
 
+    <h2 id="monotonic-constraints">Monotonic Constraints</h2>
+    <p>Unlike the four changes above, this one is <strong>opt-in</strong>: it encodes
+    domain knowledge the model has no way to infer on its own (e.g. "take-up must not
+    decrease as affordability rises"), rather than a general correctness or estimation
+    improvement everyone should get by default. Pass
+    <code>monotonic_constraints={"column": +1}</code> (non-decreasing) or
+    <code>{"column": -1}</code> (non-increasing) — same name/index convention as
+    <code>categorical_features</code> — and that column's own <strong>main effect</strong>
+    is projected onto the nearest monotonic sequence across its zones via a
+    row-count-weighted isotonic regression, applied after empirical Bayes shrinkage so
+    sparse zones don't distort the projection.</p>
+    <ul>
+      <li><strong>Main effects only.</strong> Pairwise/triple interactions, and the
+      internal marginal priors those use for their own shrinkage, are untouched — the same
+      scope XGBoost's/LightGBM's own <code>monotone_constraints</code> cover.</li>
+      <li>A continuous column's zones are already ordered low → high by construction, so
+      there's no threshold or window to tune — just a direction.</li>
+      <li>A constraint declared on a categorical column is silently dropped (no meaningful
+      order to constrain for a nominal category) rather than raising; an invalid direction
+      (anything other than <code>-1</code>/<code>1</code>) does raise, at
+      <code>fit()</code> time.</li>
+      <li>The missing-value zone is excluded from the projection — it's a separate
+      bucket, not part of the ordered continuum.</li>
+    </ul>
+    <div class="note">
+      Leaving <code>monotonic_constraints=None</code> (the default) reproduces the exact
+      same predictions as before this change — verified bit-for-bit.
+    </div>
+
     <h2 id="how-it-compares">How It Compares</h2>
     <p>zoneboost sits at the intersection of additive models (GAMs), boosting frameworks
     (like XGBoost), and rule/bin-based models — combining the interpretable, additive

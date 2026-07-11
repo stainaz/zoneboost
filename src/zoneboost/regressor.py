@@ -13,7 +13,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_is_fitted
 
-from ._common import ensure_dataframe, resolve_categorical_features
+from ._common import ensure_dataframe, resolve_categorical_features, resolve_monotonic_constraints
 from ._explain import explain_rounds
 from ._weak_learner import _fit_lasso_weights, weak_learner_contributions, weak_learner_fit
 
@@ -155,6 +155,20 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         ``stacking_alpha`` is the L1 regularization strength, in a
         standardized space so it's comparable across rounds/datasets
         regardless of scale -- see :func:`zoneboost._weak_learner._fit_lasso_weights`.
+    monotonic_constraints : dict, default=None
+        ``{column: +1 or -1}`` -- forces a continuous column's *main
+        effect* to be non-decreasing (+1) or non-increasing (-1) across
+        its zones, via isotonic regression weighted by each zone's own row
+        count. Interaction terms are never constrained. Accepts column
+        names (if ``X`` is a DataFrame) or integer positions, the same
+        convention as ``categorical_features``. A constraint declared on a
+        categorical column is silently dropped -- there's no meaningful
+        order to constrain for a nominal category. Unlike every other
+        parameter here, this is **opt-in**: it encodes domain knowledge the
+        model can't infer on its own (e.g. "take-up must not decrease as
+        affordability rises"), not a general improvement, so the default
+        (no constraints) reproduces the exact same predictions as if this
+        parameter didn't exist.
     random_state : int, default=42
         Seed controlling the validation split and the per-round row/column
         subsampling.
@@ -168,6 +182,9 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
     categorical_features_ : set
         Resolved set of columns treated as categorical (declared union
         auto-detected).
+    monotonic_constraints_ : dict
+        Resolved ``{column: +1 or -1}`` constraints actually in effect
+        (declared constraints on a categorical column are dropped here).
     baseline_ : float
         The target's mean on the training split -- the starting prediction
         before any boosting round is applied.
@@ -231,6 +248,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         cross_fit_folds: int = 5,
         shrinkage_m: float = 10.0,
         stacking_alpha: float = 0.01,
+        monotonic_constraints=None,
         random_state: int = 42,
     ):
         # scikit-learn convention: __init__ only assigns parameters as-is,
@@ -251,6 +269,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.cross_fit_folds = cross_fit_folds
         self.shrinkage_m = shrinkage_m
         self.stacking_alpha = stacking_alpha
+        self.monotonic_constraints = monotonic_constraints
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -284,6 +303,9 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.feature_names_in_ = np.array(X.columns)
         self.predictor_names_ = list(X.columns)
         self.categorical_features_ = resolve_categorical_features(X, self.categorical_features)
+        self.monotonic_constraints_ = resolve_monotonic_constraints(
+            X, self.monotonic_constraints, self.categorical_features_
+        )
 
         rng = np.random.default_rng(self.random_state)
         has_val = self.validation_fraction and self.validation_fraction > 0
@@ -335,6 +357,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 triple_min_gain=self.triple_min_gain,
                 cross_fit_folds=self.cross_fit_folds,
                 shrinkage_m=self.shrinkage_m,
+                monotonic_constraints=self.monotonic_constraints_,
             )
             contributions = weak_learner_contributions(X_fit, zone_info, main_effects, interactions, triples)
             # The round's own (sub)sampled rows would otherwise be scored by a

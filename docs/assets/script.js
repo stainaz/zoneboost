@@ -99,6 +99,7 @@
     { title: "Empirical Bayes Shrinkage", crumb: "How It Works", url: "how-it-works.html#empirical-bayes-shrinkage" },
     { title: "Lasso Stacking", crumb: "How It Works", url: "how-it-works.html#lasso-stacking" },
     { title: "Soft Zone Boundaries", crumb: "How It Works", url: "how-it-works.html#soft-zone-boundaries" },
+    { title: "Monotonic Constraints", crumb: "How It Works", url: "how-it-works.html#monotonic-constraints" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },

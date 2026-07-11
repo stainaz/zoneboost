@@ -61,6 +61,61 @@ def test_zone_shrunk_deviation_matches_hand_computed_m_estimate():
     np.testing.assert_allclose(deviation, [expected_0, expected_1, expected_2])
 
 
+def test_zone_shrunk_deviation_monotonic_zero_is_unchanged():
+    rng = np.random.default_rng(0)
+    zone_values = rng.integers(0, 5, 200)
+    target_values = rng.normal(size=200)
+    baseline = _zone_shrunk_deviation(zone_values, target_values, overall_mean=0.0, n_zones=6, m=5.0)
+    explicit_zero = _zone_shrunk_deviation(
+        zone_values, target_values, overall_mean=0.0, n_zones=6, m=5.0, monotonic=0
+    )
+    np.testing.assert_array_equal(baseline, explicit_zero)
+
+
+def test_zone_shrunk_deviation_monotonic_increasing_projects_to_non_decreasing():
+    # Zone 2's raw mean dips below zone 1's -- without a constraint the
+    # deviation sequence would not be monotonic. n_zones=5 means index 4
+    # is the missing-value bucket, excluded from the projection.
+    zone_values = np.repeat([0, 1, 2, 3], 20)
+    target_values = np.concatenate(
+        [np.full(20, 1.0), np.full(20, 5.0), np.full(20, 3.0), np.full(20, 8.0)]
+    )
+    unconstrained = _zone_shrunk_deviation(
+        zone_values, target_values, overall_mean=0.0, n_zones=5, m=0.001
+    )
+    assert unconstrained[2] < unconstrained[1]  # confirms the dip exists pre-projection
+
+    deviation = _zone_shrunk_deviation(
+        zone_values, target_values, overall_mean=0.0, n_zones=5, m=0.001, monotonic=1
+    )
+    real_zones = deviation[:4]
+    assert np.all(np.diff(real_zones) >= -1e-12)
+    assert deviation[4] == 0.0  # missing-value bucket untouched (no rows -> prior)
+
+
+def test_zone_shrunk_deviation_monotonic_decreasing_projects_to_non_increasing():
+    zone_values = np.repeat([0, 1, 2, 3], 20)
+    target_values = np.concatenate(
+        [np.full(20, 8.0), np.full(20, 3.0), np.full(20, 5.0), np.full(20, 1.0)]
+    )
+    deviation = _zone_shrunk_deviation(
+        zone_values, target_values, overall_mean=0.0, n_zones=5, m=0.001, monotonic=-1
+    )
+    real_zones = deviation[:4]
+    assert np.all(np.diff(real_zones) <= 1e-12)
+
+
+def test_zone_shrunk_deviation_monotonic_leaves_missing_zone_entry_alone():
+    # missing-value zone (last index) has zero rows here and should fall
+    # back to the prior (0.0) regardless of the monotonic projection.
+    zone_values = np.array([0, 0, 1, 1])
+    target_values = np.array([10.0, 10.0, 1.0, 1.0])
+    deviation = _zone_shrunk_deviation(
+        zone_values, target_values, overall_mean=0.0, n_zones=3, m=0.001, monotonic=-1
+    )
+    assert deviation[2] == 0.0
+
+
 def test_pair_shrunk_deviation_sparse_cell_is_pulled_toward_marginal_prior():
     # A sparse joint cell's deviation should sit between 0 (flat global
     # mean) and what its own raw cell mean would say -- pulled toward the

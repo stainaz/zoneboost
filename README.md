@@ -248,6 +248,36 @@ to expose as a parameter, so no new one was added. Fitting cost is meaningfully 
 than before (roughly +40% wall-clock in benchmarks) — a real, disclosed tradeoff for
 eliminating the discontinuity, not a free change like cross-fitting/shrinkage were.
 
+### Monotonic constraints
+
+Unlike the four changes above, this one is **opt-in**: it encodes domain
+knowledge the model has no way to infer on its own (e.g. "take-up must
+not decrease as affordability rises"), rather than a general correctness
+or estimation improvement everyone should get by default. Pass
+`monotonic_constraints={"column": +1}` (non-decreasing) or `{"column":
+-1}` (non-increasing) — same name/index convention as
+`categorical_features` — and that column's own **main effect** is
+projected onto the nearest monotonic sequence across its zones via a
+row-count-weighted isotonic regression, after empirical Bayes shrinkage
+so sparse zones don't distort the projection. Scope is deliberately
+narrow:
+
+- **Main effects only.** Pairwise/triple interactions, and the internal
+  marginal priors those use for their own shrinkage, are untouched — the
+  same scope XGBoost's/LightGBM's own `monotone_constraints` cover.
+- A continuous column's zones are already ordered low → high by
+  construction, so there's no threshold or window to tune — just a
+  direction.
+- A constraint declared on a categorical column is silently dropped (no
+  meaningful order to constrain for a nominal category) rather than
+  raising; an invalid direction (anything other than `-1`/`1`) does
+  raise, at `fit()` time.
+- The missing-value zone is excluded from the projection — it's a
+  separate bucket, not part of the ordered continuum.
+
+Leaving `monotonic_constraints=None` (the default) reproduces the exact
+same predictions as before this change — verified bit-for-bit.
+
 ## Parameters
 
 Identical parameter set on both estimators.
@@ -269,6 +299,7 @@ Identical parameter set on both estimators.
 | `cross_fit_folds` | 5 | Number of folds used to compute each round's training signal honestly (see "Cross-fitted cell means" above); falls back to no cross-fitting if a round's row count is smaller than 2 folds |
 | `shrinkage_m` | 10.0 | Empirical-Bayes shrinkage strength — a zone needs about this many rows of its own before it's trusted as much as its (hierarchical) prior; see "Empirical Bayes shrinkage" above |
 | `stacking_alpha` | 0.01 | Lasso regularization strength for combining a round's terms; see "Lasso stacking" above |
+| `monotonic_constraints` | None | `{column: +1 or -1}` — forces a continuous column's main effect to be non-decreasing/non-increasing; opt-in, see "Monotonic constraints" above |
 | `random_state` | 42 | Seed for the validation split and subsampling |
 
 **On `max_zones` and `categorical_features`:** if a variable genuinely has
@@ -322,6 +353,8 @@ After `fit`, `ZoneBoostRegressor` exposes (among others):
 - `val_rmse_` / `train_rmse_` — RMSE after each round.
 - `categorical_features_` — the resolved set of categorical columns
   (declared ∪ auto-detected).
+- `monotonic_constraints_` — the resolved `{column: +1 or -1}` dict
+  actually in effect (categorical columns dropped).
 
 `ZoneBoostClassifier` exposes the same `categorical_features_`, plus:
 
