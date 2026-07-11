@@ -248,6 +248,34 @@ to expose as a parameter, so no new one was added. Fitting cost is meaningfully 
 than before (roughly +40% wall-clock in benchmarks) — a real, disclosed tradeoff for
 eliminating the discontinuity, not a free change like cross-fitting/shrinkage were.
 
+### Cyclic backfitting
+
+A pairwise interaction's shrunk deviation was the **joint** cell mean — not an
+interaction-only signal. If column `a` has a genuine main effect and no real
+interaction with `b` exists, the joint `(a, b)` cell mean still reflects `a`'s
+main effect (shrunk toward a `dev_a + dev_b` prior that itself contains it), so
+the stored pair redundantly re-encodes signal `a`'s own main effect already
+captures — and since Lasso stacking can only apply one scalar weight per term,
+it can't cleanly cancel a redundant *shape* baked in cell-by-cell. The same gap
+applied to triples: the accepted triple's stored value was fit against the raw
+residual, even though the accept/reject gain test already computes an
+approximate "residual after lower-order terms" for its own threshold decision.
+
+Terms are now fit via a single backfitting pass each round — main effects
+first, then pairs (backfit against their own two main effects), then triples
+(backfit against their own three main effects, with pairs handled
+automatically inside the triple's own recursive prior computation) — so a
+pair's or triple's stored value is genuinely interaction-only rather than a
+partial copy of what a lower-order term already explains. Not a full
+iterate-to-convergence GAM backfit: one ordered pass per round, relying on the
+boosting loop's own many rounds for further refinement over time. On data with
+a real main effect and no real interaction, this cut the pair term's
+Lasso-stacked importance by roughly 40% end-to-end (and by ~5-6x at the level
+of a single round's raw fit, before stacking softens it further) — directly
+improving what `explain()`/`feature_importance()` show, not just internal
+accuracy. Like the four changes above, this is on by default; there's no
+tunable knob to expose, so no new parameter was added.
+
 ### Monotonic constraints
 
 Unlike the four changes above, this one is **opt-in**: it encodes domain

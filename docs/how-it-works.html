@@ -288,6 +288,35 @@
       the discontinuity, not a free change like cross-fitting/shrinkage were.
     </div>
 
+    <h2 id="cyclic-backfitting">Cyclic Backfitting</h2>
+    <p>A pairwise interaction's shrunk deviation was the <strong>joint</strong> cell
+    mean — not an interaction-only signal. If column <code>a</code> has a genuine main
+    effect and no real interaction with <code>b</code> exists, the joint <code>(a,
+    b)</code> cell mean still reflects <code>a</code>'s main effect (shrunk toward a
+    <code>dev_a + dev_b</code> prior that itself contains it), so the stored pair
+    redundantly re-encodes signal <code>a</code>'s own main effect already captures —
+    and since Lasso stacking can only apply one scalar weight per term, it can't
+    cleanly cancel a redundant <em>shape</em> baked in cell-by-cell. The same gap
+    applied to triples: the accepted triple's stored value was fit against the raw
+    residual, even though the accept/reject gain test already computes an approximate
+    "residual after lower-order terms" for its own threshold decision.</p>
+    <p>Terms are now fit via a single backfitting pass each round — main effects
+    first, then pairs (backfit against their own two main effects), then triples
+    (backfit against their own three main effects, with pairs handled automatically
+    inside the triple's own recursive prior computation) — so a pair's or triple's
+    stored value is genuinely interaction-only rather than a partial copy of what a
+    lower-order term already explains. Not a full iterate-to-convergence GAM backfit:
+    one ordered pass per round, relying on the boosting loop's own many rounds for
+    further refinement over time.</p>
+    <div class="note">
+      On data with a real main effect and no real interaction, this cut the pair
+      term's Lasso-stacked importance by roughly 40% end-to-end (and by ~5-6x at the
+      level of a single round's raw fit, before stacking softens it further) —
+      directly improving what <code>explain()</code>/<code>feature_importance()</code>
+      show, not just internal accuracy. Like the four changes above, this is on by
+      default; there's no tunable knob to expose, so no new parameter was added.
+    </div>
+
     <h2 id="monotonic-constraints">Monotonic Constraints</h2>
     <p>Unlike the four changes above, this one is <strong>opt-in</strong>: it encodes
     domain knowledge the model has no way to infer on its own (e.g. "take-up must not

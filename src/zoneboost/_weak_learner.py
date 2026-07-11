@@ -9,6 +9,17 @@ Every "weak learner" in ZoneBoostRegressor is built from this module alone
 external model of any kind. What changes round to round is only the target
 these functions are pointed at (the current residual) and which rows/
 columns were sampled for that round.
+
+Fit order is a single cyclic-backfitting pass -- main effects first, then
+pairs, then triples -- rather than fitting every term against the same raw
+residual independently: each interaction's stored deviation is computed
+against the residual *after* subtracting its own lower-order terms (its
+main effects for a pair, its main effects for a triple -- pairs are then
+handled automatically inside a triple's own recursive prior computation,
+see :func:`_pair_shrunk_deviation`/:func:`_triple_shrunk_deviation`). This
+keeps a pair/triple's stored value genuinely interaction-only rather than
+redundantly re-encoding signal a lower-order term already captures -- on by
+default (a correctness/attribution fix, not a tunable knob).
 """
 
 from __future__ import annotations
@@ -297,6 +308,15 @@ def _cross_fitted_contributions(
     to score training rows honestly. Returns the full ``(n, n_terms)``
     per-term matrix (not pooled), so the caller can fit per-term stacking
     weights on it.
+
+    Mirrors ``weak_learner_fit``'s own cyclic-backfitting order per fold:
+    each fold's main effects are computed first, then used to backfit that
+    fold's pairs (mains-only subtraction; pairs handled automatically inside
+    ``_triple_shrunk_deviation``'s own recursive calls for triples) -- every
+    pair/triple's constituent columns are always a subset of
+    ``main_effect_keys`` (both are only ever built from the same
+    ``predictor_subset``), so this is always well-defined regardless of
+    which pairs a caller's own screening step kept.
     """
     monotonic_constraints = monotonic_constraints or {}
     n = len(residual)
@@ -311,6 +331,7 @@ def _cross_fitted_contributions(
         overall_mean_k = float(residual[out_mask].mean())
 
         col = 0
+        main_dev_k = {}
         for name in main_effect_keys:
             dev = _zone_shrunk_deviation(
                 zones[name][out_mask],
@@ -320,13 +341,19 @@ def _cross_fitted_contributions(
                 m,
                 monotonic_constraints.get(name, 0),
             )
+            main_dev_k[name] = dev
             z_lo, z_hi, w = soft[name]
             contributions[in_mask, col] = _blend_1d(dev, z_lo[in_mask], z_hi[in_mask], w[in_mask])
             col += 1
 
         for a, b in interaction_keys:
+            partial = (
+                residual[out_mask]
+                - main_dev_k[a][zones[a][out_mask]]
+                - main_dev_k[b][zones[b][out_mask]]
+            )
             dev = _pair_shrunk_deviation(
-                zones[a][out_mask], zones[b][out_mask], residual[out_mask], overall_mean_k, n_zones[a], n_zones[b], m
+                zones[a][out_mask], zones[b][out_mask], partial, float(partial.mean()), n_zones[a], n_zones[b], m
             )
             za_lo, za_hi, wa = soft[a]
             zb_lo, zb_hi, wb = soft[b]
@@ -336,12 +363,18 @@ def _cross_fitted_contributions(
             col += 1
 
         for a, b, c in triple_keys:
+            partial = (
+                residual[out_mask]
+                - main_dev_k[a][zones[a][out_mask]]
+                - main_dev_k[b][zones[b][out_mask]]
+                - main_dev_k[c][zones[c][out_mask]]
+            )
             dev = _triple_shrunk_deviation(
                 zones[a][out_mask],
                 zones[b][out_mask],
                 zones[c][out_mask],
-                residual[out_mask],
-                overall_mean_k,
+                partial,
+                float(partial.mean()),
                 n_zones[a],
                 n_zones[b],
                 n_zones[c],
@@ -401,6 +434,16 @@ def _select_triples(
     ``_term_importance``) rather than to the residual's raw scale, since a
     zone-averaged, shrunk importance score is not on the same scale as a
     raw standard deviation.
+
+    An accepted triple's *stored* value is backfit against mains only
+    (``residual`` minus its three main effects) before being handed to
+    :func:`_triple_shrunk_deviation` -- distinct from the ``double_residual``
+    above, which is an OLS-based proxy used only for the accept/reject
+    decision, not a fitting target. Pairs don't need a separate subtraction
+    step here: :func:`_triple_shrunk_deviation`'s own internal
+    :func:`_pair_shrunk_deviation` calls perform that automatically once fed
+    a mains-removed target, so the accepted triple's coefficients end up
+    interaction-only rather than re-encoding lower-order signal.
     """
     if len(predictor_subset) < 3 or not interactions:
         return {}
@@ -446,8 +489,15 @@ def _select_triples(
         )
         gain = _term_importance(gain_dev)
         if gain >= triple_min_gain * max_pair_importance:
+            # Backfit the accepted triple's *stored* value against mains only
+            # (not the double_residual/_residualize proxy above, which stays
+            # reserved for the accept/reject gain test) -- pairs are then
+            # handled automatically inside _triple_shrunk_deviation's own
+            # recursive _pair_shrunk_deviation calls, so dev_abc comes out
+            # interaction-only rather than re-encoding mains+pairs signal.
+            mains_removed = residual - dev_a[za] - dev_b[zb] - dev_c[zc]
             dev_abc = _triple_shrunk_deviation(
-                za, zb, zc, residual, float(residual.mean()), n_zones[a], n_zones[b], n_zones[c], m
+                za, zb, zc, mains_removed, float(mains_removed.mean()), n_zones[a], n_zones[b], n_zones[c], m
             )
             scored.append(((a, b, c), gain, dev_abc))
 
@@ -579,6 +629,14 @@ def weak_learner_fit(
     ALL derived fresh from this round's (already row/column-subsampled)
     residual.
 
+    Terms are fit via a single cyclic-backfitting pass -- main effects
+    first, then pairs (backfit against their own two main effects), then
+    triples (backfit against their own three main effects, with pairs
+    handled automatically inside :func:`_triple_shrunk_deviation`'s own
+    recursive prior) -- so a pair/triple's stored deviation is genuinely
+    interaction-only rather than re-encoding signal a lower-order term
+    already captures. On by default; see the module docstring.
+
     Also returns ``oof_contributions``: an honest, cross-fitted version of
     this round's own per-term contributions for exactly these rows, used
     by the caller to replace the (leaky, in-sample) contributions it would
@@ -662,10 +720,15 @@ def weak_learner_fit(
         )
         for col in predictor_subset
     }
-    interactions = {
-        (a, b): _pair_shrunk_deviation(zones[a], zones[b], residual, overall_mean, n_zones[a], n_zones[b], shrinkage_m)
-        for a, b in itertools.combinations(predictor_subset, 2)
-    }
+    interactions = {}
+    for a, b in itertools.combinations(predictor_subset, 2):
+        # Backfit: subtract each pair's own two main effects first, so the
+        # stored deviation is interaction-only rather than re-encoding signal
+        # main_effects[a]/[b] already capture -- see module docstring.
+        partial = residual - main_effects[a][zones[a]] - main_effects[b][zones[b]]
+        interactions[(a, b)] = _pair_shrunk_deviation(
+            zones[a], zones[b], partial, float(partial.mean()), n_zones[a], n_zones[b], shrinkage_m
+        )
     triples = (
         _select_triples(
             predictor_subset,

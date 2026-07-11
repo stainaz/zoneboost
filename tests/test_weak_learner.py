@@ -2,12 +2,15 @@ import numpy as np
 import pandas as pd
 
 from zoneboost._weak_learner import (
+    _column_n_zones,
     _column_soft_zone_index,
+    _column_zone_index,
     _column_zone_info,
     _fit_lasso_weights,
     _make_folds,
     _pair_shrunk_deviation,
     _screen_pairs,
+    _term_importance,
     _triple_shrunk_deviation,
     _zone_shrunk_deviation,
     weak_learner_contributions,
@@ -141,6 +144,82 @@ def test_pair_shrunk_deviation_sparse_cell_is_pulled_toward_marginal_prior():
     # Sparse cell (0,0)'s shrunk deviation should be much closer to the
     # marginal-based prior than to a naive unshrunk cell mean would be.
     assert abs(deviation[0, 0] - marginal_prior_00) < abs(deviation[0, 0])
+
+
+def test_backfitting_removes_redundant_main_effect_signal_from_pairs():
+    # Pure main effect in x1, x2 independent and carrying no real
+    # interaction -- without backfitting, the pair's joint cell mean would
+    # still reflect x1's own main effect (shrunk toward a dev_a+dev_b prior
+    # that itself contains it), so the pair would misleadingly look
+    # important even though there's no real interaction. Compare directly
+    # against a naive (non-backfit) fit on the same zones/raw residual --
+    # exactly what every prior release computed -- rather than an arbitrary
+    # threshold, since some leftover zone-binning approximation noise is
+    # expected and not itself a bug.
+    rng = np.random.default_rng(0)
+    n = 800
+    x1 = rng.uniform(-3, 3, n)
+    x2 = rng.uniform(-3, 3, n)
+    y = x1**2 + rng.normal(0, 0.1, n)
+    X = pd.DataFrame({"x1": x1, "x2": x2})
+    residual = y - y.mean()
+    fit_rng = np.random.default_rng(1)
+    zone_info, _, interactions, _, _ = weak_learner_fit(X, residual, list(X.columns), set(), fit_rng)
+
+    za = _column_zone_index(X["x1"], zone_info["x1"])
+    zb = _column_zone_index(X["x2"], zone_info["x2"])
+    n_a, n_b = _column_n_zones(zone_info["x1"]), _column_n_zones(zone_info["x2"])
+    naive_pair = _pair_shrunk_deviation(za, zb, residual, float(residual.mean()), n_a, n_b, 10.0)
+
+    assert _term_importance(interactions[("x1", "x2")]) < 0.5 * _term_importance(naive_pair)
+
+
+def test_backfitting_preserves_genuine_interaction_signal():
+    # Pure interaction (x1*x2 on a mean-zero domain, so real main effects
+    # are themselves ~0) -- backfitting must not erase this, only redundant
+    # copies of main effects.
+    rng = np.random.default_rng(0)
+    n = 800
+    x1 = rng.uniform(-3, 3, n)
+    x2 = rng.uniform(-3, 3, n)
+    y = x1 * x2 + rng.normal(0, 0.1, n)
+    X = pd.DataFrame({"x1": x1, "x2": x2})
+    residual = y - y.mean()
+    fit_rng = np.random.default_rng(1)
+    _, _, interactions, _, _ = weak_learner_fit(X, residual, list(X.columns), set(), fit_rng)
+
+    assert _term_importance(interactions[("x1", "x2")]) > 0.5
+
+
+def test_accepted_triple_stored_value_does_not_leak_lower_order_signal():
+    # Large main effect + large pairwise interaction, but only a small
+    # genuine 3-way term -- if the accepted triple's stored value leaked
+    # lower-order signal (as it did before backfitting the final dev_abc),
+    # its importance would match the naive (non-backfit) computation on the
+    # raw residual instead of being meaningfully smaller.
+    rng = np.random.default_rng(0)
+    n = 1000
+    x1 = rng.uniform(-3, 3, n)
+    x2 = rng.uniform(-3, 3, n)
+    x3 = rng.uniform(-3, 3, n)
+    y = 10.0 * x1**2 + 10.0 * x1 * x2 + 0.3 * x1 * x2 * x3 + rng.normal(0, 0.1, n)
+    X = pd.DataFrame({"x1": x1, "x2": x2, "x3": x3})
+    residual = y - y.mean()
+    fit_rng = np.random.default_rng(1)
+    zone_info, _, _, triples, _ = weak_learner_fit(
+        X, residual, list(X.columns), set(), fit_rng, max_interaction_order=3, triple_min_gain=0.001
+    )
+    assert len(triples) == 1
+    (key, dev_abc), = triples.items()
+    a, b, c = key
+
+    za = _column_zone_index(X[a], zone_info[a])
+    zb = _column_zone_index(X[b], zone_info[b])
+    zc = _column_zone_index(X[c], zone_info[c])
+    n_a, n_b, n_c = _column_n_zones(zone_info[a]), _column_n_zones(zone_info[b]), _column_n_zones(zone_info[c])
+    naive_dev_abc = _triple_shrunk_deviation(za, zb, zc, residual, float(residual.mean()), n_a, n_b, n_c, 10.0)
+
+    assert _term_importance(dev_abc) < 0.5 * _term_importance(naive_dev_abc)
 
 
 def test_max_interaction_order_2_never_produces_triples():

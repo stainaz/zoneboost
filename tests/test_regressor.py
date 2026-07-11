@@ -364,3 +364,21 @@ def test_max_pair_interactions_with_many_noise_columns_stays_finite_and_consiste
 
     contrib = model.explain(X)
     np.testing.assert_allclose(contrib.sum(axis=1).to_numpy(), pred, atol=1e-6)
+
+
+def test_cyclic_backfitting_keeps_pair_importance_small_when_no_real_interaction():
+    # A strong main effect in x1 with x2 independent and carrying no real
+    # interaction -- end-to-end version of the weak-learner-level backfitting
+    # test, confirming feature_importance()/explain() (not just the internal
+    # deviation arrays) reflect the fix: the "x1 x x2" term should stay small
+    # relative to x1's own main effect, not misleadingly large.
+    rng = np.random.default_rng(0)
+    n = 600
+    x1 = rng.uniform(-3, 3, n)
+    x2 = rng.uniform(-3, 3, n)
+    y = x1**2 + rng.normal(0, 0.1, n)
+    X = pd.DataFrame({"x1": x1, "x2": x2})
+
+    model = ZoneBoostRegressor(n_rounds=60, random_state=0, validation_fraction=0).fit(X, y)
+    importance = model.feature_importance(X)
+    assert importance["x1 x x2"] < 0.2 * importance["x1"]
