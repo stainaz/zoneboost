@@ -17,10 +17,11 @@ import itertools
 
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import Lasso
 
 from ._zones import adaptive_zone_boundaries, categorical_zone_index, categorical_zone_map, zone_index
 
-__all__ = ["weak_learner_fit", "weak_learner_score"]
+__all__ = ["weak_learner_fit", "weak_learner_contributions"]
 
 
 def _zone_shrunk_deviation(zone_values: np.ndarray, target_values: np.ndarray, overall_mean: float, n_zones: int, m: float):
@@ -154,6 +155,43 @@ def _residualize(raw: np.ndarray, residual: np.ndarray) -> np.ndarray:
     return residual - (alpha + beta * raw)
 
 
+def _fit_lasso_weights(contributions: np.ndarray, residual: np.ndarray, alpha: float) -> tuple:
+    """Fit a Lasso relating each term's own contribution (one column per
+    term) to the residual, replacing the old "average every term, then fit
+    one shared scale" combination with a learned per-term weight: an
+    irrelevant term's weight gets zeroed by the L1 penalty, a strong term
+    gets its own weight instead of a diluted ``1/n_terms`` share, and the
+    fitted weights themselves become a real interaction-importance ranking.
+
+    Both sides are standardized before fitting (each contribution column by
+    its own std, the residual by its own std) so ``alpha`` is a unitless
+    regularization strength, comparable across rounds/datasets regardless
+    of scale -- then un-standardized so the returned weights apply directly
+    to raw (unstandardized) contributions. A column with zero variance
+    (e.g. every row landed in the same zone) gets a weight of exactly 0.
+
+    Returns
+    -------
+    intercept : float
+    weights : ndarray of shape (n_terms,)
+    """
+    resid_mean, resid_std = float(residual.mean()), float(residual.std())
+    if resid_std <= 0:
+        return resid_mean, np.zeros(contributions.shape[1])
+
+    col_std = contributions.std(axis=0)
+    safe_col_std = np.where(col_std > 0, col_std, 1.0)
+    X_std = contributions / safe_col_std
+    y_std = (residual - resid_mean) / resid_std
+
+    model = Lasso(alpha=alpha, fit_intercept=True, max_iter=10000)
+    model.fit(X_std, y_std)
+
+    weights = np.where(col_std > 0, model.coef_ * (resid_std / safe_col_std), 0.0)
+    intercept = resid_mean + float(model.intercept_) * resid_std
+    return intercept, weights
+
+
 def _make_folds(rng: np.random.Generator, n: int, n_folds: int) -> np.ndarray:
     """Randomly assign each of ``n`` rows to one of ``n_folds`` folds, as
     evenly as possible. Every fold index is guaranteed non-empty as long as
@@ -164,7 +202,7 @@ def _make_folds(rng: np.random.Generator, n: int, n_folds: int) -> np.ndarray:
     return fold_ids
 
 
-def _cross_fitted_raw(
+def _cross_fitted_contributions(
     zones: dict,
     n_zones: dict,
     residual: np.ndarray,
@@ -175,17 +213,19 @@ def _cross_fitted_raw(
     n_folds: int,
     m: float,
 ) -> np.ndarray:
-    """Leakage-free version of what ``weak_learner_score`` would compute for
-    the exact rows used to build this round's tables: for each fold, every
-    term's shrunk deviation is recomputed from the *other* folds' rows only
-    (reusing ``_zone_shrunk_deviation``/``_pair_shrunk_deviation``/
-    ``_triple_shrunk_deviation`` unchanged on fold-restricted slices), then
-    used to score that fold's own held-out rows. No row is ever scored with
-    a table that included its own value -- the CatBoost ordered-target-
-    statistics fix, applied to zoneboost's zone grids. Which terms exist
-    (main effects / which pairs / which triples) is decided once from the
-    full subsample elsewhere; this only recomputes the numeric cell means
-    used to score training rows honestly.
+    """Leakage-free version of what ``weak_learner_contributions`` would
+    compute for the exact rows used to build this round's tables: for each
+    fold, every term's shrunk deviation is recomputed from the *other*
+    folds' rows only (reusing ``_zone_shrunk_deviation``/
+    ``_pair_shrunk_deviation``/``_triple_shrunk_deviation`` unchanged on
+    fold-restricted slices), then used to score that fold's own held-out
+    rows. No row is ever scored with a table that included its own value --
+    the CatBoost ordered-target-statistics fix, applied to zoneboost's zone
+    grids. Which terms exist (main effects / which pairs / which triples)
+    is decided once from the full subsample elsewhere; this only
+    recomputes the numeric cell means used to score training rows
+    honestly. Returns the full ``(n, n_terms)`` per-term matrix (not
+    pooled), so the caller can fit per-term stacking weights on it.
     """
     n = len(residual)
     n_terms = len(main_effect_keys) + len(interaction_keys) + len(triple_keys)
@@ -229,7 +269,7 @@ def _cross_fitted_raw(
             contributions[in_mask, col] = dev[za_in, zb_in, zc_in]
             col += 1
 
-    return contributions.mean(axis=1)
+    return contributions
 
 
 def _get_pair(interactions: dict, x: str, y: str):
@@ -365,11 +405,11 @@ def weak_learner_fit(
     ALL derived fresh from this round's (already row/column-subsampled)
     residual.
 
-    Also returns ``oof_raw``: an honest, cross-fitted version of this
-    round's own raw score for exactly these rows, used by the caller to
-    replace the (leaky, in-sample) score it would otherwise compute for the
-    same rows when updating the running prediction -- see
-    :func:`_cross_fitted_raw`.
+    Also returns ``oof_contributions``: an honest, cross-fitted version of
+    this round's own per-term contributions for exactly these rows, used
+    by the caller to replace the (leaky, in-sample) contributions it would
+    otherwise compute for the same rows when fitting that round's stacking
+    weights -- see :func:`_cross_fitted_contributions`.
 
     Parameters
     ----------
@@ -393,9 +433,9 @@ def weak_learner_fit(
         raw scale) -- to be judged genuine higher-order structure rather
         than something pairwise interactions already explain.
     cross_fit_folds : int, default=5
-        Number of folds used to compute ``oof_raw`` honestly (see above).
-        Falls back to the in-sample score (no cross-fitting) if the round's
-        row count is smaller than 2 folds.
+        Number of folds used to compute ``oof_contributions`` honestly (see
+        above). Falls back to in-sample contributions (no cross-fitting) if
+        the round's row count is smaller than 2 folds.
     shrinkage_m : float, default=10.0
         Empirical-Bayes shrinkage strength -- a zone needs about this many
         rows of its own before it's trusted as much as its (hierarchical)
@@ -412,9 +452,10 @@ def weak_learner_fit(
     triples : dict
         ``(col_a, col_b, col_c)`` -> shrunk deviation 3D array. Empty unless
         ``max_interaction_order >= 3`` and evidence clears ``triple_min_gain``.
-    oof_raw : ndarray
-        Cross-fitted raw score for this round's own rows, aligned to
-        ``residual``'s order.
+    oof_contributions : ndarray of shape (n_rows, n_terms)
+        Cross-fitted per-term contributions for this round's own rows,
+        aligned to ``residual``'s row order and to the column order
+        ``weak_learner_contributions`` would produce for the same tables.
     """
     zone_info = {
         c: _column_zone_info(X[c], residual, c in categorical_features, max_zones, min_zone_frac)
@@ -451,10 +492,10 @@ def weak_learner_fit(
     n = len(residual)
     effective_folds = min(cross_fit_folds, n)
     if effective_folds < 2:
-        oof_raw = weak_learner_score(X, zone_info, main_effects, interactions, triples)
+        oof_contributions = weak_learner_contributions(X, zone_info, main_effects, interactions, triples)
     else:
         fold_ids = _make_folds(rng, n, effective_folds)
-        oof_raw = _cross_fitted_raw(
+        oof_contributions = _cross_fitted_contributions(
             zones,
             n_zones,
             residual,
@@ -465,15 +506,25 @@ def weak_learner_fit(
             effective_folds,
             shrinkage_m,
         )
-    return zone_info, main_effects, interactions, triples, oof_raw
+    return zone_info, main_effects, interactions, triples, oof_contributions
 
 
-def weak_learner_score(
+def weak_learner_contributions(
     X: pd.DataFrame, zone_info: dict, main_effects: dict, interactions: dict, triples: dict = None
 ) -> np.ndarray:
-    """Score rows with an already-fit weak learner. Self-sufficient from
+    """Per-term contributions for each row with an already-fit weak
+    learner: one column per term, in the fixed order
+    ``main_effects`` -> ``interactions`` -> ``triples`` (each dict's own
+    Python-guaranteed insertion order). Self-sufficient from
     main_effects/interactions/triples' own keys, so it works whether that
-    round used every predictor or only a random subset of them."""
+    round used every predictor or only a random subset of them.
+
+    Column order matters: a round's fitted stacking weights (see
+    :func:`_fit_lasso_weights`) are aligned to this same order, since the
+    caller always passes the identical stored dicts back in at predict
+    time -- never re-derive or reorder these dicts independently of how
+    they were fit.
+    """
     triples = triples or {}
     needed_cols = set(main_effects.keys())
     for a, b in interactions.keys():
@@ -495,4 +546,4 @@ def weak_learner_score(
     for (a, b, c), deviation in triples.items():
         za, zb, zc = zones[a], zones[b], zones[c]
         contributions.append(deviation[za, zb, zc])
-    return np.column_stack(contributions).mean(axis=1)
+    return np.column_stack(contributions)

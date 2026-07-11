@@ -2,12 +2,13 @@ import numpy as np
 import pandas as pd
 
 from zoneboost._weak_learner import (
+    _fit_lasso_weights,
     _make_folds,
     _pair_shrunk_deviation,
     _triple_shrunk_deviation,
     _zone_shrunk_deviation,
+    weak_learner_contributions,
     weak_learner_fit,
-    weak_learner_score,
 )
 
 
@@ -144,7 +145,7 @@ def test_make_folds_covers_every_row_and_is_balanced():
     assert counts.max() - counts.min() <= 1
 
 
-def test_oof_raw_cannot_see_a_rows_own_value_when_every_zone_is_a_singleton():
+def test_oof_contributions_cannot_see_a_rows_own_value_when_every_zone_is_a_singleton():
     # Every row is its own category: in-sample, each zone's "mean" is
     # shrunk from that one row's own residual toward the global mean by
     # the m-estimate (never fully reconstructing it, unlike the old
@@ -158,14 +159,16 @@ def test_oof_raw_cannot_see_a_rows_own_value_when_every_zone_is_a_singleton():
     residual = rng.normal(size=n)
 
     fit_rng = np.random.default_rng(1)
-    zone_info, main_effects, interactions, triples, oof_raw = weak_learner_fit(
+    zone_info, main_effects, interactions, triples, oof_contributions = weak_learner_fit(
         X, residual, ["id"], {"id"}, fit_rng, cross_fit_folds=5, shrinkage_m=m
     )
-    in_sample_raw = weak_learner_score(X, zone_info, main_effects, interactions, triples)
+    in_sample_contributions = weak_learner_contributions(X, zone_info, main_effects, interactions, triples)
 
+    assert in_sample_contributions.shape == (n, 1)
+    assert oof_contributions.shape == (n, 1)
     expected_in_sample = (residual - residual.mean()) / (1 + m)
-    np.testing.assert_allclose(in_sample_raw, expected_in_sample, atol=1e-9)
-    np.testing.assert_allclose(oof_raw, 0.0, atol=1e-9)
+    np.testing.assert_allclose(in_sample_contributions[:, 0], expected_in_sample, atol=1e-9)
+    np.testing.assert_allclose(oof_contributions, 0.0, atol=1e-9)
 
 
 def test_weak_learner_fit_falls_back_without_crashing_when_rows_fewer_than_folds():
@@ -173,8 +176,29 @@ def test_weak_learner_fit_falls_back_without_crashing_when_rows_fewer_than_folds
     X = pd.DataFrame({"x1": rng.uniform(-1, 1, 3)})
     residual = rng.normal(size=3)
     fit_rng = np.random.default_rng(1)
-    zone_info, main_effects, interactions, triples, oof_raw = weak_learner_fit(
+    zone_info, main_effects, interactions, triples, oof_contributions = weak_learner_fit(
         X, residual, ["x1"], set(), fit_rng, cross_fit_folds=5
     )
-    assert oof_raw.shape == (3,)
-    assert np.all(np.isfinite(oof_raw))
+    assert oof_contributions.shape == (3, 1)
+    assert np.all(np.isfinite(oof_contributions))
+
+
+def test_fit_lasso_weights_zeros_out_pure_noise_column():
+    rng = np.random.default_rng(0)
+    n = 500
+    informative = rng.normal(size=n)
+    noise = rng.normal(size=n)
+    residual = 3.0 * informative + rng.normal(0, 0.1, n)
+    contributions = np.column_stack([informative, noise])
+
+    intercept, weights = _fit_lasso_weights(contributions, residual, alpha=0.05)
+    assert abs(weights[1]) < abs(weights[0]) * 0.1  # noise column negligible vs informative one
+    assert abs(weights[0]) > 0.5  # informative column's weight is substantial
+
+
+def test_fit_lasso_weights_degenerate_residual_returns_zero_weights():
+    contributions = np.random.default_rng(0).normal(size=(50, 3))
+    residual = np.full(50, 2.0)  # perfectly constant
+    intercept, weights = _fit_lasso_weights(contributions, residual, alpha=0.05)
+    assert intercept == 2.0
+    np.testing.assert_array_equal(weights, np.zeros(3))

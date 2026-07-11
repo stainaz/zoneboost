@@ -15,7 +15,7 @@ from sklearn.utils.validation import check_is_fitted
 
 from ._common import ensure_dataframe, resolve_categorical_features
 from ._explain import explain_rounds
-from ._weak_learner import _ols_scale, weak_learner_fit, weak_learner_score
+from ._weak_learner import _fit_lasso_weights, weak_learner_contributions, weak_learner_fit
 
 __all__ = ["ZoneBoostRegressor"]
 
@@ -143,6 +143,18 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         (row+column, or main effects+pairs), not the flat global mean --
         a materially better guess for a sparse cell than the overall
         average of everything.
+    stacking_alpha : float, default=0.01
+        Every prior release combined a round's terms by averaging every
+        contribution equally, then fit one shared scale for the whole
+        blend. This is replaced by a **Lasso** fit treating each term's own
+        (cross-fitted) contribution as its own feature: an irrelevant term
+        gets its weight zeroed by the L1 penalty, a strong term gets its
+        own learned weight instead of a diluted ``1/n_terms`` share, and
+        the fitted weights become a real interaction-importance ranking
+        that flows straight through ``feature_importance``/``explain``.
+        ``stacking_alpha`` is the L1 regularization strength, in a
+        standardized space so it's comparable across rounds/datasets
+        regardless of scale -- see :func:`zoneboost._weak_learner._fit_lasso_weights`.
     random_state : int, default=42
         Seed controlling the validation split and the per-round row/column
         subsampling.
@@ -163,11 +175,13 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         One entry per fitted boosting round, each a plain dict with keys
         ``"zone_info"``, ``"main_effects"``, ``"interactions"``,
         ``"triples"`` (empty unless ``max_interaction_order=3``), and
-        ``"alpha"``/``"beta"`` -- the round's fitted intercept/slope
-        (``fitted_residual = alpha + beta * raw``, an ordinary-least-squares
-        fit of the residual on that round's raw zone-lookup score). Every
-        value is plain data (dicts of numpy arrays or floats) -- fully
-        inspectable, nothing hidden in an opaque model object.
+        ``"intercept"``/``"weights"`` -- the round's fitted Lasso intercept
+        and one weight per term (``fitted_residual = intercept +
+        contributions @ weights``, in the same order as
+        ``main_effects``/``interactions``/``triples`` are themselves
+        iterated). Every value is plain data (dicts/arrays of numpy arrays
+        or floats) -- fully inspectable, nothing hidden in an opaque model
+        object.
     best_n_rounds_ : int
         The number of rounds actually used by `predict` (the early-stopped
         count, or ``n_rounds`` if early stopping was disabled or never
@@ -216,6 +230,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         triple_min_gain: float = 0.05,
         cross_fit_folds: int = 5,
         shrinkage_m: float = 10.0,
+        stacking_alpha: float = 0.01,
         random_state: int = 42,
     ):
         # scikit-learn convention: __init__ only assigns parameters as-is,
@@ -235,6 +250,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.triple_min_gain = triple_min_gain
         self.cross_fit_folds = cross_fit_folds
         self.shrinkage_m = shrinkage_m
+        self.stacking_alpha = stacking_alpha
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -306,7 +322,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             X_sub = X_fit.iloc[row_idx][col_subset]
             residual_sub = residual[row_idx]
 
-            zone_info, main_effects, interactions, triples, oof_raw = weak_learner_fit(
+            zone_info, main_effects, interactions, triples, oof_contributions = weak_learner_fit(
                 X_sub,
                 residual_sub,
                 col_subset,
@@ -320,19 +336,18 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 cross_fit_folds=self.cross_fit_folds,
                 shrinkage_m=self.shrinkage_m,
             )
-            raw = weak_learner_score(X_fit, zone_info, main_effects, interactions, triples)
+            contributions = weak_learner_contributions(X_fit, zone_info, main_effects, interactions, triples)
             # The round's own (sub)sampled rows would otherwise be scored by a
             # table partly built from their own residual -- replace exactly
-            # those rows with their honest, cross-fitted score. Rows this
-            # round didn't sample were never part of the table, so they're
-            # already leak-free and left untouched.
-            raw[row_idx] = oof_raw
-            # OLS, not a std-ratio rescale: once raw is honestly cross-fitted,
-            # its variance can legitimately collapse toward zero when a round
-            # finds no real signal, and dividing by a near-zero std would
-            # explode the correction instead of correctly shrinking it.
-            alpha, beta = _ols_scale(raw, residual)
-            fitted_residual = alpha + beta * raw
+            # those rows with their honest, cross-fitted contributions. Rows
+            # this round didn't sample were never part of the table, so
+            # they're already leak-free and left untouched.
+            contributions[row_idx, :] = oof_contributions
+            # Lasso, not a shared equal-weight average: an irrelevant term's
+            # weight gets zeroed by the L1 penalty, a strong term gets its
+            # own learned weight instead of a diluted 1/n_terms share.
+            intercept, weights = _fit_lasso_weights(contributions, residual, self.stacking_alpha)
+            fitted_residual = intercept + contributions @ weights
 
             current_pred = current_pred + self.learning_rate * fitted_residual
             self.rounds_.append(
@@ -341,15 +356,15 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                     "main_effects": main_effects,
                     "interactions": interactions,
                     "triples": triples,
-                    "alpha": alpha,
-                    "beta": beta,
+                    "intercept": intercept,
+                    "weights": weights,
                 }
             )
             self.train_rmse_.append(float(np.sqrt(np.mean((y_fit - current_pred) ** 2))))
 
             if has_val:
-                val_raw = weak_learner_score(X_val, zone_info, main_effects, interactions, triples)
-                val_fitted = alpha + beta * val_raw
+                val_contributions = weak_learner_contributions(X_val, zone_info, main_effects, interactions, triples)
+                val_fitted = intercept + val_contributions @ weights
                 current_val_pred = current_val_pred + self.learning_rate * val_fitted
                 self.val_rmse_.append(float(np.sqrt(np.mean((y_val - current_val_pred) ** 2))))
 
@@ -368,10 +383,10 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
     def _raw_predict(self, X: pd.DataFrame, n_rounds: int) -> np.ndarray:
         pred = np.full(len(X), self.baseline_)
         for round_ in self.rounds_[:n_rounds]:
-            raw = weak_learner_score(
+            contributions = weak_learner_contributions(
                 X, round_["zone_info"], round_["main_effects"], round_["interactions"], round_["triples"]
             )
-            fitted_residual = round_["alpha"] + round_["beta"] * raw
+            fitted_residual = round_["intercept"] + contributions @ round_["weights"]
             pred = pred + self.learning_rate * fitted_residual
         return pred
 

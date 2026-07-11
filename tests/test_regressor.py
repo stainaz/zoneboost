@@ -222,6 +222,30 @@ def test_shrinkage_recovers_real_high_cardinality_group_effects():
     assert model.score(X_test, y_test) > 0.5
 
 
+def test_lasso_stacking_separates_real_interaction_from_noise_pairs():
+    # Lasso stacking's promised benefit: a genuine interaction should be
+    # weighted up and ranked clearly above pairs/mains built from pure
+    # noise columns, rather than all terms getting the same diluted
+    # 1/n_terms share regardless of relevance.
+    rng = np.random.default_rng(0)
+    n = 1000
+    X = pd.DataFrame(
+        {
+            "real1": rng.uniform(-3, 3, n),
+            "real2": rng.uniform(-3, 3, n),
+            **{f"noise{i}": rng.uniform(-3, 3, n) for i in range(6)},
+        }
+    )
+    y = (3.0 * X["real1"] * X["real2"] + rng.normal(0, 0.3, n)).to_numpy()
+
+    model = ZoneBoostRegressor(n_rounds=100, random_state=0).fit(X, y)
+    importance = model.feature_importance(X)
+
+    assert importance.index[0] == "real1 x real2"
+    top_noise_importance = max(v for k, v in importance.items() if "noise" in k)
+    assert importance.iloc[0] > 5 * top_noise_importance
+
+
 def test_max_interaction_order_3_improves_fit_on_genuine_triple_interaction():
     # col_subsample=1.0: with only 3 predictors, the default 0.7 subsample
     # rounds down to 2 columns per round, which never gives a 3-way search

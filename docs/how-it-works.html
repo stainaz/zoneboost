@@ -173,17 +173,16 @@
     with. This is on by default, not a <code>max_interaction_order</code>-style opt-in —
     it's a correctness fix, not a feature.</p>
     <div class="note">
-      Cross-fitting also exposed a related fragility: each round's raw zone-lookup score
-      is now rescaled to the residual's own units via an <strong>ordinary-least-squares
-      fit</strong> (<code>fitted = alpha + beta * raw</code>) rather than a std-ratio
-      rescale. A std-ratio rescale forces <code>raw</code>'s spread to match the
-      residual's regardless of how well the two actually correlate — harmless when
-      <code>raw</code> is in-sample-inflated (as it always was pre-cross-fitting), but
-      once cross-fitting honestly reveals a round found no real signal, <code>raw</code>'s
-      variance can legitimately collapse toward zero, and dividing by a near-zero value
-      amplifies noise instead of correctly damping it. OLS doesn't have this failure mode:
-      with weak or no correlation, <code>beta</code> is naturally small rather than
-      amplified.
+      Cross-fitting also exposed a related fragility: a round's raw zone-lookup score can
+      no longer be rescaled to the residual's units via a std-ratio, since that forces
+      <code>raw</code>'s spread to match the residual's regardless of how well the two
+      actually correlate — harmless when <code>raw</code> is in-sample-inflated (as it
+      always was pre-cross-fitting), but once cross-fitting honestly reveals a round found
+      no real signal, <code>raw</code>'s variance can legitimately collapse toward zero,
+      and dividing by a near-zero value amplifies noise instead of correctly damping it.
+      This was first fixed with an ordinary-least-squares rescale, later superseded by the
+      Lasso fit described in <a href="#lasso-stacking">Lasso Stacking</a> below (same
+      non-amplifying property, plus per-term weights instead of one shared scale).
     </div>
     <table>
       <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
@@ -221,6 +220,35 @@
       <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>shrinkage_m</code></td><td><code>10.0</code></td><td>Empirical-Bayes shrinkage strength — a zone needs about this many rows of its own before it's trusted as much as its (hierarchical) prior.</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="lasso-stacking">Lasso Stacking</h2>
+    <p>Every prior release combined a round's terms by averaging every contribution
+    equally (<code>raw = contributions.mean(axis=1)</code>), then fit one shared scale for
+    the whole blend — every term got the same diluted <code>1/n_terms</code> weight
+    regardless of relevance. This is replaced by a <strong>Lasso</strong> fit that treats
+    each term's own (cross-fitted) contribution as its own feature:</p>
+    <ul>
+      <li>An irrelevant term's weight gets zeroed by the L1 penalty.</li>
+      <li>A strong term gets its own learned weight instead of a diluted share.</li>
+      <li>The fitted weights are themselves a real interaction-importance ranking, flowing
+      straight through <a href="explaining-predictions.html">feature_importance() /
+      explain()</a> with no new API needed.</li>
+    </ul>
+    <p>Both sides are standardized before fitting (each contribution by its own std, the
+    residual by its own) so <code>stacking_alpha</code> — the L1 regularization strength —
+    is unitless and comparable across rounds and datasets.</p>
+    <div class="note">
+      On a dataset with one genuine interaction mixed among several irrelevant columns,
+      equal-weight averaging diluted the real signal into an unrecoverable blend
+      (test R² ≈ 0); Lasso stacking recovered it cleanly (test R² > 0.85) — the gap this
+      change was expected to close. Like the two changes above, this is on by default.
+    </div>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>stacking_alpha</code></td><td><code>0.01</code></td><td>Lasso regularization strength for combining a round's terms, in the standardized space described above.</td></tr>
       </tbody>
     </table>
 

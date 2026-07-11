@@ -20,7 +20,7 @@ from sklearn.utils.validation import check_is_fitted
 
 from ._common import ensure_dataframe, resolve_categorical_features
 from ._explain import explain_rounds
-from ._weak_learner import _ols_scale, weak_learner_fit, weak_learner_score
+from ._weak_learner import _fit_lasso_weights, weak_learner_contributions, weak_learner_fit
 
 __all__ = ["ZoneBoostClassifier"]
 
@@ -44,7 +44,7 @@ class _LogOddsBooster:
     def __init__(self, n_rounds, learning_rate, row_subsample, col_subsample,
                  max_zones, min_zone_frac, categorical_features, n_iter_no_change,
                  max_interaction_order, max_triple_interactions, triple_min_gain,
-                 cross_fit_folds, shrinkage_m, random_state):
+                 cross_fit_folds, shrinkage_m, stacking_alpha, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
         self.row_subsample = row_subsample
@@ -58,6 +58,7 @@ class _LogOddsBooster:
         self.triple_min_gain = triple_min_gain
         self.cross_fit_folds = cross_fit_folds
         self.shrinkage_m = shrinkage_m
+        self.stacking_alpha = stacking_alpha
         self.random_state = random_state
 
     def fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray, X_val=None, y_val=None):
@@ -88,7 +89,7 @@ class _LogOddsBooster:
             X_sub = X_fit.iloc[row_idx][col_subset]
             residual_sub = residual[row_idx]
 
-            zone_info, main_effects, interactions, triples, oof_raw = weak_learner_fit(
+            zone_info, main_effects, interactions, triples, oof_contributions = weak_learner_fit(
                 X_sub, residual_sub, col_subset, self.categorical_features, rng,
                 max_zones=self.max_zones, min_zone_frac=self.min_zone_frac,
                 max_interaction_order=self.max_interaction_order,
@@ -97,10 +98,10 @@ class _LogOddsBooster:
                 cross_fit_folds=self.cross_fit_folds,
                 shrinkage_m=self.shrinkage_m,
             )
-            raw = weak_learner_score(X_fit, zone_info, main_effects, interactions, triples)
-            raw[row_idx] = oof_raw
-            alpha, beta = _ols_scale(raw, residual)
-            fitted_residual = alpha + beta * raw
+            contributions = weak_learner_contributions(X_fit, zone_info, main_effects, interactions, triples)
+            contributions[row_idx, :] = oof_contributions
+            intercept, weights = _fit_lasso_weights(contributions, residual, self.stacking_alpha)
+            fitted_residual = intercept + contributions @ weights
 
             current_score = current_score + self.learning_rate * fitted_residual
             self.rounds_.append(
@@ -109,14 +110,14 @@ class _LogOddsBooster:
                     "main_effects": main_effects,
                     "interactions": interactions,
                     "triples": triples,
-                    "alpha": alpha,
-                    "beta": beta,
+                    "intercept": intercept,
+                    "weights": weights,
                 }
             )
 
             if has_val:
-                val_raw = weak_learner_score(X_val, zone_info, main_effects, interactions, triples)
-                val_fitted = alpha + beta * val_raw
+                val_contributions = weak_learner_contributions(X_val, zone_info, main_effects, interactions, triples)
+                val_fitted = intercept + val_contributions @ weights
                 current_val_score = current_val_score + self.learning_rate * val_fitted
                 self.val_logloss_.append(_log_loss(y_val, _sigmoid(current_val_score)))
 
@@ -133,10 +134,10 @@ class _LogOddsBooster:
         n_rounds = n_rounds if n_rounds is not None else self.best_n_rounds_
         score = np.full(len(X), self.baseline_)
         for round_ in self.rounds_[:n_rounds]:
-            raw = weak_learner_score(
+            contributions = weak_learner_contributions(
                 X, round_["zone_info"], round_["main_effects"], round_["interactions"], round_["triples"]
             )
-            fitted_residual = round_["alpha"] + round_["beta"] * raw
+            fitted_residual = round_["intercept"] + contributions @ round_["weights"]
             score = score + self.learning_rate * fitted_residual
         return _sigmoid(score)
 
@@ -214,6 +215,12 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         empirical-Bayes (m-estimate) fit, replacing the flat confidence
         discount used by every prior release -- see
         :class:`~zoneboost.ZoneBoostRegressor` for the full description.
+    stacking_alpha : float, default=0.01
+        Terms are combined via a Lasso fit on each term's own (cross-fitted)
+        contribution rather than an equal-weight average, so an irrelevant
+        term's weight gets zeroed and a strong term gets its own learned
+        weight -- see :class:`~zoneboost.ZoneBoostRegressor` for the full
+        description.
     random_state : int, default=42
         Seed controlling the validation split and per-round subsampling.
 
@@ -265,6 +272,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         triple_min_gain: float = 0.05,
         cross_fit_folds: int = 5,
         shrinkage_m: float = 10.0,
+        stacking_alpha: float = 0.01,
         random_state: int = 42,
     ):
         self.n_rounds = n_rounds
@@ -281,6 +289,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.triple_min_gain = triple_min_gain
         self.cross_fit_folds = cross_fit_folds
         self.shrinkage_m = shrinkage_m
+        self.stacking_alpha = stacking_alpha
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -301,6 +310,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             triple_min_gain=self.triple_min_gain,
             cross_fit_folds=self.cross_fit_folds,
             shrinkage_m=self.shrinkage_m,
+            stacking_alpha=self.stacking_alpha,
             random_state=self.random_state,
         )
 

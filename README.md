@@ -147,17 +147,18 @@ use every available row, since new data was never part of the leakage to
 begin with. This is on by default (not a `max_interaction_order`-style
 opt-in) — it's a correctness fix, not a feature.
 
-Cross-fitting also exposed a related fragility worth knowing about: each
-round's raw zone-lookup score is rescaled to the residual's own units via
-an **ordinary-least-squares fit** (`fitted = alpha + beta * raw`) rather
-than a std-ratio rescale. A std-ratio rescale forces `raw`'s spread to
-match the residual's regardless of how well the two actually correlate —
-harmless when `raw` is in-sample-inflated (as it always was pre-cross-fitting),
-but once cross-fitting honestly reveals a round found no real signal,
-`raw`'s variance can legitimately collapse toward zero, and dividing by a
-near-zero value amplifies noise instead of correctly damping it. OLS
-doesn't have this failure mode: with weak or no correlation, `beta` is
-naturally small rather than amplified.
+Cross-fitting also exposed a related fragility worth knowing about: a
+round's raw zone-lookup score can no longer be rescaled to the residual's
+units via a std-ratio (`resid_mean + (raw - raw_mean) * (resid_std /
+raw_std)`), since that forces `raw`'s spread to match the residual's
+regardless of how well the two actually correlate — harmless when `raw`
+is in-sample-inflated (as it always was pre-cross-fitting), but once
+cross-fitting honestly reveals a round found no real signal, `raw`'s
+variance can legitimately collapse toward zero, and dividing by a
+near-zero value amplifies noise instead of correctly damping it. This was
+first fixed with an ordinary-least-squares rescale, later superseded by
+the Lasso fit described next (which has the same non-amplifying property,
+plus per-term weights instead of one shared scale).
 
 ### Empirical Bayes shrinkage
 
@@ -191,6 +192,30 @@ data supports it, a separate trust-discount multiplied on top is
 redundant. Like the cross-fitting fix, this is on by default: a more
 principled estimate, not a `max_interaction_order`-style opt-in.
 
+### Lasso stacking
+
+Every prior release combined a round's terms by averaging every
+contribution equally (`raw = contributions.mean(axis=1)`), then fit one
+shared scale for the whole blend — every term got the same diluted
+`1/n_terms` weight regardless of relevance. This is replaced by a
+**Lasso** fit that treats each term's own (cross-fitted) contribution as
+its own feature:
+
+- An irrelevant term's weight gets zeroed by the L1 penalty.
+- A strong term gets its own learned weight instead of a diluted share.
+- The fitted weights are themselves a real interaction-importance
+  ranking, flowing straight through `feature_importance()`/`explain()`
+  with no new API needed.
+
+Both sides are standardized before fitting (each contribution by its own
+std, the residual by its own) so `stacking_alpha` — the L1 regularization
+strength — is unitless and comparable across rounds and datasets. On a
+dataset with one genuine interaction mixed among several irrelevant
+columns, equal-weight averaging diluted the real signal into an
+unrecoverable blend (test R² ≈ 0); Lasso stacking recovered it cleanly
+(test R² > 0.85) — the gap the reviewer's roadmap predicted this would
+close. Like the two changes above, this is on by default.
+
 ## Parameters
 
 Identical parameter set on both estimators.
@@ -211,6 +236,7 @@ Identical parameter set on both estimators.
 | `triple_min_gain` | 0.05 | Minimum residual-explained evidence, relative to a candidate's strongest constituent pair, required to keep a 3-way interaction |
 | `cross_fit_folds` | 5 | Number of folds used to compute each round's training signal honestly (see "Cross-fitted cell means" above); falls back to no cross-fitting if a round's row count is smaller than 2 folds |
 | `shrinkage_m` | 10.0 | Empirical-Bayes shrinkage strength — a zone needs about this many rows of its own before it's trusted as much as its (hierarchical) prior; see "Empirical Bayes shrinkage" above |
+| `stacking_alpha` | 0.01 | Lasso regularization strength for combining a round's terms; see "Lasso stacking" above |
 | `random_state` | 42 | Seed for the validation split and subsampling |
 
 **On `max_zones` and `categorical_features`:** if a variable genuinely has
@@ -255,10 +281,11 @@ After `fit`, `ZoneBoostRegressor` exposes (among others):
 
 - `rounds_` — one entry per boosting round, each a plain dict with keys
   `"zone_info"`, `"main_effects"`, `"interactions"`, `"triples"` (empty
-  unless `max_interaction_order=3`), and `"alpha"`/`"beta"` — the round's
-  fitted intercept/slope (`fitted_residual = alpha + beta * raw`, an OLS fit
-  of the residual on that round's raw zone-lookup score). Nothing hidden in
-  an opaque object.
+  unless `max_interaction_order=3`), and `"intercept"`/`"weights"` — the
+  round's fitted Lasso intercept and one weight per term
+  (`fitted_residual = intercept + contributions @ weights`, in the same
+  order `main_effects`/`interactions`/`triples` are themselves iterated).
+  Nothing hidden in an opaque object.
 - `best_n_rounds_` — the round count actually used by `predict`.
 - `val_rmse_` / `train_rmse_` — RMSE after each round.
 - `categorical_features_` — the resolved set of categorical columns

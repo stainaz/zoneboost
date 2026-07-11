@@ -64,6 +64,7 @@
         <tr><td><code>triple_min_gain</code></td><td><code>0.05</code></td><td>Minimum residual-explained evidence, relative to a candidate's strongest constituent pair, required to keep a 3-way interaction</td></tr>
         <tr><td><code>cross_fit_folds</code></td><td><code>5</code></td><td>Number of folds used to compute each round's training signal honestly — see <a href="how-it-works.html#cross-fitted-cell-means">Cross-Fitted Cell Means</a>. Falls back to no cross-fitting if a round's row count is smaller than 2 folds</td></tr>
         <tr><td><code>shrinkage_m</code></td><td><code>10.0</code></td><td>Empirical-Bayes shrinkage strength — see <a href="how-it-works.html#empirical-bayes-shrinkage">Empirical Bayes Shrinkage</a></td></tr>
+        <tr><td><code>stacking_alpha</code></td><td><code>0.01</code></td><td>Lasso regularization strength for combining a round's terms — see <a href="how-it-works.html#lasso-stacking">Lasso Stacking</a></td></tr>
         <tr><td><code>random_state</code></td><td><code>42</code></td><td>Seed for the validation split and subsampling</td></tr>
       </tbody>
     </table>
@@ -72,7 +73,7 @@
     <p>After <code>fit</code>, <code>ZoneBoostRegressor</code> exposes (among others):</p>
     <table>
       <tbody>
-        <tr><td><code>rounds_</code></td><td>One entry per boosting round, each a plain dict with keys <code>"zone_info"</code>, <code>"main_effects"</code>, <code>"interactions"</code>, <code>"triples"</code> (empty unless <code>max_interaction_order=3</code>), and <code>"alpha"</code>/<code>"beta"</code> — the round's fitted intercept/slope (<code>fitted_residual = alpha + beta * raw</code>, an OLS fit of the residual on that round's raw zone-lookup score). Nothing hidden in an opaque object.</td></tr>
+        <tr><td><code>rounds_</code></td><td>One entry per boosting round, each a plain dict with keys <code>"zone_info"</code>, <code>"main_effects"</code>, <code>"interactions"</code>, <code>"triples"</code> (empty unless <code>max_interaction_order=3</code>), and <code>"intercept"</code>/<code>"weights"</code> — the round's fitted Lasso intercept and one weight per term (<code>fitted_residual = intercept + contributions @ weights</code>, in the same order <code>main_effects</code>/<code>interactions</code>/<code>triples</code> are themselves iterated). Nothing hidden in an opaque object.</td></tr>
         <tr><td><code>best_n_rounds_</code></td><td>The round count actually used by <code>predict</code>.</td></tr>
         <tr><td><code>val_rmse_</code> / <code>train_rmse_</code></td><td>RMSE after each round.</td></tr>
         <tr><td><code>categorical_features_</code></td><td>The resolved set of categorical columns (declared ∪ auto-detected).</td></tr>

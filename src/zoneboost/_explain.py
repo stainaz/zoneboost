@@ -4,17 +4,18 @@ Unlike SHAP or LIME, this isn't a post-hoc approximation of a black-box
 model -- it's an algebraic decomposition of what the boosting loop already
 computed. Each round's contribution to the running score is
 
-    alpha + beta * raw
+    intercept + contributions @ weights
 
-where raw is the *mean* of that round's per-term zone lookups (main
-effects + interactions + any adaptively-selected 3-way interactions), and
-(alpha, beta) is the round's own OLS fit of the residual on raw (see
-``_weak_learner._ols_scale``). Because mean is linear, this expands exactly
+where ``contributions`` holds one column per term (main effects +
+interactions + any adaptively-selected 3-way interactions) and
+``(intercept, weights)`` is that round's own Lasso fit of the residual on
+those per-term contributions (see ``_weak_learner._fit_lasso_weights``).
+Because the dot product is already a per-term sum, this expands exactly
 into
 
-    round_baseline + sum_i( (beta / n_terms) * term_i )
+    round_baseline + sum_i( weight_i * term_i )
 
-with round_baseline = alpha, a fixed per-round constant. Summing that
+with round_baseline = intercept, a fixed per-round constant. Summing that
 across rounds gives, for every row, a set of per-term contributions that
 add up EXACTLY to the model's prediction (or, for the classifier, to the
 pre-sigmoid log-odds score) -- not an estimate of it.
@@ -62,23 +63,29 @@ def explain_rounds(X: pd.DataFrame, rounds: list, baseline: float, learning_rate
         main_effects = round_["main_effects"]
         interactions = round_["interactions"]
         triples = round_["triples"]
-        alpha, beta = round_["alpha"], round_["beta"]
+        weights = round_["weights"]
 
         n_terms = len(main_effects) + len(interactions) + len(triples)
         if n_terms == 0:
             continue
-        baseline_total += learning_rate * alpha
+        baseline_total += learning_rate * round_["intercept"]
 
+        # weights is aligned to main_effects -> interactions -> triples, in
+        # each dict's own (Python-guaranteed) insertion order -- the exact
+        # same order weak_learner_contributions builds its columns in, and
+        # the order the round's weights were fit against.
+        i = 0
         for col, deviation in main_effects.items():
             z = _column_zone_index(X[col], zone_info[col])
-            share = learning_rate * (beta / n_terms) * deviation[z]
+            share = learning_rate * weights[i] * deviation[z]
             term_totals.setdefault(col, np.zeros(n))
             term_totals[col] += share
+            i += 1
 
         for (a, b), deviation in interactions.items():
             za = _column_zone_index(X[a], zone_info[a])
             zb = _column_zone_index(X[b], zone_info[b])
-            share = learning_rate * (beta / n_terms) * deviation[za, zb]
+            share = learning_rate * weights[i] * deviation[za, zb]
             # Canonicalize: a pair's fit order varies round to round (each
             # round samples/orders columns independently), so without
             # sorting, "A x B" and "B x A" would fragment into separate
@@ -86,14 +93,16 @@ def explain_rounds(X: pd.DataFrame, rounds: list, baseline: float, learning_rate
             key = " x ".join(sorted((a, b)))
             term_totals.setdefault(key, np.zeros(n))
             term_totals[key] += share
+            i += 1
 
         for (a, b, c), deviation in triples.items():
             za = _column_zone_index(X[a], zone_info[a])
             zb = _column_zone_index(X[b], zone_info[b])
             zc = _column_zone_index(X[c], zone_info[c])
-            share = learning_rate * (beta / n_terms) * deviation[za, zb, zc]
+            share = learning_rate * weights[i] * deviation[za, zb, zc]
             key = " x ".join(sorted((a, b, c)))
             term_totals.setdefault(key, np.zeros(n))
             term_totals[key] += share
+            i += 1
 
     return pd.DataFrame({"baseline": np.full(n, baseline_total), **term_totals}, index=X.index)
