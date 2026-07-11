@@ -234,3 +234,49 @@ def test_calibrate_does_not_change_explain_or_feature_importance():
 
     pd.testing.assert_frame_equal(model_raw.explain(X), model_cal.explain(X))
     pd.testing.assert_series_equal(model_raw.feature_importance(X), model_cal.feature_importance(X))
+
+
+def test_calibration_fraction_default_zero_reproduces_unconstrained_predictions():
+    X, y = _probabilistic_binary_data()
+    model_default = ZoneBoostClassifier(n_rounds=30, random_state=0, calibrate=True).fit(X, y)
+    model_explicit = ZoneBoostClassifier(n_rounds=30, random_state=0, calibrate=True, calibration_fraction=0.0).fit(
+        X, y
+    )
+    np.testing.assert_array_equal(model_default.predict_proba(X), model_explicit.predict_proba(X))
+
+
+def test_calibration_fraction_uses_a_dedicated_split():
+    X, y = _probabilistic_binary_data(n=3000)
+    model = ZoneBoostClassifier(
+        n_rounds=30, random_state=0, calibrate=True, validation_fraction=0.2, calibration_fraction=0.1
+    ).fit(X, y)
+    assert model.booster_.calibrator_ is not None
+
+
+def test_refit_on_full_data_requires_calibration_fraction():
+    X, y = _probabilistic_binary_data()
+    with pytest.raises(ValueError):
+        ZoneBoostClassifier(n_rounds=20, random_state=0, refit_on_full_data=True, calibration_fraction=0.0).fit(X, y)
+
+
+def test_refit_on_full_data_trains_on_more_rows_than_fit_split_alone():
+    X, y = _probabilistic_binary_data(n=2000)
+    model_no_refit = ZoneBoostClassifier(
+        n_rounds=30, random_state=0, validation_fraction=0.3, calibration_fraction=0.1
+    ).fit(X, y)
+    model_refit = ZoneBoostClassifier(
+        n_rounds=30,
+        random_state=0,
+        validation_fraction=0.3,
+        calibration_fraction=0.1,
+        refit_on_full_data=True,
+    ).fit(X, y)
+
+    assert model_refit.booster_.best_n_rounds_ == model_no_refit.booster_.best_n_rounds_
+    assert not np.array_equal(model_refit.predict_proba(X), model_no_refit.predict_proba(X))
+
+    proba = model_refit.predict_proba(X)
+    contrib = model_refit.explain(X)
+    raw_logit = contrib.sum(axis=1).to_numpy()
+    reconstructed = 1.0 / (1.0 + np.exp(-raw_logit))  # calibrate=False here, so this matches predict_proba exactly
+    np.testing.assert_allclose(reconstructed, proba[:, 1], atol=1e-6)

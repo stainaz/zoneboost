@@ -104,6 +104,7 @@
     { title: "Pair Screening", crumb: "How It Works", url: "how-it-works.html#pair-screening" },
     { title: "Prediction Intervals (Regressor)", crumb: "How It Works", url: "how-it-works.html#prediction-intervals" },
     { title: "Probability Calibration (Classifier)", crumb: "How It Works", url: "how-it-works.html#probability-calibration" },
+    { title: "Honest Data Splits (Calibration & Final Refit)", crumb: "How It Works", url: "how-it-works.html#honest-data-splits" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },

@@ -177,6 +177,29 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         affordability rises"), not a general improvement, so the default
         (no constraints) reproduces the exact same predictions as if this
         parameter didn't exist.
+    calibration_fraction : float, default=0.0
+        Fraction of training rows held out in a **third**, dedicated split
+        purely for calibration (:attr:`conformal_scores_`) -- distinct from
+        ``validation_fraction``'s split, which drives early stopping.
+        ``0.0`` (default) reproduces every prior release's behavior exactly:
+        calibration reuses the validation split (a disclosed tradeoff, see
+        "Prediction intervals" in the docs). When set, a value never seen by
+        either the fit or validation split is used instead, so
+        ``best_n_rounds_``'s own selection process can no longer bias the
+        calibration margin.
+    refit_on_full_data : bool, default=False
+        If ``True``, once ``best_n_rounds_`` is chosen from the validation
+        split, the *deployed* model (:attr:`rounds_`/:attr:`baseline_`) is
+        refit on fit+validation data combined, running exactly
+        ``best_n_rounds_`` rounds -- recovering validation data that would
+        otherwise be permanently withheld from the model that actually
+        predicts. Requires ``calibration_fraction > 0``: folding the
+        validation split into training means it can no longer double as a
+        calibration set, so a genuinely separate one is required (raises
+        ``ValueError`` at `fit` otherwise). :attr:`train_rmse_`/
+        :attr:`val_rmse_` still reflect the *original* selection-phase
+        curves, not the refit pass, since the refit's own training dynamics
+        on a different dataset aren't a meaningful continuation of them.
     random_state : int, default=42
         Seed controlling the validation split and the per-round row/column
         subsampling.
@@ -212,11 +235,17 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         count, or ``n_rounds`` if early stopping was disabled or never
         found a better round than the last).
     val_rmse_ : list of float
-        Held-out RMSE after each round (empty if ``validation_fraction=0``).
+        Held-out RMSE after each round from the *selection* phase (empty if
+        ``validation_fraction=0``) -- always reflects how ``best_n_rounds_``
+        was chosen, even when ``refit_on_full_data=True`` retrains
+        :attr:`rounds_` on more data afterward.
     conformal_scores_ : ndarray or None
-        Sorted absolute residuals on the held-out validation split, at
+        Sorted absolute residuals on the calibration split, at
         ``best_n_rounds_`` -- the nonconformity scores :meth:`predict_interval`
-        draws its margin from. ``None`` if ``validation_fraction=0``.
+        draws its margin from. Computed from the dedicated
+        ``calibration_fraction`` split if set, otherwise the validation
+        split (see ``calibration_fraction`` above). ``None`` if neither is
+        available.
 
     Examples
     --------
@@ -262,6 +291,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         stacking_alpha: float = 0.01,
         monotonic_constraints=None,
         max_pair_interactions=None,
+        calibration_fraction: float = 0.0,
+        refit_on_full_data: bool = False,
         random_state: int = 42,
     ):
         # scikit-learn convention: __init__ only assigns parameters as-is,
@@ -284,6 +315,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.stacking_alpha = stacking_alpha
         self.monotonic_constraints = monotonic_constraints
         self.max_pair_interactions = max_pair_interactions
+        self.calibration_fraction = calibration_fraction
+        self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -321,41 +354,107 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             X, self.monotonic_constraints, self.categorical_features_
         )
 
-        rng = np.random.default_rng(self.random_state)
         has_val = self.validation_fraction and self.validation_fraction > 0
-        if has_val:
-            n_total = len(X)
+        has_cal = self.calibration_fraction and self.calibration_fraction > 0
+        if self.refit_on_full_data and has_val and not has_cal:
+            raise ValueError(
+                "refit_on_full_data=True folds the validation split into the final "
+                "model's own training data, so calibration_fraction > 0 is required "
+                "for a genuinely held-out calibration set (otherwise conformal_scores_ "
+                "would be computed from rows the model was just trained on)."
+            )
+
+        rng = np.random.default_rng(self.random_state)
+        n_total = len(X)
+        if has_val or has_cal:
             perm = rng.permutation(n_total)
-            n_val = max(1, int(n_total * self.validation_fraction))
-            val_idx, fit_idx = perm[:n_val], perm[n_val:]
+            n_cal = int(n_total * self.calibration_fraction) if has_cal else 0
+            n_val = max(1, int(n_total * self.validation_fraction)) if has_val else 0
+            if n_cal + n_val >= n_total:
+                raise ValueError("validation_fraction + calibration_fraction leave no rows for the fit split.")
+            cal_idx, val_idx, fit_idx = perm[:n_cal], perm[n_cal : n_cal + n_val], perm[n_cal + n_val :]
             X_fit = X.iloc[fit_idx].reset_index(drop=True)
             y_fit = y_arr[fit_idx]
-            X_val = X.iloc[val_idx].reset_index(drop=True)
-            y_val = y_arr[val_idx]
+            X_val = X.iloc[val_idx].reset_index(drop=True) if has_val else None
+            y_val = y_arr[val_idx] if has_val else None
+            X_cal = X.iloc[cal_idx].reset_index(drop=True) if has_cal else None
+            y_cal = y_arr[cal_idx] if has_cal else None
         else:
             X_fit, y_fit = X, y_arr
-            X_val = y_val = None
+            X_val = y_val = X_cal = y_cal = None
 
-        self.baseline_ = float(y_fit.mean())
+        # Phase 1 (selection): fit on X_fit, track val_rmse_ on X_val (if
+        # any) with early stopping, to decide best_n_rounds_.
+        rounds, baseline, train_rmse, val_rmse = self._boost_rounds(
+            X_fit, y_fit, rng, self.n_rounds, X_val, y_val, early_stopping=True
+        )
+        self.train_rmse_ = train_rmse
+        self.val_rmse_ = val_rmse
+        self.best_n_rounds_ = int(np.argmin(val_rmse)) + 1 if has_val and val_rmse else len(rounds)
 
-        n = len(y_fit)
+        if self.refit_on_full_data and has_val:
+            # Phase 2 (refit): the deployed model is retrained on fit+
+            # validation combined, for exactly best_n_rounds_ rounds --
+            # already decided, so no early stopping this time. Fresh rng so
+            # reproducibility doesn't depend on how much of phase 1's random
+            # stream got consumed. train_rmse_/val_rmse_ above stay as the
+            # phase-1 selection diagnostics; they aren't recomputed here.
+            X_refit = pd.concat([X_fit, X_val], ignore_index=True)
+            y_refit = np.concatenate([y_fit, y_val])
+            refit_rng = np.random.default_rng(self.random_state)
+            rounds, baseline, _, _ = self._boost_rounds(X_refit, y_refit, refit_rng, self.best_n_rounds_)
+
+        self.rounds_ = rounds
+        self.baseline_ = baseline
+
+        # Split-conformal calibration: nonconformity scores from a genuinely
+        # held-out split -- the dedicated calibration split if
+        # calibration_fraction > 0, else the same validation split used for
+        # early stopping (the default, disclosed tradeoff -- see
+        # `predict_interval`). Never computed from rows the final model
+        # trained on: the ValueError above guarantees calibration_fraction >
+        # 0 whenever refit_on_full_data folds the validation split into
+        # training.
+        cal_X, cal_y = (X_cal, y_cal) if has_cal else (X_val, y_val)
+        if cal_X is not None:
+            cal_pred = self._raw_predict(cal_X, self.best_n_rounds_)
+            self.conformal_scores_ = np.sort(np.abs(cal_y - cal_pred))
+        else:
+            self.conformal_scores_ = None
+
+        return self
+
+    def _boost_rounds(self, X_train, y_train, rng, n_rounds, X_val=None, y_val=None, early_stopping=False):
+        """Core boosting loop -- extracted so `fit` can run it twice: once
+        for round-count selection (on the fit split, tracking ``val_rmse_``
+        with early stopping), and optionally again for a final refit
+        (fit+validation combined, exact round count, no early stopping) --
+        see `fit` and ``refit_on_full_data``.
+
+        Returns
+        -------
+        rounds, baseline, train_rmse, val_rmse
+        """
+        baseline = float(y_train.mean())
+        n = len(y_train)
         n_row_sample = min(n, max(min(20, n), int(n * self.row_subsample)))
         n_predictors = len(self.predictor_names_)
         n_col_sample = min(n_predictors, max(min(2, n_predictors), int(n_predictors * self.col_subsample)))
 
-        current_pred = np.full(n, self.baseline_)
+        current_pred = np.full(n, baseline)
+        has_val = X_val is not None
         if has_val:
-            current_val_pred = np.full(len(y_val), self.baseline_)
+            current_val_pred = np.full(len(y_val), baseline)
 
-        self.rounds_, self.train_rmse_, self.val_rmse_ = [], [], []
+        rounds, train_rmse, val_rmse = [], [], []
         no_improve_streak = 0
 
-        for _ in range(self.n_rounds):
-            residual = y_fit - current_pred
+        for _ in range(n_rounds):
+            residual = y_train - current_pred
 
             row_idx = rng.choice(n, size=n_row_sample, replace=False)
             col_subset = list(rng.choice(self.predictor_names_, size=n_col_sample, replace=False))
-            X_sub = X_fit.iloc[row_idx][col_subset]
+            X_sub = X_train.iloc[row_idx][col_subset]
             residual_sub = residual[row_idx]
 
             zone_info, main_effects, interactions, triples, oof_contributions = weak_learner_fit(
@@ -374,7 +473,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 monotonic_constraints=self.monotonic_constraints_,
                 max_pair_interactions=self.max_pair_interactions,
             )
-            contributions = weak_learner_contributions(X_fit, zone_info, main_effects, interactions, triples)
+            contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
             # The round's own (sub)sampled rows would otherwise be scored by a
             # table partly built from their own residual -- replace exactly
             # those rows with their honest, cross-fitted contributions. Rows
@@ -388,7 +487,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             fitted_residual = intercept + contributions @ weights
 
             current_pred = current_pred + self.learning_rate * fitted_residual
-            self.rounds_.append(
+            rounds.append(
                 {
                     "zone_info": zone_info,
                     "main_effects": main_effects,
@@ -398,36 +497,24 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                     "weights": weights,
                 }
             )
-            self.train_rmse_.append(float(np.sqrt(np.mean((y_fit - current_pred) ** 2))))
+            train_rmse.append(float(np.sqrt(np.mean((y_train - current_pred) ** 2))))
 
             if has_val:
                 val_contributions = weak_learner_contributions(X_val, zone_info, main_effects, interactions, triples)
                 val_fitted = intercept + val_contributions @ weights
                 current_val_pred = current_val_pred + self.learning_rate * val_fitted
-                self.val_rmse_.append(float(np.sqrt(np.mean((y_val - current_val_pred) ** 2))))
+                val_rmse.append(float(np.sqrt(np.mean((y_val - current_val_pred) ** 2))))
 
-                if self.n_iter_no_change is not None:
-                    best_so_far = min(self.val_rmse_)
-                    if self.val_rmse_[-1] <= best_so_far + 1e-12:
+                if early_stopping and self.n_iter_no_change is not None:
+                    best_so_far = min(val_rmse)
+                    if val_rmse[-1] <= best_so_far + 1e-12:
                         no_improve_streak = 0
                     else:
                         no_improve_streak += 1
                     if no_improve_streak >= self.n_iter_no_change:
                         break
 
-        self.best_n_rounds_ = int(np.argmin(self.val_rmse_)) + 1 if has_val and self.val_rmse_ else len(self.rounds_)
-
-        # Split-conformal calibration: nonconformity scores from the same
-        # held-out validation split already used for early stopping, at the
-        # exact round count `predict` will use by default -- see
-        # `predict_interval`. Never computed from training rows.
-        if has_val:
-            val_pred_at_best = self._raw_predict(X_val, self.best_n_rounds_)
-            self.conformal_scores_ = np.sort(np.abs(y_val - val_pred_at_best))
-        else:
-            self.conformal_scores_ = None
-
-        return self
+        return rounds, baseline, train_rmse, val_rmse
 
     def _raw_predict(self, X: pd.DataFrame, n_rounds: int) -> np.ndarray:
         pred = np.full(len(X), self.baseline_)
@@ -468,14 +555,17 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         split-conformal assumption; see Vovk et al. / Lei et al.).
 
         The margin is a *fixed* quantile of nonconformity scores (absolute
-        residuals) measured on the same held-out ``validation_fraction``
-        split already used for early stopping -- never training rows, so the
-        margin isn't optimistic about how well the model fits its own
-        training data. Reusing that same split (rather than a third,
-        separate calibration split) is a disclosed simplification: the round
-        count `predict` uses was itself chosen to minimize error on this
-        exact set, which can understate the true margin slightly. Requires
-        ``validation_fraction > 0`` at `fit` time.
+        residuals) measured on a genuinely held-out split -- never training
+        rows, so the margin isn't optimistic about how well the model fits
+        its own training data. By default (``calibration_fraction=0``) that
+        split is the same ``validation_fraction`` split already used for
+        early stopping -- a disclosed simplification, since the round count
+        `predict` uses was itself chosen to minimize error on this exact
+        set, which can understate the true margin slightly. Set
+        ``calibration_fraction > 0`` at `fit` time for a dedicated,
+        genuinely separate calibration split instead. Requires
+        ``validation_fraction > 0`` or ``calibration_fraction > 0`` at `fit`
+        time.
 
         Parameters
         ----------
@@ -490,8 +580,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         check_is_fitted(self, "rounds_")
         if self.conformal_scores_ is None:
             raise ValueError(
-                "predict_interval requires validation_fraction > 0 at fit time "
-                "(no held-out data to calibrate a conformal margin against)."
+                "predict_interval requires validation_fraction > 0 or calibration_fraction > 0 "
+                "at fit time (no held-out data to calibrate a conformal margin against)."
             )
         if not 0 < alpha < 1:
             raise ValueError(f"alpha must be in (0, 1), got {alpha!r}")

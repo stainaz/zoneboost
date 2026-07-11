@@ -422,3 +422,56 @@ def test_predict_interval_raises_without_validation_split():
     assert model.conformal_scores_ is None
     with pytest.raises(ValueError):
         model.predict_interval(X)
+
+
+def test_calibration_fraction_default_zero_reproduces_unconstrained_predictions():
+    X, y = _noisy_quadratic()
+    model_default = ZoneBoostRegressor(n_rounds=40, random_state=0).fit(X, y)
+    model_explicit = ZoneBoostRegressor(n_rounds=40, random_state=0, calibration_fraction=0.0).fit(X, y)
+    np.testing.assert_array_equal(model_default.predict(X), model_explicit.predict(X))
+    np.testing.assert_array_equal(model_default.conformal_scores_, model_explicit.conformal_scores_)
+
+
+def test_calibration_fraction_uses_a_dedicated_split_disjoint_from_fit_and_val():
+    X, y = _noisy_quadratic(n=3000)
+    model = ZoneBoostRegressor(
+        n_rounds=30, random_state=0, validation_fraction=0.2, calibration_fraction=0.1
+    ).fit(X, y)
+    assert len(model.conformal_scores_) == int(3000 * 0.1)
+
+    # A dedicated calibration split should not match the size (or, in
+    # aggregate scale) of what reusing X_val alone would have produced.
+    model_no_cal = ZoneBoostRegressor(
+        n_rounds=30, random_state=0, validation_fraction=0.2, calibration_fraction=0.0
+    ).fit(X, y)
+    assert len(model_no_cal.conformal_scores_) == max(1, int(3000 * 0.2))
+    assert len(model.conformal_scores_) != len(model_no_cal.conformal_scores_)
+
+
+def test_refit_on_full_data_requires_calibration_fraction():
+    X, y = _noisy_quadratic()
+    with pytest.raises(ValueError):
+        ZoneBoostRegressor(n_rounds=30, random_state=0, refit_on_full_data=True, calibration_fraction=0.0).fit(X, y)
+
+
+def test_refit_on_full_data_trains_on_more_rows_than_fit_split_alone():
+    X, y = _noisy_quadratic(n=2000)
+    model_no_refit = ZoneBoostRegressor(
+        n_rounds=40, random_state=0, validation_fraction=0.3, calibration_fraction=0.1
+    ).fit(X, y)
+    model_refit = ZoneBoostRegressor(
+        n_rounds=40,
+        random_state=0,
+        validation_fraction=0.3,
+        calibration_fraction=0.1,
+        refit_on_full_data=True,
+    ).fit(X, y)
+
+    # best_n_rounds_ is decided identically either way (same selection
+    # phase); only what trains the deployed rounds_ differs.
+    assert model_refit.best_n_rounds_ == model_no_refit.best_n_rounds_
+    assert not np.array_equal(model_refit.predict(X), model_no_refit.predict(X))
+
+    pred = model_refit.predict(X)
+    contrib = model_refit.explain(X)
+    np.testing.assert_allclose(contrib.sum(axis=1).to_numpy(), pred, atol=1e-6)

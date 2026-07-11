@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zoneboost"
-version = "0.14.0"
+version = "0.15.0"
 description = "Fully transparent, zone-based gradient boosting (regression and classification) built entirely from descriptive statistics -- no decision trees, no gradient descent, no neural weights."
 readme = "README.md"
 license = "MIT"

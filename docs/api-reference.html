@@ -70,6 +70,8 @@
         <tr><td><code>monotonic_constraints</code></td><td><code>None</code></td><td><code>{column: +1 or -1}</code> — forces a continuous column's main effect to be non-decreasing/non-increasing; opt-in — see <a href="how-it-works.html#monotonic-constraints">Monotonic Constraints</a></td></tr>
         <tr><td><code>max_pair_interactions</code></td><td><code>None</code></td><td>Cap on how many pairwise interactions a round keeps, ranked by importance; opt-in — see <a href="how-it-works.html#pair-screening">Pair Screening</a></td></tr>
         <tr><td><code>calibrate</code></td><td><code>False</code></td><td><strong>Classifier only.</strong> Isotonic-recalibrate <code>predict_proba</code>; opt-in — see <a href="how-it-works.html#probability-calibration">Probability Calibration</a></td></tr>
+        <tr><td><code>calibration_fraction</code></td><td><code>0.0</code></td><td>Fraction held out in a dedicated calibration split, separate from <code>validation_fraction</code>; opt-in — see <a href="how-it-works.html#honest-data-splits">Honest Data Splits</a></td></tr>
+        <tr><td><code>refit_on_full_data</code></td><td><code>False</code></td><td>Refit the deployed model on fit+validation data once <code>best_n_rounds_</code> is chosen; requires <code>calibration_fraction &gt; 0</code> — see <a href="how-it-works.html#honest-data-splits">Honest Data Splits</a></td></tr>
         <tr><td><code>random_state</code></td><td><code>42</code></td><td>Seed for the validation split and subsampling</td></tr>
       </tbody>
     </table>

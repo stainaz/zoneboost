@@ -352,39 +352,58 @@ prediction** — a distribution-free marginal coverage guarantee,
 `P(y in interval) >= 1 - alpha`, assuming exchangeability (Vovk / Lei et
 al.'s standard split-conformal setup), not a heteroscedasticity-aware or
 locally-adaptive variant. The margin is the finite-sample-corrected
-`ceil((n+1)*(1-alpha))`-th smallest absolute residual measured on the same
-held-out `validation_fraction` split already used for early stopping —
-never training rows, so the margin isn't optimistic about training fit.
-Purely additive: no new `__init__` parameter, and every existing method's
-output is unaffected. Requires `validation_fraction > 0`; raises
+`ceil((n+1)*(1-alpha))`-th smallest absolute residual measured on a
+genuinely held-out split — never training rows, so the margin isn't
+optimistic about training fit. Purely additive: every existing method's
+output is unaffected. Requires `validation_fraction > 0` or
+`calibration_fraction > 0` (see "Honest data splits" below); raises
 `ValueError` otherwise. On a synthetic noisy quadratic, `alpha=0.1` achieved
 ~90.2% empirical coverage on held-out data.
-
-**Disclosed tradeoff:** reusing the early-stopping validation split for
-conformal calibration (rather than a third, separate split) is a mild
-deviation from pure split-conformal exchangeability — the round count
-`predict` uses was itself chosen to minimize error on this exact set,
-which can understate the true margin slightly. Shipped as the honestly-
-scoped simple version rather than adding a third data split for a first
-cut.
 
 ### Probability calibration (classifier)
 
 `ZoneBoostClassifier(calibrate=True)` recalibrates each booster's raw
-probability with an **isotonic regression** fit on the same held-out
-validation split used for early stopping — the same recipe
-`sklearn.calibration.CalibratedClassifierCV(method="isotonic")` uses, so
-predicted probabilities better match empirical frequencies. Binary: one
-calibrator on `booster_`. Multiclass: one per one-vs-rest booster in
-`boosters_`, calibrated *before* the existing cross-class normalization
-step. On synthetic noisy-sigmoid data, calibration cut binned reliability
-error roughly 5x (0.091 → 0.017). Requires `validation_fraction > 0`;
-raises `ValueError` at `fit` otherwise. Only affects `predict_proba` —
+probability with an **isotonic regression** fit on a genuinely held-out
+split — the same recipe `sklearn.calibration.CalibratedClassifierCV(
+method="isotonic")` uses, so predicted probabilities better match empirical
+frequencies. Binary: one calibrator on `booster_`. Multiclass: one per
+one-vs-rest booster in `boosters_`, calibrated *before* the existing
+cross-class normalization step. On synthetic noisy-sigmoid data, calibration
+cut binned reliability error roughly 5x (0.091 → 0.017). Requires
+`validation_fraction > 0` or `calibration_fraction > 0`; raises `ValueError`
+at `fit` otherwise. Only affects `predict_proba` —
 `explain()`/`feature_importance()` still decompose the raw log-odds score
-unchanged. This is **opt-in** (default `calibrate=False` reproduces
-today's exact `predict_proba` output, verified bit-for-bit) and is the
-**first parameter that differs between the two estimators** — every other
-parameter is identical across both.
+unchanged. This is **opt-in** (default `calibrate=False` reproduces today's
+exact `predict_proba` output, verified bit-for-bit) and is the only
+parameter that differs between the two estimators.
+
+### Honest data splits (calibration & final refit)
+
+Both calibration mechanisms above originally reused the same
+`validation_fraction` split that also drives early stopping — a disclosed
+tradeoff (the round count `predict` uses was itself chosen to minimize
+error on this exact set, which can understate the true calibration margin
+slightly). Two new parameters, shared by both estimators, fix this properly:
+
+- **`calibration_fraction`** (default `0.0`) carves out a **third**,
+  genuinely separate partition purely for calibration — never seen by
+  either the fit split or the validation split. `0.0` reproduces every
+  prior release's behavior exactly (calibration reuses the validation
+  split, verified bit-for-bit); setting it removes the disclosed tradeoff
+  above entirely.
+- **`refit_on_full_data`** (default `False`) — once `best_n_rounds_` is
+  chosen from the validation split, optionally retrains the *deployed*
+  model on fit+validation data combined, so validation data isn't
+  permanently withheld from the model that actually predicts.
+  `train_rmse_`/`val_rmse_` still reflect the original selection-phase
+  curves, not the refit pass. **Requires `calibration_fraction > 0`**:
+  folding the validation split into training means it can no longer double
+  as a calibration set too, so a genuinely separate one is required
+  (raises `ValueError` otherwise) — this is the one real correctness
+  constraint that keeps the two features from silently interacting badly.
+
+Deferred to a future item: cross-conformal/jackknife+ aggregation for small
+datasets that can't afford a dedicated calibration split.
 
 ## Parameters
 
@@ -411,6 +430,8 @@ Identical parameter set on both estimators, except `calibrate`
 | `monotonic_constraints` | None | `{column: +1 or -1}` — forces a continuous column's main effect to be non-decreasing/non-increasing; opt-in, see "Monotonic constraints" above |
 | `max_pair_interactions` | None | Cap on how many pairwise interactions a round keeps, ranked by importance; opt-in, see "Pair screening" above |
 | `calibrate` | False | **Classifier only.** Isotonic-recalibrate `predict_proba`; opt-in, see "Probability calibration" above |
+| `calibration_fraction` | 0.0 | Fraction held out in a dedicated calibration split, separate from `validation_fraction`; opt-in, see "Honest data splits" above |
+| `refit_on_full_data` | False | Refit the deployed model on fit+validation data once `best_n_rounds_` is chosen; requires `calibration_fraction > 0`, see "Honest data splits" above |
 | `random_state` | 42 | Seed for the validation split and subsampling |
 
 **On `max_zones` and `categorical_features`:** if a variable genuinely has

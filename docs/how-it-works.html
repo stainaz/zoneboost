@@ -390,43 +390,65 @@
     guarantee, <code>P(y in interval) &gt;= 1 - alpha</code>, assuming exchangeability
     (Vovk / Lei et al.'s standard split-conformal setup), not a heteroscedasticity-aware
     or locally-adaptive variant. The margin is the finite-sample-corrected
-    <code>ceil((n+1)*(1-alpha))</code>-th smallest absolute residual measured on the same
-    held-out <code>validation_fraction</code> split already used for early stopping —
-    never training rows. Purely additive: no new <code>__init__</code> parameter, and
-    every existing method's output is unaffected. Requires
-    <code>validation_fraction &gt; 0</code>; raises <code>ValueError</code>
-    otherwise.</p>
+    <code>ceil((n+1)*(1-alpha))</code>-th smallest absolute residual measured on a
+    genuinely held-out split — never training rows. Purely additive: every existing
+    method's output is unaffected. Requires <code>validation_fraction &gt; 0</code> or
+    <code>calibration_fraction &gt; 0</code> (see "Honest Data Splits" below); raises
+    <code>ValueError</code> otherwise.</p>
     <div class="note">
       On a synthetic noisy quadratic, <code>alpha=0.1</code> achieved ~90.2% empirical
       coverage on held-out data.
-      <br><br>
-      <strong>Disclosed tradeoff:</strong> reusing the early-stopping validation split
-      for conformal calibration (rather than a third, separate split) is a mild
-      deviation from pure split-conformal exchangeability — the round count
-      <code>predict</code> uses was itself chosen to minimize error on this exact set,
-      which can understate the true margin slightly. Shipped as the honestly-scoped
-      simple version rather than adding a third data split for a first cut.
     </div>
 
     <h2 id="probability-calibration">Probability Calibration (Classifier)</h2>
     <p><code>ZoneBoostClassifier(calibrate=True)</code> recalibrates each booster's raw
-    probability with an <strong>isotonic regression</strong> fit on the same held-out
-    validation split used for early stopping — the same recipe
+    probability with an <strong>isotonic regression</strong> fit on a genuinely held-out
+    split — the same recipe
     <code>sklearn.calibration.CalibratedClassifierCV(method="isotonic")</code> uses, so
     predicted probabilities better match empirical frequencies. Binary: one calibrator
     on <code>booster_</code>. Multiclass: one per one-vs-rest booster in
     <code>boosters_</code>, calibrated <em>before</em> the existing cross-class
-    normalization step. Requires <code>validation_fraction &gt; 0</code>; raises
-    <code>ValueError</code> at <code>fit</code> otherwise. Only affects
-    <code>predict_proba</code> — <code>explain()</code>/<code>feature_importance()</code>
-    still decompose the raw log-odds score unchanged.</p>
+    normalization step. Requires <code>validation_fraction &gt; 0</code> or
+    <code>calibration_fraction &gt; 0</code>; raises <code>ValueError</code> at
+    <code>fit</code> otherwise. Only affects <code>predict_proba</code> —
+    <code>explain()</code>/<code>feature_importance()</code> still decompose the raw
+    log-odds score unchanged.</p>
     <div class="note">
       On synthetic noisy-sigmoid data, calibration cut binned reliability error roughly
       5x (0.091 → 0.017). This is <strong>opt-in</strong> (default
       <code>calibrate=False</code> reproduces today's exact <code>predict_proba</code>
-      output, verified bit-for-bit) and is the <strong>first parameter that differs
-      between the two estimators</strong> — every other parameter is identical across
-      both.
+      output, verified bit-for-bit) and is the only parameter that differs between the
+      two estimators.
+    </div>
+
+    <h2 id="honest-data-splits">Honest Data Splits (Calibration &amp; Final Refit)</h2>
+    <p>Both calibration mechanisms above originally reused the same
+    <code>validation_fraction</code> split that also drives early stopping — a disclosed
+    tradeoff (the round count <code>predict</code> uses was itself chosen to minimize
+    error on this exact set, which can understate the true calibration margin slightly).
+    Two new parameters, shared by both estimators, fix this properly:</p>
+    <ul>
+      <li><strong><code>calibration_fraction</code></strong> (default <code>0.0</code>)
+      carves out a <strong>third</strong>, genuinely separate partition purely for
+      calibration — never seen by either the fit split or the validation split.
+      <code>0.0</code> reproduces every prior release's behavior exactly (calibration
+      reuses the validation split, verified bit-for-bit); setting it removes the
+      disclosed tradeoff above entirely.</li>
+      <li><strong><code>refit_on_full_data</code></strong> (default <code>False</code>)
+      — once <code>best_n_rounds_</code> is chosen from the validation split, optionally
+      retrains the <em>deployed</em> model on fit+validation data combined, so
+      validation data isn't permanently withheld from the model that actually predicts.
+      <code>train_rmse_</code>/<code>val_rmse_</code> still reflect the original
+      selection-phase curves, not the refit pass. <strong>Requires
+      <code>calibration_fraction &gt; 0</code></strong>: folding the validation split
+      into training means it can no longer double as a calibration set too, so a
+      genuinely separate one is required (raises <code>ValueError</code> otherwise) —
+      the one real correctness constraint that keeps the two features from silently
+      interacting badly.</li>
+    </ul>
+    <div class="note">
+      Deferred to a future item: cross-conformal/jackknife+ aggregation for small
+      datasets that can't afford a dedicated calibration split.
     </div>
 
     <h2 id="how-it-compares">How It Compares</h2>

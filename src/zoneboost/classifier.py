@@ -46,7 +46,7 @@ class _LogOddsBooster:
                  max_zones, min_zone_frac, categorical_features, n_iter_no_change,
                  max_interaction_order, max_triple_interactions, triple_min_gain,
                  cross_fit_folds, shrinkage_m, stacking_alpha, monotonic_constraints,
-                 max_pair_interactions, calibrate, random_state):
+                 max_pair_interactions, calibrate, refit_on_full_data, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
         self.row_subsample = row_subsample
@@ -64,35 +64,88 @@ class _LogOddsBooster:
         self.monotonic_constraints = monotonic_constraints
         self.max_pair_interactions = max_pair_interactions
         self.calibrate = calibrate
+        self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
         self.calibrator_ = None
 
-    def fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray, X_val=None, y_val=None):
+    def fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray, X_val=None, y_val=None, X_cal=None, y_cal=None):
         predictor_names = list(X_fit.columns)
-        n = len(y_fit)
-        p0 = np.clip(y_fit.mean(), 1e-6, 1 - 1e-6)
-        self.baseline_ = float(np.log(p0 / (1 - p0)))
+        rng = np.random.default_rng(self.random_state)
+        has_val = X_val is not None and y_val is not None
+
+        # Phase 1 (selection): fit on X_fit, track val_logloss_ on X_val (if
+        # any) with early stopping, to decide best_n_rounds_.
+        rounds, baseline, val_logloss = self._boost_rounds(
+            X_fit, y_fit, predictor_names, rng, self.n_rounds, X_val, y_val, early_stopping=True
+        )
+        self.val_logloss_ = val_logloss
+        self.best_n_rounds_ = int(np.argmin(val_logloss)) + 1 if has_val and val_logloss else len(rounds)
+
+        if self.refit_on_full_data and has_val:
+            # Phase 2 (refit): the deployed model is retrained on fit+
+            # validation combined, for exactly best_n_rounds_ rounds --
+            # already decided, so no early stopping this time. Fresh rng so
+            # reproducibility doesn't depend on how much of phase 1's random
+            # stream got consumed. val_logloss_ above stays as the phase-1
+            # selection diagnostic; it isn't recomputed here.
+            X_refit = pd.concat([X_fit, X_val], ignore_index=True)
+            y_refit = np.concatenate([y_fit, y_val])
+            refit_rng = np.random.default_rng(self.random_state)
+            rounds, baseline, _ = self._boost_rounds(X_refit, y_refit, predictor_names, refit_rng, self.best_n_rounds_)
+
+        self.rounds_ = rounds
+        self.baseline_ = baseline
+
+        # Isotonic probability calibration: fit on a genuinely held-out
+        # split -- the dedicated calibration split if provided, else the
+        # same validation split used for early stopping (the default,
+        # disclosed tradeoff), mapping this booster's own raw held-out
+        # probability to the actual label -- the standard isotonic-
+        # calibration recipe (same idea sklearn.calibration.
+        # CalibratedClassifierCV(method="isotonic") uses). Only changes
+        # predict_proba's output, not explain()'s raw log-odds decomposition.
+        has_cal = X_cal is not None and y_cal is not None
+        cal_X, cal_y = (X_cal, y_cal) if has_cal else (X_val, y_val)
+        if self.calibrate and cal_X is not None:
+            raw_p_cal = self._raw_predict_proba(cal_X, self.best_n_rounds_)
+            self.calibrator_ = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0).fit(raw_p_cal, cal_y)
+
+        return self
+
+    def _boost_rounds(self, X_train, y_train, predictor_names, rng, n_rounds, X_val=None, y_val=None, early_stopping=False):
+        """Core boosting loop -- extracted so `fit` can run it twice: once
+        for round-count selection (on the fit split, tracking
+        ``val_logloss_`` with early stopping), and optionally again for a
+        final refit (fit+validation combined, exact round count, no early
+        stopping) -- see `fit` and ``refit_on_full_data``.
+
+        Returns
+        -------
+        rounds, baseline, val_logloss
+        """
+        n = len(y_train)
+        p0 = np.clip(y_train.mean(), 1e-6, 1 - 1e-6)
+        baseline = float(np.log(p0 / (1 - p0)))
 
         n_row_sample = min(n, max(min(20, n), int(n * self.row_subsample)))
         n_predictors = len(predictor_names)
         n_col_sample = min(n_predictors, max(min(2, n_predictors), int(n_predictors * self.col_subsample)))
-        rng = np.random.default_rng(self.random_state)
 
-        current_score = np.full(n, self.baseline_)
-        has_val = X_val is not None and y_val is not None
+        current_score = np.full(n, baseline)
+        has_val = X_val is not None
         if has_val:
-            current_val_score = np.full(len(y_val), self.baseline_)
+            current_val_score = np.full(len(y_val), baseline)
 
-        self.rounds_, self.val_logloss_ = [], []
+        rounds, val_logloss = [], []
         no_improve_streak = 0
 
-        for _ in range(self.n_rounds):
+        for _ in range(n_rounds):
             p_hat = _sigmoid(current_score)
-            residual = y_fit - p_hat  # negative gradient of log-loss
+            residual = y_train - p_hat  # negative gradient of log-loss
 
             row_idx = rng.choice(n, size=n_row_sample, replace=False)
             col_subset = list(rng.choice(predictor_names, size=n_col_sample, replace=False))
-            X_sub = X_fit.iloc[row_idx][col_subset]
+            X_sub = X_train.iloc[row_idx][col_subset]
             residual_sub = residual[row_idx]
 
             zone_info, main_effects, interactions, triples, oof_contributions = weak_learner_fit(
@@ -106,13 +159,13 @@ class _LogOddsBooster:
                 monotonic_constraints=self.monotonic_constraints,
                 max_pair_interactions=self.max_pair_interactions,
             )
-            contributions = weak_learner_contributions(X_fit, zone_info, main_effects, interactions, triples)
+            contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
             contributions[row_idx, :] = oof_contributions
             intercept, weights = _fit_lasso_weights(contributions, residual, self.stacking_alpha)
             fitted_residual = intercept + contributions @ weights
 
             current_score = current_score + self.learning_rate * fitted_residual
-            self.rounds_.append(
+            rounds.append(
                 {
                     "zone_info": zone_info,
                     "main_effects": main_effects,
@@ -127,28 +180,15 @@ class _LogOddsBooster:
                 val_contributions = weak_learner_contributions(X_val, zone_info, main_effects, interactions, triples)
                 val_fitted = intercept + val_contributions @ weights
                 current_val_score = current_val_score + self.learning_rate * val_fitted
-                self.val_logloss_.append(_log_loss(y_val, _sigmoid(current_val_score)))
+                val_logloss.append(_log_loss(y_val, _sigmoid(current_val_score)))
 
-                if self.n_iter_no_change is not None:
-                    best_so_far = min(self.val_logloss_)
-                    no_improve_streak = 0 if self.val_logloss_[-1] <= best_so_far + 1e-12 else no_improve_streak + 1
+                if early_stopping and self.n_iter_no_change is not None:
+                    best_so_far = min(val_logloss)
+                    no_improve_streak = 0 if val_logloss[-1] <= best_so_far + 1e-12 else no_improve_streak + 1
                     if no_improve_streak >= self.n_iter_no_change:
                         break
 
-        self.best_n_rounds_ = int(np.argmin(self.val_logloss_)) + 1 if has_val and self.val_logloss_ else len(self.rounds_)
-
-        # Isotonic probability calibration: fit on the same held-out
-        # validation split already used for early stopping (never training
-        # rows), mapping this booster's own raw held-out probability to the
-        # actual label -- the standard isotonic-calibration recipe (same
-        # idea sklearn.calibration.CalibratedClassifierCV(method="isotonic")
-        # uses). Only changes predict_proba's output, not explain()'s raw
-        # log-odds decomposition.
-        if self.calibrate and has_val:
-            raw_p_val = self._raw_predict_proba(X_val, self.best_n_rounds_)
-            self.calibrator_ = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0).fit(raw_p_val, y_val)
-
-        return self
+        return rounds, baseline, val_logloss
 
     def _raw_predict_proba(self, X: pd.DataFrame, n_rounds: int) -> np.ndarray:
         score = np.full(len(X), self.baseline_)
@@ -260,16 +300,31 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         :class:`~zoneboost.ZoneBoostRegressor` for the full description.
     calibrate : bool, default=False
         If ``True``, recalibrate each booster's raw probability with an
-        isotonic regression fit on the held-out validation split (the same
-        split used for early stopping), so predicted probabilities better
-        match empirical frequencies -- the standard isotonic-calibration
-        recipe (``sklearn.calibration.CalibratedClassifierCV(method=
-        "isotonic")`` uses the same idea). Only changes :meth:`predict_proba`
-        -- :meth:`explain`/:meth:`feature_importance` still decompose the raw
-        log-odds score, unaffected. Requires ``validation_fraction > 0``;
-        raises ``ValueError`` at `fit` otherwise. This is the one parameter
-        that differs from :class:`~zoneboost.ZoneBoostRegressor` -- every
-        other parameter is identical across both estimators.
+        isotonic regression fit on a held-out split, so predicted
+        probabilities better match empirical frequencies -- the standard
+        isotonic-calibration recipe (``sklearn.calibration.
+        CalibratedClassifierCV(method="isotonic")`` uses the same idea).
+        Only changes :meth:`predict_proba` -- :meth:`explain`/
+        :meth:`feature_importance` still decompose the raw log-odds score,
+        unaffected. Requires ``validation_fraction > 0`` or
+        ``calibration_fraction > 0``; raises ``ValueError`` at `fit`
+        otherwise. This is the one parameter that differs from
+        :class:`~zoneboost.ZoneBoostRegressor` -- every other parameter is
+        identical across both estimators.
+    calibration_fraction : float, default=0.0
+        Fraction of training rows held out in a **third**, dedicated split
+        purely for calibration -- distinct from ``validation_fraction``'s
+        split, which drives early stopping. ``0.0`` (default) reproduces
+        every prior release's behavior exactly: calibration reuses the
+        validation split. When set, a value never seen by either the fit or
+        validation split is used instead -- see
+        :class:`~zoneboost.ZoneBoostRegressor` for the full description.
+    refit_on_full_data : bool, default=False
+        If ``True``, once each booster's own best round count is chosen from
+        the validation split, the deployed model is refit on fit+validation
+        data combined. Requires ``calibration_fraction > 0`` (raises
+        ``ValueError`` otherwise) -- see
+        :class:`~zoneboost.ZoneBoostRegressor` for the full description.
     random_state : int, default=42
         Seed controlling the validation split and per-round subsampling.
 
@@ -327,6 +382,8 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         monotonic_constraints=None,
         max_pair_interactions=None,
         calibrate: bool = False,
+        calibration_fraction: float = 0.0,
+        refit_on_full_data: bool = False,
         random_state: int = 42,
     ):
         self.n_rounds = n_rounds
@@ -347,6 +404,8 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.monotonic_constraints = monotonic_constraints
         self.max_pair_interactions = max_pair_interactions
         self.calibrate = calibrate
+        self.calibration_fraction = calibration_fraction
+        self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -371,6 +430,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             monotonic_constraints=self.monotonic_constraints_,
             max_pair_interactions=self.max_pair_interactions,
             calibrate=self.calibrate,
+            refit_on_full_data=self.refit_on_full_data,
             random_state=self.random_state,
         )
 
@@ -406,26 +466,45 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             X, self.monotonic_constraints, self.categorical_features_
         )
 
-        rng = np.random.default_rng(self.random_state)
         has_val = self.validation_fraction and self.validation_fraction > 0
-        if self.calibrate and not has_val:
-            raise ValueError("calibrate=True requires validation_fraction > 0 (no held-out data to calibrate against).")
-        if has_val:
-            n_total = len(X)
+        has_cal = self.calibration_fraction and self.calibration_fraction > 0
+        if self.calibrate and not has_val and not has_cal:
+            raise ValueError(
+                "calibrate=True requires validation_fraction > 0 or calibration_fraction > 0 "
+                "(no held-out data to calibrate against)."
+            )
+        if self.refit_on_full_data and has_val and not has_cal:
+            raise ValueError(
+                "refit_on_full_data=True folds the validation split into the final "
+                "model's own training data, so calibration_fraction > 0 is required "
+                "for a genuinely held-out calibration set (otherwise calibrate=True "
+                "would calibrate against rows the model was just trained on)."
+            )
+
+        rng = np.random.default_rng(self.random_state)
+        n_total = len(X)
+        if has_val or has_cal:
             perm = rng.permutation(n_total)
-            n_val = max(1, int(n_total * self.validation_fraction))
-            val_idx, fit_idx = perm[:n_val], perm[n_val:]
+            n_cal = int(n_total * self.calibration_fraction) if has_cal else 0
+            n_val = max(1, int(n_total * self.validation_fraction)) if has_val else 0
+            if n_cal + n_val >= n_total:
+                raise ValueError("validation_fraction + calibration_fraction leave no rows for the fit split.")
+            cal_idx, val_idx, fit_idx = perm[:n_cal], perm[n_cal : n_cal + n_val], perm[n_cal + n_val :]
             X_fit = X.iloc[fit_idx].reset_index(drop=True)
-            X_val = X.iloc[val_idx].reset_index(drop=True)
-            y_fit_raw, y_val_raw = y_arr[fit_idx], y_arr[val_idx]
+            y_fit_raw = y_arr[fit_idx]
+            X_val = X.iloc[val_idx].reset_index(drop=True) if has_val else None
+            y_val_raw = y_arr[val_idx] if has_val else None
+            X_cal = X.iloc[cal_idx].reset_index(drop=True) if has_cal else None
+            y_cal_raw = y_arr[cal_idx] if has_cal else None
         else:
             X_fit, y_fit_raw = X, y_arr
-            X_val = y_val_raw = None
+            X_val = y_val_raw = X_cal = y_cal_raw = None
 
         def fit_one(positive_class):
             y_fit_bin = (y_fit_raw == positive_class).astype(float)
             y_val_bin = (y_val_raw == positive_class).astype(float) if has_val else None
-            return self._make_booster().fit(X_fit, y_fit_bin, X_val=X_val, y_val=y_val_bin)
+            y_cal_bin = (y_cal_raw == positive_class).astype(float) if has_cal else None
+            return self._make_booster().fit(X_fit, y_fit_bin, X_val=X_val, y_val=y_val_bin, X_cal=X_cal, y_cal=y_cal_bin)
 
         if not self.multiclass_:
             self.booster_ = fit_one(self.classes_[-1])
