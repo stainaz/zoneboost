@@ -94,8 +94,9 @@
     <table>
       <tbody>
         <tr><td><code>classes_</code></td><td>Distinct class labels seen during <code>fit</code>.</td></tr>
-        <tr><td><code>multiclass_</code></td><td>Whether one-vs-rest (3+ classes) was used.</td></tr>
-        <tr><td><code>booster_</code> (binary) or <code>boosters_</code> (3+ classes)</td><td>An internal log-odds booster (or a <code>{class_label: booster}</code> dict) — each with its own <code>rounds_</code>, <code>best_n_rounds_</code>, and <code>calibrator_</code> (the fitted isotonic calibrator, or <code>None</code> if <code>calibrate=False</code>) — same plain-data structure as the regressor's.</td></tr>
+        <tr><td><code>multiclass_</code></td><td>Whether native multinomial boosting (3+ classes) was used.</td></tr>
+        <tr><td><code>booster_</code> (binary)</td><td>An internal log-odds booster with its own <code>rounds_</code>, <code>best_n_rounds_</code>, and <code>calibrator_</code> (the fitted isotonic calibrator, or <code>None</code> if <code>calibrate=False</code>) — same plain-data structure as the regressor's.</td></tr>
+        <tr><td><code>softmax_booster_</code> (3+ classes)</td><td>The single joint multinomial booster — see <a href="how-it-works.html#native-multinomial-boosting">Native Multinomial Boosting</a>. Has its own <code>rounds_</code> (one entry per round, each a <code>{class_index: round_dict}</code> mapping), <code>best_n_rounds_</code>, <code>n_classes_</code>, and <code>calibrators_</code> (a <code>{class_index: IsotonicRegression}</code> dict, or <code>None</code> if <code>calibrate=False</code>).</td></tr>
       </tbody>
     </table>
 

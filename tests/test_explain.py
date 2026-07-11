@@ -63,21 +63,22 @@ def test_classifier_binary_explain_sums_exactly_to_log_odds():
 
 
 def test_classifier_multiclass_explain_returns_dict_per_class():
-    # explain()'s sigmoid gives each booster's RAW one-vs-rest probability
-    # (pre-normalization); predict_proba() normalizes across all K boosters
-    # so they sum to 1 -- the two are related but not numerically equal,
-    # by design (see the explain() docstring).
+    # Native multinomial boosting: each class's explain() DataFrame (which
+    # includes the "_softmax_centering" identifiability column) sums to that
+    # class's own joint-softmax score, so softmax-ing all K classes' sums
+    # together reproduces predict_proba(X) exactly (calibrate=False, the
+    # default -- see the explain() docstring).
     X, rng = _data()
     y = pd.cut(X["x1"], bins=3, labels=[0, 1, 2]).astype(int)
     model = ZoneBoostClassifier(n_rounds=30, categorical_features=["cat"], random_state=0).fit(X, y)
 
     explanation = model.explain(X)
     assert set(explanation.keys()) == set(model.classes_)
-    for k, df in explanation.items():
-        log_odds = df.sum(axis=1).to_numpy()
-        proba_from_explain = 1 / (1 + np.exp(-log_odds))
-        proba_from_raw_booster = model.boosters_[k].predict_proba(X)
-        np.testing.assert_allclose(proba_from_explain, proba_from_raw_booster, atol=1e-6)
+    scores = np.column_stack([explanation[k].sum(axis=1).to_numpy() for k in model.classes_])
+    shifted = scores - scores.max(axis=1, keepdims=True)
+    exp = np.exp(shifted)
+    proba_from_explain = exp / exp.sum(axis=1, keepdims=True)
+    np.testing.assert_allclose(proba_from_explain, model.predict_proba(X), atol=1e-6)
 
 
 def test_classifier_feature_importance_multiclass_is_averaged():

@@ -118,11 +118,12 @@
     gradient) instead of the raw target, and predictions are squashed through a sigmoid at
     the end. This is the standard way gradient boosting generalizes from regression to
     classification.</p>
-    <p>Binary targets fit a single log-odds booster. 3+ classes use one-vs-rest: an
-    independent booster is fit per class ("is this class vs. everything else"), sharing
-    one validation split across all of them, and their probabilities are normalized to sum
-    to 1 at predict time — multiclass is not a different mechanism, just K independent
-    copies of the same binary booster.</p>
+    <p>Binary targets fit a single log-odds booster — already a principled, single
+    sigmoid with no heuristic involved. 3+ classes use <strong>native multinomial
+    (softmax) boosting</strong> (see "Native Multinomial Boosting" below): one booster
+    maintains all K classes' logits jointly and optimizes the true softmax
+    cross-entropy, rather than K independent one-vs-rest boosters normalized together
+    after the fact.</p>
 
     <h2 id="adaptive-interaction-order">Adaptive Interaction Order</h2>
     <p>By default zoneboost learns main effects and every pairwise interaction
@@ -383,6 +384,57 @@
       same behavior as before this change, verified bit-for-bit.
     </div>
 
+    <h2 id="native-multinomial-boosting">Native Multinomial Boosting</h2>
+    <p>3+ class problems previously used one-vs-rest: K completely independent
+    log-odds boosters, each fit against its own binary sigmoid residual, then
+    normalized to sum to 1 at predict time. Each class's booster never knew about
+    the other K-1 classes' current scores — a reasonable, standard heuristic, but
+    not what genuinely optimizing multinomial cross-entropy looks like. <strong>This
+    is now on by default</strong> — one-vs-rest was never a deliberate permanent
+    design choice. Binary classification (already a single principled sigmoid, no
+    one-vs-rest heuristic involved) is completely unaffected — verified
+    bit-for-bit.</p>
+    <p>A single booster now maintains all K logits jointly per row. Each round,
+    <code>p = softmax(scores)</code> and every class k's residual is
+    <code>1(y==k) - p[:, k]</code> — the true joint gradient, where raising one
+    class's score correctly lowers every other class's probability through the
+    shared softmax denominator. A separate weak learner is still fit per class per
+    round (the same <code>weak_learner_fit</code> reused unchanged, just called K
+    times against K different residuals), then the K raw outputs are
+    <strong>centered to sum to zero per row</strong> before being added to the
+    running scores. This centering is mathematically a no-op for predictions —
+    softmax is shift-invariant to any constant added equally to every class's
+    logit — it exists purely so each class's own contribution is <em>uniquely
+    defined</em> rather than ambiguous up to an arbitrary shared function, which
+    matters specifically because <code>explain()</code>'s per-class attribution
+    needs to be unique to mean anything.</p>
+    <p><code>explain()</code> reflects this: each class's DataFrame gains one
+    extra column, <code>"_softmax_centering"</code> — the cumulative version of
+    that same per-round centering, identical across every class. With it
+    included, <code>softmax(explain(X)[classes_[0]].sum(axis=1), ...)</code>
+    reproduces <code>predict_proba(X)</code> exactly (verified to machine
+    precision). <code>calibrate=True</code> still works for multiclass: one
+    isotonic calibrator per class, calibrating that class's own marginal softmax
+    probability, renormalized back to sum to 1 afterward.</p>
+    <table>
+      <thead><tr><th>Metric</th><th>One-vs-rest (old)</th><th>Native softmax (new)</th></tr></thead>
+      <tbody>
+        <tr><td>Accuracy</td><td>0.958</td><td>0.962</td></tr>
+        <tr><td>Log-loss</td><td>0.289</td><td>0.202</td></tr>
+        <tr><td>Minority-class reliability error</td><td>0.041</td><td>0.030</td></tr>
+      </tbody>
+    </table>
+    <div class="note">
+      Measured on a synthetic 3-class dataset with an imbalanced ~3.4% minority
+      class.
+      <br><br>
+      <strong>Breaking change, disclosed:</strong> <code>boosters_</code>
+      (previously a <code>{class_label: booster}</code> dict for 3+ classes) is
+      replaced by a single <code>softmax_booster_</code> attribute. Any code
+      inspecting <code>boosters_</code> directly for a multiclass model needs to
+      update to <code>softmax_booster_</code>.
+    </div>
+
     <h2 id="prediction-intervals">Prediction Intervals (Regressor)</h2>
     <p><code>ZoneBoostRegressor.predict_interval(X, alpha=0.1)</code> returns a
     constant-width <code>(lower, upper)</code> band around <code>predict(X)</code> via
@@ -406,9 +458,9 @@
     split — the same recipe
     <code>sklearn.calibration.CalibratedClassifierCV(method="isotonic")</code> uses, so
     predicted probabilities better match empirical frequencies. Binary: one calibrator
-    on <code>booster_</code>. Multiclass: one per one-vs-rest booster in
-    <code>boosters_</code>, calibrated <em>before</em> the existing cross-class
-    normalization step. Requires <code>validation_fraction &gt; 0</code> or
+    on <code>booster_</code>. Multiclass: one per class on <code>softmax_booster_</code>,
+    calibrating that class's own marginal softmax probability, renormalized back to
+    sum to 1 afterward. Requires <code>validation_fraction &gt; 0</code> or
     <code>calibration_fraction &gt; 0</code>; raises <code>ValueError</code> at
     <code>fit</code> otherwise. Only affects <code>predict_proba</code> —
     <code>explain()</code>/<code>feature_importance()</code> still decompose the raw

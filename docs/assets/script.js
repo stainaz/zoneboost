@@ -102,6 +102,7 @@
     { title: "Cyclic Backfitting", crumb: "How It Works", url: "how-it-works.html#cyclic-backfitting" },
     { title: "Monotonic Constraints", crumb: "How It Works", url: "how-it-works.html#monotonic-constraints" },
     { title: "Pair Screening", crumb: "How It Works", url: "how-it-works.html#pair-screening" },
+    { title: "Native Multinomial Boosting", crumb: "How It Works", url: "how-it-works.html#native-multinomial-boosting" },
     { title: "Prediction Intervals (Regressor)", crumb: "How It Works", url: "how-it-works.html#prediction-intervals" },
     { title: "Probability Calibration (Classifier)", crumb: "How It Works", url: "how-it-works.html#probability-calibration" },
     { title: "Honest Data Splits (Calibration & Final Refit)", crumb: "How It Works", url: "how-it-works.html#honest-data-splits" },

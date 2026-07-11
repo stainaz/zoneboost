@@ -82,7 +82,7 @@ clf = ZoneBoostClassifier(
 )
 clf.fit(X, y_class)
 clf.predict_proba(X)   # (n_samples, n_classes), rows sum to 1
-clf.predict(X)          # works for binary and 3+ classes (one-vs-rest) alike</code></pre>
+clf.predict(X)          # works for binary and 3+ classes (native multinomial) alike</code></pre>
 
     <div class="note">
       Both continuous and categorical columns accept <code>NaN</code>/<code>None</code>

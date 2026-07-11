@@ -69,15 +69,15 @@ contrib.sum(axis=1)                    # == model.predict(X), exactly</code></pr
     <p>For <code>ZoneBoostClassifier</code>, <code>explain(X)</code> sums to the
     <strong>log-odds</strong> score, not the probability directly — probability
     contributions don't add linearly through a sigmoid, the same convention SHAP uses for
-    logistic models. For 3+ classes it returns a <code>{class_label: DataFrame}</code>
-    dict, one per one-vs-rest booster, and</p>
-    <pre><code>sigmoid(explain(X)[k].sum(axis=1))</code></pre>
-    <p>reproduces that booster's <em>raw, pre-calibration</em> probability — equal to
-    <code>boosters_[k].predict_proba(X)</code> only when <code>calibrate=False</code>
+    logistic models. For 3+ classes (native multinomial boosting, see
+    <a href="how-it-works.html#native-multinomial-boosting">Native Multinomial
+    Boosting</a>) it returns a <code>{class_label: DataFrame}</code> dict, each including
+    one extra <code>"_softmax_centering"</code> identifiability column, and</p>
+    <pre><code>softmax(explain(X)[classes_[0]].sum(axis=1), ..., explain(X)[classes_[K-1]].sum(axis=1))</code></pre>
+    <p>reproduces <code>predict_proba(X)</code> exactly when <code>calibrate=False</code>
     (the default); with <code>calibrate=True</code>, <code>predict_proba</code>
-    additionally applies the fitted isotonic calibrator before the final cross-class
-    normalization. See <a href="how-it-works.html#probability-calibration">Probability
-    Calibration</a>.</p>
+    additionally applies each class's fitted isotonic calibrator and renormalizes. See
+    <a href="how-it-works.html#probability-calibration">Probability Calibration</a>.</p>
 
     <h2 id="vs-shap-lime">How This Differs from SHAP/LIME</h2>
     <ul>

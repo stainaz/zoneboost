@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from zoneboost import ZoneBoostClassifier
+from zoneboost.classifier import _multinomial_log_loss, _softmax
 
 
 def _binary_data(n=400, seed=0):
@@ -214,7 +215,8 @@ def test_calibrate_multiclass_probabilities_still_sum_to_one():
     proba = model.predict_proba(X)
     assert proba.shape == (len(y), 3)
     np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-9)
-    assert all(b.calibrator_ is not None for b in model.boosters_.values())
+    assert model.softmax_booster_.calibrators_ is not None
+    assert all(c is not None for c in model.softmax_booster_.calibrators_.values())
 
 
 def test_calibrate_default_false_is_unaffected():
@@ -280,3 +282,71 @@ def test_refit_on_full_data_trains_on_more_rows_than_fit_split_alone():
     raw_logit = contrib.sum(axis=1).to_numpy()
     reconstructed = 1.0 / (1.0 + np.exp(-raw_logit))  # calibrate=False here, so this matches predict_proba exactly
     np.testing.assert_allclose(reconstructed, proba[:, 1], atol=1e-6)
+
+
+def test_softmax_rows_sum_to_one_and_matches_manual_computation():
+    scores = np.array([[1.0, 2.0, 0.5], [-3.0, 0.0, 3.0], [0.0, 0.0, 0.0]])
+    p = _softmax(scores)
+    np.testing.assert_allclose(p.sum(axis=1), 1.0)
+    expected_row0 = np.exp(scores[0]) / np.exp(scores[0]).sum()
+    np.testing.assert_allclose(p[0], expected_row0)
+    np.testing.assert_allclose(p[2], [1 / 3, 1 / 3, 1 / 3])
+
+
+def test_softmax_is_shift_invariant():
+    scores = np.array([[1.0, 2.0, 0.5], [-3.0, 0.0, 3.0]])
+    shifted = scores + 100.0  # same constant added to every class's logit
+    np.testing.assert_allclose(_softmax(scores), _softmax(shifted), atol=1e-10)
+
+
+def test_multinomial_log_loss_zero_for_perfect_predictions():
+    y_onehot = np.array([[1.0, 0.0], [0.0, 1.0]])
+    p = np.array([[1.0, 0.0], [0.0, 1.0]])
+    assert _multinomial_log_loss(y_onehot, p) < 1e-6
+
+
+def test_multinomial_log_loss_matches_hand_computation():
+    y_onehot = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    p = np.array([[0.5, 0.3, 0.2], [0.1, 0.2, 0.7]])
+    expected = -np.mean([np.log(0.5), np.log(0.7)])
+    assert abs(_multinomial_log_loss(y_onehot, p) - expected) < 1e-9
+
+
+def test_multiclass_explain_sums_exactly_to_each_class_score():
+    X, y = _multiclass_data(n=500)
+    model = ZoneBoostClassifier(n_rounds=25, categorical_features=["cat"], random_state=0).fit(X, y)
+
+    explanation = model.explain(X)
+    scores = np.column_stack([explanation[k].sum(axis=1).to_numpy() for k in model.classes_])
+    shifted = scores - scores.max(axis=1, keepdims=True)
+    exp = np.exp(shifted)
+    reconstructed_proba = exp / exp.sum(axis=1, keepdims=True)
+    np.testing.assert_allclose(reconstructed_proba, model.predict_proba(X), atol=1e-6)
+
+
+def test_multiclass_feature_importance_excludes_bookkeeping_columns():
+    X, y = _multiclass_data()
+    model = ZoneBoostClassifier(n_rounds=25, categorical_features=["cat"], random_state=0).fit(X, y)
+    importance = model.feature_importance(X)
+    assert "baseline" not in importance.index
+    assert "_softmax_centering" not in importance.index
+
+
+def test_multiclass_calibration_fraction_and_refit_on_full_data():
+    X, y = _multiclass_data(n=1500)
+    with pytest.raises(ValueError):
+        ZoneBoostClassifier(
+            n_rounds=20, random_state=0, refit_on_full_data=True, calibration_fraction=0.0
+        ).fit(X, y)
+
+    model = ZoneBoostClassifier(
+        n_rounds=20,
+        random_state=0,
+        validation_fraction=0.2,
+        calibration_fraction=0.1,
+        refit_on_full_data=True,
+        calibrate=True,
+    ).fit(X, y)
+    proba = model.predict_proba(X)
+    np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-9)
+    assert model.softmax_booster_.calibrators_ is not None
