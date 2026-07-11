@@ -475,3 +475,49 @@ def test_refit_on_full_data_trains_on_more_rows_than_fit_split_alone():
     pred = model_refit.predict(X)
     contrib = model_refit.explain(X)
     np.testing.assert_allclose(contrib.sum(axis=1).to_numpy(), pred, atol=1e-6)
+
+
+def _heteroscedastic(n=3000, seed=0):
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0, 10, n)
+    noise_scale = 0.2 + 0.3 * x
+    y = 2 * x + rng.normal(0, 1, n) * noise_scale
+    X = pd.DataFrame({"x": x})
+    return X, y
+
+
+def test_loss_default_squared_error_reproduces_unconstrained_predictions():
+    X, y = _synthetic_regression()
+    model_default = ZoneBoostRegressor(n_rounds=40, random_state=0).fit(X, y)
+    model_explicit = ZoneBoostRegressor(n_rounds=40, random_state=0, loss="squared_error").fit(X, y)
+    np.testing.assert_array_equal(model_default.predict(X), model_explicit.predict(X))
+
+
+def test_loss_invalid_value_raises():
+    X, y = _synthetic_regression()
+    with pytest.raises(ValueError):
+        ZoneBoostRegressor(n_rounds=10, loss="bogus").fit(X, y)
+
+
+def test_quantile_out_of_range_raises():
+    X, y = _synthetic_regression()
+    with pytest.raises(ValueError):
+        ZoneBoostRegressor(n_rounds=10, loss="quantile", quantile=1.5).fit(X, y)
+    with pytest.raises(ValueError):
+        ZoneBoostRegressor(n_rounds=10, loss="quantile", quantile=0.0).fit(X, y)
+
+
+def test_loss_quantile_achieves_target_coverage_on_heteroscedastic_data():
+    X, y = _heteroscedastic(n=4000)
+    model = ZoneBoostRegressor(
+        n_rounds=80, loss="quantile", quantile=0.9, random_state=0, validation_fraction=0.2
+    ).fit(X, y)
+    coverage = np.mean(y < model.predict(X))
+    assert 0.83 <= coverage <= 0.96
+
+
+def test_loss_quantile_predict_interval_raises():
+    X, y = _heteroscedastic()
+    model = ZoneBoostRegressor(n_rounds=20, loss="quantile", quantile=0.9, random_state=0).fit(X, y)
+    with pytest.raises(ValueError):
+        model.predict_interval(X)

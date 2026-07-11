@@ -75,7 +75,8 @@ class _LogOddsBooster:
                  max_zones, min_zone_frac, categorical_features, n_iter_no_change,
                  max_interaction_order, max_triple_interactions, triple_min_gain,
                  cross_fit_folds, shrinkage_m, stacking_alpha, monotonic_constraints,
-                 max_pair_interactions, calibrate, refit_on_full_data, random_state):
+                 max_pair_interactions, adaptive_boundary_smoothing, boundary_shrinkage_m,
+                 calibrate, refit_on_full_data, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
         self.row_subsample = row_subsample
@@ -92,6 +93,8 @@ class _LogOddsBooster:
         self.stacking_alpha = stacking_alpha
         self.monotonic_constraints = monotonic_constraints
         self.max_pair_interactions = max_pair_interactions
+        self.adaptive_boundary_smoothing = adaptive_boundary_smoothing
+        self.boundary_shrinkage_m = boundary_shrinkage_m
         self.calibrate = calibrate
         self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
@@ -187,6 +190,8 @@ class _LogOddsBooster:
                 shrinkage_m=self.shrinkage_m,
                 monotonic_constraints=self.monotonic_constraints,
                 max_pair_interactions=self.max_pair_interactions,
+                adaptive_boundary_smoothing=self.adaptive_boundary_smoothing,
+                boundary_shrinkage_m=self.boundary_shrinkage_m,
             )
             contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
             contributions[row_idx, :] = oof_contributions
@@ -255,7 +260,8 @@ class _SoftmaxBooster:
                  max_zones, min_zone_frac, categorical_features, n_iter_no_change,
                  max_interaction_order, max_triple_interactions, triple_min_gain,
                  cross_fit_folds, shrinkage_m, stacking_alpha, monotonic_constraints,
-                 max_pair_interactions, calibrate, refit_on_full_data, random_state):
+                 max_pair_interactions, adaptive_boundary_smoothing, boundary_shrinkage_m,
+                 calibrate, refit_on_full_data, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
         self.row_subsample = row_subsample
@@ -272,6 +278,8 @@ class _SoftmaxBooster:
         self.stacking_alpha = stacking_alpha
         self.monotonic_constraints = monotonic_constraints
         self.max_pair_interactions = max_pair_interactions
+        self.adaptive_boundary_smoothing = adaptive_boundary_smoothing
+        self.boundary_shrinkage_m = boundary_shrinkage_m
         self.calibrate = calibrate
         self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
@@ -382,6 +390,8 @@ class _SoftmaxBooster:
                     shrinkage_m=self.shrinkage_m,
                     monotonic_constraints=self.monotonic_constraints,
                     max_pair_interactions=self.max_pair_interactions,
+                    adaptive_boundary_smoothing=self.adaptive_boundary_smoothing,
+                    boundary_shrinkage_m=self.boundary_shrinkage_m,
                 )
                 contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
                 contributions[row_idx, :] = oof_contributions
@@ -519,6 +529,16 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         selection so it never changes which triples are found. ``None``
         (default) keeps every pair -- see
         :class:`~zoneboost.ZoneBoostRegressor` for the full description.
+    adaptive_boundary_smoothing : bool, default=False
+        If ``True``, each continuous column's soft zone lookup is scaled by
+        a per-column, per-round mixing weight estimated honestly
+        (cross-fitted), shrunk toward full smoothness absent strong
+        out-of-fold evidence a hard lookup fits better. ``False`` (default)
+        reproduces every prior release's behavior exactly -- opt-in, see
+        :class:`~zoneboost.ZoneBoostRegressor` for the full description.
+    boundary_shrinkage_m : float, default=10.0
+        Shrinkage strength for ``adaptive_boundary_smoothing`` -- see
+        :class:`~zoneboost.ZoneBoostRegressor` for the full description.
     triple_min_gain : float, default=0.05
         Minimum residual-explained magnitude a candidate 3-way interaction
         must retain after subtracting the main-effect + pairwise fit for
@@ -629,6 +649,8 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         stacking_alpha: float = 0.01,
         monotonic_constraints=None,
         max_pair_interactions=None,
+        adaptive_boundary_smoothing: bool = False,
+        boundary_shrinkage_m: float = 10.0,
         calibrate: bool = False,
         calibration_fraction: float = 0.0,
         refit_on_full_data: bool = False,
@@ -651,6 +673,8 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.stacking_alpha = stacking_alpha
         self.monotonic_constraints = monotonic_constraints
         self.max_pair_interactions = max_pair_interactions
+        self.adaptive_boundary_smoothing = adaptive_boundary_smoothing
+        self.boundary_shrinkage_m = boundary_shrinkage_m
         self.calibrate = calibrate
         self.calibration_fraction = calibration_fraction
         self.refit_on_full_data = refit_on_full_data
@@ -677,6 +701,8 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             stacking_alpha=self.stacking_alpha,
             monotonic_constraints=self.monotonic_constraints_,
             max_pair_interactions=self.max_pair_interactions,
+            adaptive_boundary_smoothing=self.adaptive_boundary_smoothing,
+            boundary_shrinkage_m=self.boundary_shrinkage_m,
             calibrate=self.calibrate,
             refit_on_full_data=self.refit_on_full_data,
             random_state=self.random_state,
@@ -700,6 +726,8 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             stacking_alpha=self.stacking_alpha,
             monotonic_constraints=self.monotonic_constraints_,
             max_pair_interactions=self.max_pair_interactions,
+            adaptive_boundary_smoothing=self.adaptive_boundary_smoothing,
+            boundary_shrinkage_m=self.boundary_shrinkage_m,
             calibrate=self.calibrate,
             refit_on_full_data=self.refit_on_full_data,
             random_state=self.random_state,

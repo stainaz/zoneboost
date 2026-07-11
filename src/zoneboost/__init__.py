@@ -15,8 +15,9 @@ See :class:`ZoneBoostRegressor` / :class:`ZoneBoostClassifier` for the full
 parameter and attribute reference.
 """
 
+from ._conformal import ConformalizedQuantileRegressor
 from ._version import __version__
 from .classifier import ZoneBoostClassifier
 from .regressor import ZoneBoostRegressor
 
-__all__ = ["ZoneBoostRegressor", "ZoneBoostClassifier", "__version__"]
+__all__ = ["ZoneBoostRegressor", "ZoneBoostClassifier", "ConformalizedQuantileRegressor", "__version__"]

@@ -106,12 +106,16 @@
     { title: "Prediction Intervals (Regressor)", crumb: "How It Works", url: "how-it-works.html#prediction-intervals" },
     { title: "Probability Calibration (Classifier)", crumb: "How It Works", url: "how-it-works.html#probability-calibration" },
     { title: "Honest Data Splits (Calibration & Final Refit)", crumb: "How It Works", url: "how-it-works.html#honest-data-splits" },
+    { title: "Adaptive Boundary Continuity", crumb: "How It Works", url: "how-it-works.html#adaptive-boundary-continuity" },
+    { title: "Quantile Regression", crumb: "How It Works", url: "how-it-works.html#quantile-regression" },
+    { title: "Conformalized Quantile Regression (CQR)", crumb: "How It Works", url: "how-it-works.html#conformalized-quantile-regression" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },
     { title: "Parameters", crumb: "API Reference", url: "api-reference.html#parameters" },
     { title: "ZoneBoostRegressor Fitted Attributes", crumb: "API Reference", url: "api-reference.html#regressor-attributes" },
     { title: "ZoneBoostClassifier Fitted Attributes", crumb: "API Reference", url: "api-reference.html#classifier-attributes" },
+    { title: "ConformalizedQuantileRegressor Parameters", crumb: "API Reference", url: "api-reference.html#cqr-parameters" },
     { title: "Scope & Compatibility", crumb: "API Reference", url: "api-reference.html#scope" },
 
     { title: "Explaining Predictions", crumb: "Docs", url: "explaining-predictions.html" },

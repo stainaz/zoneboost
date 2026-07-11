@@ -29,6 +29,17 @@ shrinkage machinery) on an honest, cross-fitted main-effects-only residual,
 and only the survivors ever pay the cost of a full :func:`_pair_shrunk_
 deviation` fit -- see :func:`_seed_candidate_columns` and the parameter's own
 docstring for how this stays consistent with 3-way interaction discovery.
+
+Every zone/cell's stored value is a shrunk *mean* by default (``quantile=
+None`` everywhere in this module). Passing a ``quantile`` level instead
+switches every one of those values to a shrunk *quantile* of the residual at
+that level (see :func:`_zone_raw_stat`/:func:`_zone_shrunk_deviation`) --
+zone construction, cross-fitting, and pair screening's cheap proxy stay
+squared-error-flavored regardless (disclosed approximations), but the
+combination step (:func:`_fit_lasso_weights`) switches from ``Lasso`` to
+``QuantileRegressor`` in quantile mode -- not optional, since combining
+quantile-shrunk terms via an ordinary (squared-error) Lasso would silently
+re-center the round's output back toward the mean/median every round.
 """
 
 from __future__ import annotations
@@ -38,33 +49,86 @@ import itertools
 import numpy as np
 import pandas as pd
 from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import Lasso
+from sklearn.linear_model import Lasso, QuantileRegressor
 
 from ._zones import adaptive_zone_boundaries, categorical_zone_index, categorical_zone_map, zone_centers, zone_index
 
 __all__ = ["weak_learner_fit", "weak_learner_contributions"]
 
 
+def _zone_raw_stat(
+    zone_values: np.ndarray,
+    target_values: np.ndarray,
+    n_zones: int,
+    quantile: float = None,
+):
+    """Each zone's raw (unshrunk) statistic and row count -- a mean via
+    ``bincount`` (``quantile=None``, O(n)), or a given quantile level
+    (sorts rows by zone once via ``argsort``/``searchsorted``, then
+    ``np.quantile`` per zone, O(n log n) -- negligible next to the round's
+    own ``O(p^2)`` pair loop). Shared by :func:`_zone_shrunk_deviation` and
+    its pair/triple counterparts so both loss modes reuse the identical
+    shrinkage arithmetic downstream -- only how the *raw* per-zone number
+    is computed differs.
+    """
+    counts = np.bincount(zone_values, minlength=n_zones).astype(float)
+    if quantile is None:
+        sums = np.bincount(zone_values, weights=target_values, minlength=n_zones)
+        stat = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
+        return stat, counts
+
+    stat = np.zeros(n_zones)
+    order = np.argsort(zone_values, kind="stable")
+    sorted_zones = zone_values[order]
+    sorted_targets = target_values[order]
+    edges = np.searchsorted(sorted_zones, np.arange(n_zones + 1))
+    for z in range(n_zones):
+        lo, hi = edges[z], edges[z + 1]
+        if hi > lo:
+            stat[z] = np.quantile(sorted_targets[lo:hi], quantile)
+    return stat, counts
+
+
+def _overall_stat(values: np.ndarray, quantile: float = None) -> float:
+    """The scalar prior/baseline a round's terms are shrunk toward: the
+    mean (``quantile=None``, bit-identical to every prior release) or the
+    given quantile level -- shared by every call site that needs "the
+    overall statistic of this residual" (:func:`weak_learner_fit`'s main
+    effects, :func:`_fit_pairs`/:func:`_select_triples`'s mains-removed
+    backfitting prior, :func:`_cross_fitted_contributions`'s per-fold
+    prior)."""
+    return float(values.mean()) if quantile is None else float(np.quantile(values, quantile))
+
+
 def _zone_shrunk_deviation(
     zone_values: np.ndarray,
     target_values: np.ndarray,
-    overall_mean: float,
+    overall_stat: float,
     n_zones: int,
     m: float,
     monotonic: int = 0,
+    quantile: float = None,
 ):
-    """For each zone: an empirical-Bayes (m-estimate) shrunk average target
-    among fit-rows in that zone, minus the overall mean.
+    """For each zone: an empirical-Bayes (m-estimate) shrunk statistic among
+    fit-rows in that zone, minus the overall statistic.
 
-    ``shrunk_mean = (counts * cell_mean + m * overall_mean) / (counts + m)``
+    ``shrunk_stat = (counts * cell_stat + m * overall_stat) / (counts + m)``
     -- a zone needs about ``m`` rows of its own before it's trusted as much
-    as the prior (here, the global mean); fewer rows lean toward the prior,
-    more rows lean toward its own data. When ``counts == 0``,
-    ``counts * cell_mean == 0`` regardless of the placeholder cell_mean
-    there, so this naturally reduces to ``deviation = 0`` (the prior) with
-    no special-casing needed -- replaces a flat ``counts / counts.max()``
-    confidence discount with a principled, hierarchical estimate. O(n) via
-    bincount.
+    as the prior; fewer rows lean toward the prior, more rows lean toward
+    its own data. When ``counts == 0``, ``counts * cell_stat == 0``
+    regardless of the placeholder cell_stat there, so this naturally
+    reduces to ``deviation = 0`` (the prior) with no special-casing needed
+    -- replaces a flat ``counts / counts.max()`` confidence discount with a
+    principled, hierarchical estimate.
+
+    ``quantile`` (default ``None``) selects the raw per-zone statistic via
+    :func:`_zone_raw_stat`: ``None`` is the mean (``overall_stat`` is then
+    the overall mean, bit-identical to every prior release); a quantile
+    level shrinks the zone's own empirical quantile toward the *overall*
+    quantile instead -- the same m-estimate shrinkage pattern applied to a
+    different raw statistic, not a rigorous Bayesian quantile posterior
+    (there isn't a simple closed form for that), but a defensible extension
+    of the identical formula used everywhere else in zoneboost.
 
     ``monotonic`` (0 = none, +1 = non-decreasing, -1 = non-increasing) is
     only ever passed for a column's own main effect (continuous columns,
@@ -79,11 +143,9 @@ def _zone_shrunk_deviation(
     row count so sparse zones don't distort the fit -- the same
     density-aware spirit as the shrinkage above.
     """
-    counts = np.bincount(zone_values, minlength=n_zones).astype(float)
-    sums = np.bincount(zone_values, weights=target_values, minlength=n_zones)
-    cell_mean = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
-    shrunk_mean = (counts * cell_mean + m * overall_mean) / (counts + m)
-    deviation = shrunk_mean - overall_mean
+    cell_stat, counts = _zone_raw_stat(zone_values, target_values, n_zones, quantile)
+    shrunk_stat = (counts * cell_stat + m * overall_stat) / (counts + m)
+    deviation = shrunk_stat - overall_stat
 
     if monotonic != 0:
         n_real = n_zones - 1
@@ -99,31 +161,39 @@ def _pair_shrunk_deviation(
     za: np.ndarray,
     zb: np.ndarray,
     target_values: np.ndarray,
-    overall_mean: float,
+    overall_stat: float,
     n_zones_a: int,
     n_zones_b: int,
     m: float,
+    quantile: float = None,
 ):
     """Same idea, gridded over two variables' zones jointly -- but shrunk
-    toward a *hierarchical* prior, not the flat global mean: each column's
-    own shrunk marginal deviation (a direct recursive call to
+    toward a *hierarchical* prior, not the flat overall statistic: each
+    column's own shrunk marginal deviation (a direct recursive call to
     :func:`_zone_shrunk_deviation`) is combined additively
-    (``overall_mean + dev_a + dev_b``) into a row+column prior, and the
+    (``overall_stat + dev_a + dev_b``) into a row+column prior, and the
     joint cell is shrunk toward *that*. Absent enough of its own data,
     "what row A's zone alone predicts, plus what column B's zone alone
     predicts" is a far better guess for a sparse cell than the overall
-    average of everything."""
-    dev_a = _zone_shrunk_deviation(za, target_values, overall_mean, n_zones_a, m)
-    dev_b = _zone_shrunk_deviation(zb, target_values, overall_mean, n_zones_b, m)
+    average of everything.
+
+    ``quantile`` (default ``None``) is forwarded to every call below,
+    including the joint cell's own raw statistic (via
+    :func:`_zone_raw_stat`) -- an additive sum of two quantile deviations
+    isn't an exact quantile identity the way it is for means, but reuses
+    the identical hierarchical-prior shrinkage pattern as a defensible
+    heuristic (see :func:`_zone_shrunk_deviation`)."""
+    dev_a = _zone_shrunk_deviation(za, target_values, overall_stat, n_zones_a, m, quantile=quantile)
+    dev_b = _zone_shrunk_deviation(zb, target_values, overall_stat, n_zones_b, m, quantile=quantile)
 
     combined = za * n_zones_b + zb
     size = n_zones_a * n_zones_b
-    counts = np.bincount(combined, minlength=size).astype(float).reshape(n_zones_a, n_zones_b)
-    sums = np.bincount(combined, weights=target_values, minlength=size).reshape(n_zones_a, n_zones_b)
-    cell_mean = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
-    prior = overall_mean + dev_a[:, None] + dev_b[None, :]
-    shrunk_mean = (counts * cell_mean + m * prior) / (counts + m)
-    return shrunk_mean - overall_mean
+    cell_stat, counts = _zone_raw_stat(combined, target_values, size, quantile)
+    cell_stat = cell_stat.reshape(n_zones_a, n_zones_b)
+    counts = counts.reshape(n_zones_a, n_zones_b)
+    prior = overall_stat + dev_a[:, None] + dev_b[None, :]
+    shrunk_stat = (counts * cell_stat + m * prior) / (counts + m)
+    return shrunk_stat - overall_stat
 
 
 def _triple_shrunk_deviation(
@@ -131,30 +201,33 @@ def _triple_shrunk_deviation(
     zb: np.ndarray,
     zc: np.ndarray,
     target_values: np.ndarray,
-    overall_mean: float,
+    overall_stat: float,
     n_zones_a: int,
     n_zones_b: int,
     n_zones_c: int,
     m: float,
+    quantile: float = None,
 ):
     """Same recursive pattern as :func:`_pair_shrunk_deviation`, one level
     deeper: the three main effects and three pairwise interactions
     (themselves already shrunk) combine additively into the joint 3D cell's
-    prior, and the cell is shrunk toward that."""
-    dev_a = _zone_shrunk_deviation(za, target_values, overall_mean, n_zones_a, m)
-    dev_b = _zone_shrunk_deviation(zb, target_values, overall_mean, n_zones_b, m)
-    dev_c = _zone_shrunk_deviation(zc, target_values, overall_mean, n_zones_c, m)
-    dev_ab = _pair_shrunk_deviation(za, zb, target_values, overall_mean, n_zones_a, n_zones_b, m)
-    dev_ac = _pair_shrunk_deviation(za, zc, target_values, overall_mean, n_zones_a, n_zones_c, m)
-    dev_bc = _pair_shrunk_deviation(zb, zc, target_values, overall_mean, n_zones_b, n_zones_c, m)
+    prior, and the cell is shrunk toward that. ``quantile`` is forwarded to
+    every recursive call and the joint cell's own raw statistic, same
+    heuristic-extension caveat as :func:`_pair_shrunk_deviation`."""
+    dev_a = _zone_shrunk_deviation(za, target_values, overall_stat, n_zones_a, m, quantile=quantile)
+    dev_b = _zone_shrunk_deviation(zb, target_values, overall_stat, n_zones_b, m, quantile=quantile)
+    dev_c = _zone_shrunk_deviation(zc, target_values, overall_stat, n_zones_c, m, quantile=quantile)
+    dev_ab = _pair_shrunk_deviation(za, zb, target_values, overall_stat, n_zones_a, n_zones_b, m, quantile=quantile)
+    dev_ac = _pair_shrunk_deviation(za, zc, target_values, overall_stat, n_zones_a, n_zones_c, m, quantile=quantile)
+    dev_bc = _pair_shrunk_deviation(zb, zc, target_values, overall_stat, n_zones_b, n_zones_c, m, quantile=quantile)
 
     combined = (za * n_zones_b + zb) * n_zones_c + zc
     size = n_zones_a * n_zones_b * n_zones_c
-    counts = np.bincount(combined, minlength=size).astype(float).reshape(n_zones_a, n_zones_b, n_zones_c)
-    sums = np.bincount(combined, weights=target_values, minlength=size).reshape(n_zones_a, n_zones_b, n_zones_c)
-    cell_mean = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
+    cell_stat, counts = _zone_raw_stat(combined, target_values, size, quantile)
+    cell_stat = cell_stat.reshape(n_zones_a, n_zones_b, n_zones_c)
+    counts = counts.reshape(n_zones_a, n_zones_b, n_zones_c)
     prior = (
-        overall_mean
+        overall_stat
         + dev_a[:, None, None]
         + dev_b[None, :, None]
         + dev_c[None, None, :]
@@ -162,8 +235,8 @@ def _triple_shrunk_deviation(
         + dev_ac[:, None, :]
         + dev_bc[None, :, :]
     )
-    shrunk_mean = (counts * cell_mean + m * prior) / (counts + m)
-    return shrunk_mean - overall_mean
+    shrunk_stat = (counts * cell_stat + m * prior) / (counts + m)
+    return shrunk_stat - overall_stat
 
 
 def _term_importance(deviation: np.ndarray) -> float:
@@ -234,6 +307,67 @@ def _blend_3d(deviation: np.ndarray, za_lo, za_hi, wa, zb_lo, zb_hi, wb, zc_lo, 
     )
 
 
+def _estimate_boundary_lambda(
+    z_lo: np.ndarray,
+    z_hi: np.ndarray,
+    weight_hi: np.ndarray,
+    residual: np.ndarray,
+    fold_ids: np.ndarray,
+    n_folds: int,
+    n_zones: int,
+    m: float,
+    boundary_shrinkage_m: float,
+    monotonic: int = 0,
+    quantile: float = None,
+) -> float:
+    """Cross-fitted estimate of how much a continuous column's soft
+    (centroid-interpolated) zone lookup should be trusted versus its hard
+    (single-zone) lookup -- the ``lam`` :func:`_column_soft_zone_index`
+    scales ``weight_hi`` by. Shrunk toward full smoothness (``lam=1``)
+    absent strong, honest evidence that the hard lookup fits held-out rows
+    better (a real, local discontinuity), mirroring the same m-estimate
+    shrinkage pattern used everywhere else in zoneboost.
+
+    ``z_lo``/``z_hi``/``weight_hi`` are the column's own *unscaled*
+    (``lam=1``) soft lookup -- i.e. ``_column_soft_zone_index``'s raw
+    output before any ``lam`` has been applied.
+
+    ``quantile`` (default ``None``) is forwarded to the deviation this
+    compares hard vs. smooth against, so quantile-mode rounds judge the
+    lookup shape against the same values they actually fit -- but the
+    comparison itself stays squared-error-based regardless (a deliberate
+    simplification: it's judging which interpolation *shape* fits held-out
+    rows better, not re-deriving the training loss itself).
+    """
+    hard_sq_err = 0.0
+    smooth_sq_err = 0.0
+    n_boundary_rows = 0
+
+    for k in range(n_folds):
+        out_mask = fold_ids != k
+        in_mask = fold_ids == k
+        if not np.any(in_mask):
+            continue
+        overall_stat_k = _overall_stat(residual[out_mask], quantile)
+        dev_k = _zone_shrunk_deviation(
+            z_lo[out_mask], residual[out_mask], overall_stat_k, n_zones, m, monotonic, quantile=quantile
+        )
+
+        r_in = residual[in_mask]
+        hard_pred = dev_k[z_lo[in_mask]]
+        smooth_pred = _blend_1d(dev_k, z_lo[in_mask], z_hi[in_mask], weight_hi[in_mask])
+        hard_sq_err += float(np.sum((r_in - hard_pred) ** 2))
+        smooth_sq_err += float(np.sum((r_in - smooth_pred) ** 2))
+        n_boundary_rows += int(np.sum(weight_hi[in_mask] > 0))
+
+    smooth_advantage = max(0.0, hard_sq_err - smooth_sq_err)
+    hard_advantage = max(0.0, smooth_sq_err - hard_sq_err)
+    total_advantage = smooth_advantage + hard_advantage
+    raw_lambda = smooth_advantage / total_advantage if total_advantage > 0 else 1.0
+
+    return (n_boundary_rows * raw_lambda + boundary_shrinkage_m * 1.0) / (n_boundary_rows + boundary_shrinkage_m)
+
+
 def _ols_scale(raw: np.ndarray, residual: np.ndarray) -> tuple:
     """Ordinary-least-squares fit of ``residual`` on ``raw`` (a single
     predictor): returns ``(alpha, beta)`` minimizing
@@ -268,13 +402,25 @@ def _residualize(raw: np.ndarray, residual: np.ndarray) -> np.ndarray:
     return residual - (alpha + beta * raw)
 
 
-def _fit_lasso_weights(contributions: np.ndarray, residual: np.ndarray, alpha: float) -> tuple:
-    """Fit a Lasso relating each term's own contribution (one column per
-    term) to the residual, replacing the old "average every term, then fit
-    one shared scale" combination with a learned per-term weight: an
+def _fit_lasso_weights(contributions: np.ndarray, residual: np.ndarray, alpha: float, quantile: float = None) -> tuple:
+    """Fit an L1-penalized model relating each term's own contribution (one
+    column per term) to the residual, replacing the old "average every term,
+    then fit one shared scale" combination with a learned per-term weight: an
     irrelevant term's weight gets zeroed by the L1 penalty, a strong term
     gets its own weight instead of a diluted ``1/n_terms`` share, and the
     fitted weights themselves become a real interaction-importance ranking.
+
+    ``quantile=None`` (default) fits an ordinary ``Lasso`` (squared error) --
+    bit-identical to every prior release. This is **not** just a cosmetic
+    choice for ``loss="quantile"`` rounds: ``Lasso``'s intercept is the
+    residual's own *mean* (an OLS identity), which would silently re-center
+    every round's combined output back toward the conditional mean/median
+    regardless of each term's own carefully quantile-shrunk deviation --
+    actively destroying the quantile target, not merely approximating it.
+    When ``quantile`` is set, ``sklearn.linear_model.QuantileRegressor``
+    (pinball loss + L1 penalty) is used instead, so the combination step
+    stays consistent with the same loss every term's own value was fit
+    against.
 
     Both sides are standardized before fitting (each contribution column by
     its own std, the residual by its own std) so ``alpha`` is a unitless
@@ -282,6 +428,8 @@ def _fit_lasso_weights(contributions: np.ndarray, residual: np.ndarray, alpha: f
     of scale -- then un-standardized so the returned weights apply directly
     to raw (unstandardized) contributions. A column with zero variance
     (e.g. every row landed in the same zone) gets a weight of exactly 0.
+    Standardization is a monotonic affine transform, so the same
+    ``quantile`` level applies unchanged on the standardized scale.
 
     Returns
     -------
@@ -297,7 +445,10 @@ def _fit_lasso_weights(contributions: np.ndarray, residual: np.ndarray, alpha: f
     X_std = contributions / safe_col_std
     y_std = (residual - resid_mean) / resid_std
 
-    model = Lasso(alpha=alpha, fit_intercept=True, max_iter=10000)
+    if quantile is None:
+        model = Lasso(alpha=alpha, fit_intercept=True, max_iter=10000)
+    else:
+        model = QuantileRegressor(quantile=quantile, alpha=alpha, fit_intercept=True, solver="highs")
     model.fit(X_std, y_std)
 
     weights = np.where(col_std > 0, model.coef_ * (resid_std / safe_col_std), 0.0)
@@ -327,6 +478,7 @@ def _cross_fitted_contributions(
     n_folds: int,
     m: float,
     monotonic_constraints: dict = None,
+    quantile: float = None,
 ) -> np.ndarray:
     """Leakage-free version of what ``weak_learner_contributions`` would
     compute for the exact rows used to build this round's tables: for each
@@ -365,7 +517,7 @@ def _cross_fitted_contributions(
         in_mask = fold_ids == k
         if not np.any(in_mask):
             continue
-        overall_mean_k = float(residual[out_mask].mean())
+        overall_stat_k = _overall_stat(residual[out_mask], quantile)
 
         col = 0
         main_dev_k = {}
@@ -373,10 +525,11 @@ def _cross_fitted_contributions(
             dev = _zone_shrunk_deviation(
                 zones[name][out_mask],
                 residual[out_mask],
-                overall_mean_k,
+                overall_stat_k,
                 n_zones[name],
                 m,
                 monotonic_constraints.get(name, 0),
+                quantile=quantile,
             )
             main_dev_k[name] = dev
             z_lo, z_hi, w = soft[name]
@@ -390,7 +543,14 @@ def _cross_fitted_contributions(
                 - main_dev_k[b][zones[b][out_mask]]
             )
             dev = _pair_shrunk_deviation(
-                zones[a][out_mask], zones[b][out_mask], partial, float(partial.mean()), n_zones[a], n_zones[b], m
+                zones[a][out_mask],
+                zones[b][out_mask],
+                partial,
+                _overall_stat(partial, quantile),
+                n_zones[a],
+                n_zones[b],
+                m,
+                quantile=quantile,
             )
             za_lo, za_hi, wa = soft[a]
             zb_lo, zb_hi, wb = soft[b]
@@ -411,11 +571,12 @@ def _cross_fitted_contributions(
                 zones[b][out_mask],
                 zones[c][out_mask],
                 partial,
-                float(partial.mean()),
+                _overall_stat(partial, quantile),
                 n_zones[a],
                 n_zones[b],
                 n_zones[c],
                 m,
+                quantile=quantile,
             )
             za_lo, za_hi, wa = soft[a]
             zb_lo, zb_hi, wb = soft[b]
@@ -444,7 +605,9 @@ def _get_pair(interactions: dict, x: str, y: str):
     return interactions[(x, y)] if (x, y) in interactions else interactions[(y, x)]
 
 
-def _fit_pairs(pairs, zones: dict, n_zones: dict, main_effects: dict, residual: np.ndarray, m: float) -> dict:
+def _fit_pairs(
+    pairs, zones: dict, n_zones: dict, main_effects: dict, residual: np.ndarray, m: float, quantile: float = None
+) -> dict:
     """Fully fit (backfit against mains, see module docstring) exactly the
     given ``pairs`` -- shared by ``weak_learner_fit``'s screened and
     unscreened paths so there's a single place that does the expensive
@@ -453,7 +616,7 @@ def _fit_pairs(pairs, zones: dict, n_zones: dict, main_effects: dict, residual: 
     for a, b in pairs:
         partial = residual - main_effects[a][zones[a]] - main_effects[b][zones[b]]
         interactions[(a, b)] = _pair_shrunk_deviation(
-            zones[a], zones[b], partial, float(partial.mean()), n_zones[a], n_zones[b], m
+            zones[a], zones[b], partial, _overall_stat(partial, quantile), n_zones[a], n_zones[b], m, quantile=quantile
         )
     return interactions
 
@@ -487,6 +650,7 @@ def _select_triples(
     max_triple_interactions: int,
     triple_min_gain: float,
     m: float,
+    quantile: float = None,
 ):
     """Adaptive 3-way interaction selection for one round: start from main
     effects + pairwise interactions (already fit), and only add a small
@@ -518,6 +682,13 @@ def _select_triples(
     :func:`_pair_shrunk_deviation` calls perform that automatically once fed
     a mains-removed target, so the accepted triple's coefficients end up
     interaction-only rather than re-encoding lower-order signal.
+
+    The accept/reject ``gain_dev`` test itself always stays mean-based
+    (``quantile`` not applied there) -- like the pair-screening statistic,
+    it is a cheap diagnostic for "is there signal here," not the literal
+    training objective. Only the accepted triple's *stored* value
+    (``dev_abc``) uses ``quantile`` when set, since that value becomes part
+    of the round's actual output.
     """
     if len(candidate_cols) < 3 or not interactions:
         return {}
@@ -563,7 +734,16 @@ def _select_triples(
             # interaction-only rather than re-encoding mains+pairs signal.
             mains_removed = residual - dev_a[za] - dev_b[zb] - dev_c[zc]
             dev_abc = _triple_shrunk_deviation(
-                za, zb, zc, mains_removed, float(mains_removed.mean()), n_zones[a], n_zones[b], n_zones[c], m
+                za,
+                zb,
+                zc,
+                mains_removed,
+                _overall_stat(mains_removed, quantile),
+                n_zones[a],
+                n_zones[b],
+                n_zones[c],
+                m,
+                quantile=quantile,
             )
             scored.append(((a, b, c), gain, dev_abc))
 
@@ -608,16 +788,24 @@ def _column_soft_zone_index(x_col: pd.Series, info: tuple):
     formula works uniformly downstream regardless of column type -- see
     ``weak_learner_contributions``.
 
+    ``info`` may carry an optional 4th element, ``lam`` (the column's own
+    adaptive-boundary-continuity mixing weight, see
+    :func:`_estimate_boundary_lambda`) -- a plain 3-tuple is treated as
+    ``lam=1.0`` (fully smooth, today's behavior) for backward
+    compatibility. ``lam`` scales ``weight_hi`` uniformly, so ``lam=0``
+    collapses this into the hard, single-zone lookup regardless of
+    distance, and intermediate values partially blend the two.
+
     Returns
     -------
     z_lo, z_hi : ndarray of int
         The value's own zone, and the neighboring zone to blend toward
         (equal to ``z_lo`` when there's nothing to blend into).
     weight_hi : ndarray of float
-        0 at ``z_lo``'s own centroid, 1 at ``z_hi``'s centroid, linear
-        between, clamped to ``[0, 1]`` past either end (leftmost/rightmost
-        zone, or a single-zone column) so it never reaches past a
-        non-existent neighbor.
+        0 at ``z_lo``'s own centroid, ``lam`` at ``z_hi``'s centroid,
+        linear between, clamped to ``[0, 1]`` past either end
+        (leftmost/rightmost zone, or a single-zone column) so it never
+        reaches past a non-existent neighbor.
     """
     if info[0] == "categorical":
         z = categorical_zone_index(x_col, info[1])
@@ -625,6 +813,7 @@ def _column_soft_zone_index(x_col: pd.Series, info: tuple):
         return z, z, zero
 
     boundaries, centers = info[1], info[2]
+    lam = info[3] if len(info) > 3 else 1.0
     x_arr = np.asarray(x_col, dtype=float)
     is_missing = np.isnan(x_arr)
     n_real = len(centers)
@@ -637,7 +826,7 @@ def _column_soft_zone_index(x_col: pd.Series, info: tuple):
 
     denom = neighbor_center - own_center
     weight_hi = np.divide(x_arr - own_center, denom, out=np.zeros_like(x_arr), where=denom != 0)
-    weight_hi = np.clip(weight_hi, 0.0, 1.0)
+    weight_hi = np.clip(weight_hi, 0.0, 1.0) * lam
 
     missing_idx = n_real  # one past the last real zone, matching zone_index's convention
     z_lo = np.where(is_missing, missing_idx, z_lo)
@@ -668,6 +857,9 @@ def weak_learner_fit(
     shrinkage_m: float = 10.0,
     monotonic_constraints: dict = None,
     max_pair_interactions: int = None,
+    adaptive_boundary_smoothing: bool = False,
+    boundary_shrinkage_m: float = 10.0,
+    quantile: float = None,
 ):
     """Fit one boosting round's weak learner: zone info (adaptive-continuous
     or exact-categorical per column), main effects, interactions, and
@@ -742,6 +934,36 @@ def weak_learner_fit(
         and the triple-candidate search, not by ``p``. Falls back to fitting
         every pair (then trimming by the full fit's own importance) when the
         round has too few rows for cross-fitting to screen against.
+    adaptive_boundary_smoothing : bool, default=False
+        If ``True``, each continuous column's soft zone lookup (see
+        :func:`_column_soft_zone_index`) is scaled by a per-column,
+        per-round mixing weight ``lam`` estimated honestly (cross-fitted)
+        via :func:`_estimate_boundary_lambda` -- ``lam=1`` reproduces
+        today's always-fully-smooth lookup, ``lam=0`` collapses it to the
+        hard, single-zone lookup. Shrunk toward ``lam=1`` (full smoothness)
+        absent strong out-of-fold evidence a hard lookup fits better (a
+        real, local discontinuity), so a column with a genuine sharp
+        threshold can represent it instead of always being blurred.
+        ``False`` (default) is identical to every prior release -- a real
+        approximation/judgment tradeoff, not a free correctness fix, so
+        this is opt-in.
+    boundary_shrinkage_m : float, default=10.0
+        Shrinkage strength for ``adaptive_boundary_smoothing`` -- a
+        column's own boundary needs about this many held-out rows near it
+        before its cross-fitted hard-vs-smooth evidence is trusted as much
+        as the full-smoothness prior. Only used when
+        ``adaptive_boundary_smoothing=True``.
+    quantile : float, default=None
+        ``None`` (default) fits every term's value as an empirical-Bayes
+        shrunk *mean* of the residual, identical to every prior release.
+        When set (in ``(0, 1)``), every term's value becomes a shrunk
+        *quantile* of the residual at this level instead -- the raw
+        residual still drives zone-split search, pair screening's cheap
+        proxy, and cross-fitting exactly as before (a disclosed
+        approximation: those stay squared-error-flavored regardless of
+        loss), but the value stored per zone/cell is now loss-optimal for
+        pinball loss at ``quantile`` rather than for squared error. See
+        :func:`_zone_shrunk_deviation`.
 
     Returns
     -------
@@ -766,11 +988,17 @@ def weak_learner_fit(
     }
     n_zones = {c: _column_n_zones(zone_info[c]) for c in predictor_subset}
     zones = {c: _column_zone_index(X[c], zone_info[c]) for c in predictor_subset}
-    overall_mean = float(residual.mean())
+    overall_stat = _overall_stat(residual, quantile)
 
     main_effects = {
         col: _zone_shrunk_deviation(
-            zones[col], residual, overall_mean, n_zones[col], shrinkage_m, monotonic_constraints.get(col, 0)
+            zones[col],
+            residual,
+            overall_stat,
+            n_zones[col],
+            shrinkage_m,
+            monotonic_constraints.get(col, 0),
+            quantile=quantile,
         )
         for col in predictor_subset
     }
@@ -783,6 +1011,24 @@ def weak_learner_fit(
     else:
         fold_ids = _make_folds(rng, n, effective_folds)
         soft = {c: _column_soft_zone_index(X[c], zone_info[c]) for c in predictor_subset}
+
+    if adaptive_boundary_smoothing and fold_ids is not None:
+        # Estimate each continuous column's own smooth-vs-hard mixing
+        # weight honestly (cross-fitted), before anything downstream
+        # (pair screening, cross-fitting for stacking, etc.) consumes
+        # `soft` -- see _estimate_boundary_lambda and the module docstring.
+        for c in predictor_subset:
+            if zone_info[c][0] != "continuous":
+                continue
+            z_lo, z_hi, weight_hi = soft[c]
+            lam = _estimate_boundary_lambda(
+                z_lo, z_hi, weight_hi, residual, fold_ids, effective_folds,
+                n_zones[c], shrinkage_m, boundary_shrinkage_m, monotonic_constraints.get(c, 0),
+                quantile=quantile,
+            )
+            kind, boundaries, centers = zone_info[c]
+            zone_info[c] = (kind, boundaries, centers, lam)
+            soft[c] = _column_soft_zone_index(X[c], zone_info[c])
 
     screen = max_pair_interactions is not None and fold_ids is not None
     if screen:
@@ -803,6 +1049,7 @@ def weak_learner_fit(
             effective_folds,
             shrinkage_m,
             monotonic_constraints,
+            quantile=quantile,
         ).sum(axis=1)
         screening_residual = residual - oof_main_pred
 
@@ -822,7 +1069,7 @@ def weak_learner_fit(
         kept_pairs = None
         fit_pairs = list(itertools.combinations(predictor_subset, 2))
 
-    interactions_full = _fit_pairs(fit_pairs, zones, n_zones, main_effects, residual, shrinkage_m)
+    interactions_full = _fit_pairs(fit_pairs, zones, n_zones, main_effects, residual, shrinkage_m, quantile=quantile)
 
     if max_interaction_order >= 3:
         if not screen:
@@ -838,6 +1085,7 @@ def weak_learner_fit(
             max_triple_interactions,
             triple_min_gain,
             shrinkage_m,
+            quantile=quantile,
         )
     else:
         triples = {}
@@ -869,6 +1117,7 @@ def weak_learner_fit(
             effective_folds,
             shrinkage_m,
             monotonic_constraints,
+            quantile=quantile,
         )
     return zone_info, main_effects, interactions, triples, oof_contributions
 

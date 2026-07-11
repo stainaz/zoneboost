@@ -1,11 +1,13 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from zoneboost._weak_learner import (
     _column_n_zones,
     _column_soft_zone_index,
     _column_zone_index,
     _column_zone_info,
+    _estimate_boundary_lambda,
     _fit_lasso_weights,
     _make_folds,
     _pair_interaction_score,
@@ -13,6 +15,7 @@ from zoneboost._weak_learner import (
     _seed_candidate_columns,
     _term_importance,
     _triple_shrunk_deviation,
+    _zone_raw_stat,
     _zone_shrunk_deviation,
     weak_learner_contributions,
     weak_learner_fit,
@@ -59,7 +62,7 @@ def test_zone_shrunk_deviation_matches_hand_computed_m_estimate():
     zone_values = np.array([0, 0, 0, 0, 0, 1])
     target_values = np.array([9.0, 9.0, 11.0, 11.0, 10.0, 4.0])  # zone 0 mean = 10
     m = 5.0
-    deviation = _zone_shrunk_deviation(zone_values, target_values, overall_mean=0.0, n_zones=3, m=m)
+    deviation = _zone_shrunk_deviation(zone_values, target_values, overall_stat=0.0, n_zones=3, m=m)
     expected_0 = (5 * 10.0 + m * 0.0) / (5 + m)  # = 5.0
     expected_1 = (1 * 4.0 + m * 0.0) / (1 + m)  # = 4/6
     expected_2 = 0.0  # zero count -> falls back exactly to the prior
@@ -70,9 +73,9 @@ def test_zone_shrunk_deviation_monotonic_zero_is_unchanged():
     rng = np.random.default_rng(0)
     zone_values = rng.integers(0, 5, 200)
     target_values = rng.normal(size=200)
-    baseline = _zone_shrunk_deviation(zone_values, target_values, overall_mean=0.0, n_zones=6, m=5.0)
+    baseline = _zone_shrunk_deviation(zone_values, target_values, overall_stat=0.0, n_zones=6, m=5.0)
     explicit_zero = _zone_shrunk_deviation(
-        zone_values, target_values, overall_mean=0.0, n_zones=6, m=5.0, monotonic=0
+        zone_values, target_values, overall_stat=0.0, n_zones=6, m=5.0, monotonic=0
     )
     np.testing.assert_array_equal(baseline, explicit_zero)
 
@@ -86,12 +89,12 @@ def test_zone_shrunk_deviation_monotonic_increasing_projects_to_non_decreasing()
         [np.full(20, 1.0), np.full(20, 5.0), np.full(20, 3.0), np.full(20, 8.0)]
     )
     unconstrained = _zone_shrunk_deviation(
-        zone_values, target_values, overall_mean=0.0, n_zones=5, m=0.001
+        zone_values, target_values, overall_stat=0.0, n_zones=5, m=0.001
     )
     assert unconstrained[2] < unconstrained[1]  # confirms the dip exists pre-projection
 
     deviation = _zone_shrunk_deviation(
-        zone_values, target_values, overall_mean=0.0, n_zones=5, m=0.001, monotonic=1
+        zone_values, target_values, overall_stat=0.0, n_zones=5, m=0.001, monotonic=1
     )
     real_zones = deviation[:4]
     assert np.all(np.diff(real_zones) >= -1e-12)
@@ -104,7 +107,7 @@ def test_zone_shrunk_deviation_monotonic_decreasing_projects_to_non_increasing()
         [np.full(20, 8.0), np.full(20, 3.0), np.full(20, 5.0), np.full(20, 1.0)]
     )
     deviation = _zone_shrunk_deviation(
-        zone_values, target_values, overall_mean=0.0, n_zones=5, m=0.001, monotonic=-1
+        zone_values, target_values, overall_stat=0.0, n_zones=5, m=0.001, monotonic=-1
     )
     real_zones = deviation[:4]
     assert np.all(np.diff(real_zones) <= 1e-12)
@@ -116,7 +119,7 @@ def test_zone_shrunk_deviation_monotonic_leaves_missing_zone_entry_alone():
     zone_values = np.array([0, 0, 1, 1])
     target_values = np.array([10.0, 10.0, 1.0, 1.0])
     deviation = _zone_shrunk_deviation(
-        zone_values, target_values, overall_mean=0.0, n_zones=3, m=0.001, monotonic=-1
+        zone_values, target_values, overall_stat=0.0, n_zones=3, m=0.001, monotonic=-1
     )
     assert deviation[2] == 0.0
 
@@ -493,3 +496,202 @@ def test_soft_zone_index_categorical_and_missing_always_weight_zero():
     z_lo_c, z_hi_c, w_c = _column_soft_zone_index(cat_series, cat_info)
     np.testing.assert_array_equal(z_lo_c, z_hi_c)
     np.testing.assert_allclose(w_c, 0.0)
+
+
+def test_column_soft_zone_index_scales_weight_by_optional_lam():
+    x, y = _step_data(n=2000)
+    info = _column_zone_info(x, y, is_categorical=False, max_zones=2, min_zone_frac=0.02)
+    kind, boundaries, centers = info
+    z_lo_full, z_hi_full, w_full = _column_soft_zone_index(x, info)
+
+    info_scaled = (kind, boundaries, centers, 0.3)
+    z_lo_scaled, z_hi_scaled, w_scaled = _column_soft_zone_index(x, info_scaled)
+    np.testing.assert_array_equal(z_lo_full, z_lo_scaled)
+    np.testing.assert_array_equal(z_hi_full, z_hi_scaled)
+    np.testing.assert_allclose(w_scaled, w_full * 0.3)
+
+    info_hard = (kind, boundaries, centers, 0.0)
+    _, _, w_hard = _column_soft_zone_index(x, info_hard)
+    np.testing.assert_allclose(w_hard, 0.0)
+
+
+def test_estimate_boundary_lambda_shrinks_toward_zero_for_genuine_step():
+    x, y = _step_data(n=2000)
+    info = _column_zone_info(x, y, is_categorical=False, max_zones=2, min_zone_frac=0.02)
+    n_zones = _column_n_zones(info)
+    z_lo, z_hi, w = _column_soft_zone_index(x, info)
+    fold_ids = _make_folds(np.random.default_rng(1), len(y), 5)
+
+    lam = _estimate_boundary_lambda(z_lo, z_hi, w, y, fold_ids, 5, n_zones, 10.0, 10.0)
+    assert lam < 0.2
+
+
+def test_estimate_boundary_lambda_stays_near_one_for_genuinely_smooth_relationship():
+    # Curvature within a zone (not just a straight line) is what makes the
+    # hard, piecewise-constant lookup have real approximation error --
+    # interpolation should clearly reduce it here. Few zones (wider zones)
+    # and low noise make that within-zone curvature error large relative to
+    # noise, so smooth's advantage is unambiguous.
+    rng = np.random.default_rng(0)
+    n = 3000
+    x = pd.Series(rng.uniform(0, 20, n))
+    y = 0.1 * (x.to_numpy() - 10) ** 2 + rng.normal(0, 0.2, n)
+    info = _column_zone_info(x, y, is_categorical=False, max_zones=3, min_zone_frac=0.05)
+    n_zones = _column_n_zones(info)
+    z_lo, z_hi, w = _column_soft_zone_index(x, info)
+    fold_ids = _make_folds(np.random.default_rng(1), n, 5)
+
+    lam = _estimate_boundary_lambda(z_lo, z_hi, w, y, fold_ids, 5, n_zones, 10.0, 10.0)
+    assert lam > 0.9
+
+
+def test_estimate_boundary_lambda_shrinks_toward_one_when_evidence_is_sparse():
+    # Same genuine step relationship as the "shrinks toward zero" test, but
+    # with far fewer rows -- too little cross-fitted evidence near the
+    # boundary to trust, so the smoothness prior should dominate regardless
+    # of the (still-real) underlying step signal.
+    x, y = _step_data(n=15, seed=0)
+    info = _column_zone_info(x, y, is_categorical=False, max_zones=2, min_zone_frac=0.02)
+    n_zones = _column_n_zones(info)
+    z_lo, z_hi, w = _column_soft_zone_index(x, info)
+    fold_ids = _make_folds(np.random.default_rng(1), len(y), 5)
+
+    lam = _estimate_boundary_lambda(z_lo, z_hi, w, y, fold_ids, 5, n_zones, 10.0, 10.0)
+    assert lam > 0.7
+
+
+def test_weak_learner_fit_adaptive_boundary_smoothing_sharpens_a_genuine_step():
+    x, y = _step_data(n=2000)
+    X = pd.DataFrame({"x": x})
+    residual = y - y.mean()
+    fit_rng = np.random.default_rng(1)
+
+    zone_info, main_effects, interactions, triples, _ = weak_learner_fit(
+        X, residual, ["x"], set(), fit_rng, max_zones=2, adaptive_boundary_smoothing=True
+    )
+    assert len(zone_info["x"]) == 4
+    lam = zone_info["x"][3]
+    assert lam < 0.2
+
+    grid = pd.DataFrame({"x": np.linspace(9.9, 10.1, 21)})
+    contrib = weak_learner_contributions(grid, zone_info, main_effects, interactions, triples)
+    biggest_jump = np.max(np.abs(np.diff(contrib[:, 0])))
+    assert biggest_jump > 2.0  # close to the true ~5.0 step, not blurred across a wide zone
+
+
+def test_weak_learner_fit_adaptive_boundary_smoothing_default_off_reproduces_full_smoothness():
+    x, y = _step_data(n=2000)
+    X = pd.DataFrame({"x": x})
+    residual = y - y.mean()
+
+    zone_info_off, main_off, inter_off, triples_off, _ = weak_learner_fit(
+        X, residual, ["x"], set(), np.random.default_rng(1), max_zones=2
+    )
+    zone_info_on, main_on, inter_on, triples_on, _ = weak_learner_fit(
+        X, residual, ["x"], set(), np.random.default_rng(1), max_zones=2, adaptive_boundary_smoothing=False
+    )
+    assert len(zone_info_off["x"]) == 3
+    np.testing.assert_array_equal(main_off["x"], main_on["x"])
+
+
+def test_zone_raw_stat_quantile_matches_manual_per_zone_quantile():
+    rng = np.random.default_rng(0)
+    zone_values = np.repeat([0, 1, 2], 200)
+    target = np.concatenate([rng.normal(0, 1, 200), rng.normal(5, 2, 200), rng.normal(-3, 0.5, 200)])
+    stat, counts = _zone_raw_stat(zone_values, target, n_zones=3, quantile=0.75)
+    for z in range(3):
+        expected = np.quantile(target[zone_values == z], 0.75)
+        assert stat[z] == pytest.approx(expected)
+        assert counts[z] == 200
+
+
+def test_zone_raw_stat_quantile_none_matches_mean():
+    rng = np.random.default_rng(0)
+    zone_values = rng.integers(0, 4, 500)
+    target = rng.normal(size=500)
+    stat, counts = _zone_raw_stat(zone_values, target, n_zones=4, quantile=None)
+    for z in range(4):
+        assert stat[z] == pytest.approx(target[zone_values == z].mean())
+
+
+def test_zone_shrunk_deviation_quantile_shrinks_sparse_zone_toward_prior():
+    rng = np.random.default_rng(0)
+    # zone 0: 4990 rows near 0; zone 1: only 10 rows, shifted way up -- too
+    # sparse to fully trust its own raw 0.9-quantile.
+    zone_values = np.array([0] * 4990 + [1] * 10)
+    target = np.concatenate([rng.normal(0, 1, 4990), rng.normal(20, 1, 10)])
+    overall = float(np.quantile(target, 0.9))
+    dev = _zone_shrunk_deviation(zone_values, target, overall, n_zones=2, m=50.0, quantile=0.9)
+    raw_zone1_quantile = np.quantile(target[4990:], 0.9) - overall
+    assert 0 < dev[1] < raw_zone1_quantile  # shrunk toward the prior (0), not the full raw value
+
+
+def test_zone_shrunk_deviation_quantile_tracks_well_populated_zone():
+    rng = np.random.default_rng(0)
+    zone_values = np.repeat([0, 1], 5000)
+    target = np.concatenate([rng.normal(0, 1, 5000), rng.normal(10, 1, 5000)])
+    overall = float(np.quantile(target, 0.9))
+    dev = _zone_shrunk_deviation(zone_values, target, overall, n_zones=2, m=10.0, quantile=0.9)
+    raw_zone1_quantile = np.quantile(target[5000:], 0.9) - overall
+    assert dev[1] == pytest.approx(raw_zone1_quantile, rel=0.01)  # plenty of data -> barely shrunk
+
+
+def _heteroscedastic_data(n=3000, seed=0):
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0, 10, n)
+    noise_scale = 0.2 + 0.3 * x
+    y = 2 * x + rng.normal(0, 1, n) * noise_scale
+    return x, y
+
+
+def test_weak_learner_fit_quantile_mode_approximates_target_quantile():
+    x, y = _heteroscedastic_data()
+    X = pd.DataFrame({"x": x})
+    baseline = float(np.quantile(y, 0.9))
+    residual = y - baseline
+    zone_info, main_effects, interactions, triples, _ = weak_learner_fit(
+        X, residual, ["x"], set(), np.random.default_rng(1), quantile=0.9
+    )
+    contrib = weak_learner_contributions(X, zone_info, main_effects, interactions, triples)
+    pred = baseline + contrib.sum(axis=1)
+    coverage = np.mean(y < pred)
+    assert 0.85 < coverage < 0.95  # a single round should already land close to the target
+
+
+def test_weak_learner_fit_quantile_none_bit_identical_to_mean_mode():
+    x, y = _heteroscedastic_data()
+    X = pd.DataFrame({"x": x})
+    residual = y - y.mean()
+    zone_info_a, main_a, inter_a, triples_a, oof_a = weak_learner_fit(
+        X, residual, ["x"], set(), np.random.default_rng(1)
+    )
+    zone_info_b, main_b, inter_b, triples_b, oof_b = weak_learner_fit(
+        X, residual, ["x"], set(), np.random.default_rng(1), quantile=None
+    )
+    np.testing.assert_array_equal(main_a["x"], main_b["x"])
+    np.testing.assert_array_equal(oof_a, oof_b)
+
+
+def test_fit_lasso_weights_quantile_targets_the_configured_quantile_not_the_mean():
+    # A single term whose contribution is a scaled linear shape; the raw
+    # residual is normal(0, 1) -- fitting via ordinary Lasso would recenter
+    # the intercept to the mean (~0), destroying the 0.9-quantile target.
+    # QuantileRegressor should instead recover an intercept near the true
+    # 0.9-quantile offset (~1.2816) once scaled by contributions correctly.
+    rng = np.random.default_rng(0)
+    n = 4000
+    contributions = rng.normal(size=(n, 1))
+    residual = 2.0 * contributions[:, 0] + rng.normal(0, 1, n)
+    intercept, weights = _fit_lasso_weights(contributions, residual, alpha=0.001, quantile=0.9)
+    assert weights[0] == pytest.approx(2.0, abs=0.15)
+    assert intercept == pytest.approx(1.2816, abs=0.2)  # 0.9-quantile of N(0,1)
+
+
+def test_fit_lasso_weights_quantile_none_bit_identical_to_before():
+    rng = np.random.default_rng(0)
+    contributions = rng.normal(size=(500, 3))
+    residual = contributions @ np.array([1.0, 0.0, -2.0]) + rng.normal(0, 0.1, 500)
+    intercept_a, weights_a = _fit_lasso_weights(contributions, residual, alpha=0.01)
+    intercept_b, weights_b = _fit_lasso_weights(contributions, residual, alpha=0.01, quantile=None)
+    assert intercept_a == intercept_b
+    np.testing.assert_array_equal(weights_a, weights_b)

@@ -118,6 +118,22 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         relevant once the number of candidate pairs (``C(p, 2)`` for ``p``
         columns) is large enough that cross-fitting and Lasso-stacking every
         one of them becomes the per-round bottleneck.
+    adaptive_boundary_smoothing : bool, default=False
+        If ``True``, each continuous column's soft zone lookup is scaled by
+        a per-column, per-round mixing weight estimated honestly
+        (cross-fitted), shrunk toward full smoothness absent strong
+        out-of-fold evidence a hard, single-zone lookup fits better -- so a
+        column with a genuine sharp threshold can represent it instead of
+        the boundary always being blurred by interpolation. ``False``
+        (default) reproduces every prior release's behavior exactly (always
+        fully smooth) -- a real approximation/judgment tradeoff, not a free
+        correctness fix, so this is opt-in.
+    boundary_shrinkage_m : float, default=10.0
+        Shrinkage strength for ``adaptive_boundary_smoothing`` -- a
+        column's own boundary needs about this many held-out rows near it
+        before its cross-fitted hard-vs-smooth evidence is trusted as much
+        as the full-smoothness prior. Only used when
+        ``adaptive_boundary_smoothing=True``.
     triple_min_gain : float, default=0.05
         Minimum residual-explained magnitude a candidate 3-way interaction
         must retain after subtracting the main-effect + pairwise fit for
@@ -177,6 +193,34 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         affordability rises"), not a general improvement, so the default
         (no constraints) reproduces the exact same predictions as if this
         parameter didn't exist.
+    loss : str, default="squared_error"
+        ``"squared_error"`` (default) targets the conditional mean, exactly
+        as every prior release -- zero change to today's behavior or cost.
+        ``"quantile"`` targets a single conditional quantile of ``y``
+        instead (see ``quantile`` below) -- every zone's fitted value
+        becomes a shrunk *quantile* of the residual rather than a shrunk
+        mean, and each round's term-combination step switches from an
+        ordinary Lasso to ``sklearn.linear_model.QuantileRegressor``
+        (pinball loss + L1 penalty) so the combination stays consistent
+        with the same loss every term's own value was fit against -- not
+        optional, since combining quantile-shrunk terms via a squared-error
+        Lasso would silently re-center every round's output back toward the
+        mean/median. The raw residual still drives zone-split search,
+        cross-fitting, and pair screening's cheap proxy identically either
+        way (a disclosed approximation: those stay squared-error-flavored
+        regardless of loss). ``QuantileRegressor``'s linear-programming
+        solver is substantially more expensive per round than ``Lasso`` --
+        measured roughly 30x slower end-to-end in one benchmark -- a real,
+        disclosed cost of ``loss="quantile"``, not a free option. Raises
+        ``ValueError`` at `fit` if not one of these two strings.
+    quantile : float, default=0.5
+        The target quantile level when ``loss="quantile"`` (ignored
+        otherwise). Must be in ``(0, 1)``; raises ``ValueError`` at `fit`
+        otherwise. Fit several instances at different levels (e.g. ``0.05``,
+        ``0.5``, ``0.95``) to get a full conditional distribution, or see
+        :class:`zoneboost.ConformalizedQuantileRegressor` for a
+        distribution-free, locally-adaptive prediction interval built from
+        exactly two such quantile fits.
     calibration_fraction : float, default=0.0
         Fraction of training rows held out in a **third**, dedicated split
         purely for calibration (:attr:`conformal_scores_`) -- distinct from
@@ -235,10 +279,13 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         count, or ``n_rounds`` if early stopping was disabled or never
         found a better round than the last).
     val_rmse_ : list of float
-        Held-out RMSE after each round from the *selection* phase (empty if
-        ``validation_fraction=0``) -- always reflects how ``best_n_rounds_``
-        was chosen, even when ``refit_on_full_data=True`` retrains
-        :attr:`rounds_` on more data afterward.
+        Held-out score after each round from the *selection* phase (empty
+        if ``validation_fraction=0``) -- always reflects how
+        ``best_n_rounds_`` was chosen, even when ``refit_on_full_data=True``
+        retrains :attr:`rounds_` on more data afterward. Despite the name,
+        this tracks whatever loss is actually being minimized: RMSE for
+        ``loss="squared_error"`` (the default), mean pinball loss at
+        ``quantile`` for ``loss="quantile"``.
     conformal_scores_ : ndarray or None
         Sorted absolute residuals on the calibration split, at
         ``best_n_rounds_`` -- the nonconformity scores :meth:`predict_interval`
@@ -291,6 +338,10 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         stacking_alpha: float = 0.01,
         monotonic_constraints=None,
         max_pair_interactions=None,
+        adaptive_boundary_smoothing: bool = False,
+        boundary_shrinkage_m: float = 10.0,
+        loss: str = "squared_error",
+        quantile: float = 0.5,
         calibration_fraction: float = 0.0,
         refit_on_full_data: bool = False,
         random_state: int = 42,
@@ -315,6 +366,10 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.stacking_alpha = stacking_alpha
         self.monotonic_constraints = monotonic_constraints
         self.max_pair_interactions = max_pair_interactions
+        self.adaptive_boundary_smoothing = adaptive_boundary_smoothing
+        self.boundary_shrinkage_m = boundary_shrinkage_m
+        self.loss = loss
+        self.quantile = quantile
         self.calibration_fraction = calibration_fraction
         self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
@@ -345,6 +400,10 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         y_arr = np.asarray(y, dtype=float).reshape(-1)
         if len(X) != len(y_arr):
             raise ValueError(f"X and y have inconsistent lengths: {len(X)} vs {len(y_arr)}")
+        if self.loss not in ("squared_error", "quantile"):
+            raise ValueError(f"loss must be 'squared_error' or 'quantile', got {self.loss!r}")
+        if self.loss == "quantile" and not 0 < self.quantile < 1:
+            raise ValueError(f"quantile must be in (0, 1), got {self.quantile!r}")
 
         self.n_features_in_ = X.shape[1]
         self.feature_names_in_ = np.array(X.columns)
@@ -424,6 +483,26 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
 
         return self
 
+    def _baseline_stat(self, y_train: np.ndarray) -> float:
+        """The starting prediction before any boosting round -- the best
+        constant predictor for whichever loss is active: the mean for
+        ``loss="squared_error"``, the target quantile for
+        ``loss="quantile"``."""
+        if self.loss == "quantile":
+            return float(np.quantile(y_train, self.quantile))
+        return float(y_train.mean())
+
+    def _score(self, y_true: np.ndarray, pred: np.ndarray) -> float:
+        """The loss actually being minimized, evaluated on ``pred``: RMSE
+        for ``loss="squared_error"``, mean pinball loss at ``self.quantile``
+        for ``loss="quantile"`` -- used identically for
+        ``train_rmse_``/``val_rmse_``/early stopping/``best_n_rounds_``
+        selection regardless of which loss is active."""
+        if self.loss == "quantile":
+            diff = y_true - pred
+            return float(np.mean(np.maximum(self.quantile * diff, (self.quantile - 1) * diff)))
+        return float(np.sqrt(np.mean((y_true - pred) ** 2)))
+
     def _boost_rounds(self, X_train, y_train, rng, n_rounds, X_val=None, y_val=None, early_stopping=False):
         """Core boosting loop -- extracted so `fit` can run it twice: once
         for round-count selection (on the fit split, tracking ``val_rmse_``
@@ -435,7 +514,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         -------
         rounds, baseline, train_rmse, val_rmse
         """
-        baseline = float(y_train.mean())
+        baseline = self._baseline_stat(y_train)
         n = len(y_train)
         n_row_sample = min(n, max(min(20, n), int(n * self.row_subsample)))
         n_predictors = len(self.predictor_names_)
@@ -472,6 +551,9 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 shrinkage_m=self.shrinkage_m,
                 monotonic_constraints=self.monotonic_constraints_,
                 max_pair_interactions=self.max_pair_interactions,
+                adaptive_boundary_smoothing=self.adaptive_boundary_smoothing,
+                boundary_shrinkage_m=self.boundary_shrinkage_m,
+                quantile=self.quantile if self.loss == "quantile" else None,
             )
             contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
             # The round's own (sub)sampled rows would otherwise be scored by a
@@ -483,7 +565,10 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             # Lasso, not a shared equal-weight average: an irrelevant term's
             # weight gets zeroed by the L1 penalty, a strong term gets its
             # own learned weight instead of a diluted 1/n_terms share.
-            intercept, weights = _fit_lasso_weights(contributions, residual, self.stacking_alpha)
+            intercept, weights = _fit_lasso_weights(
+                contributions, residual, self.stacking_alpha,
+                quantile=self.quantile if self.loss == "quantile" else None,
+            )
             fitted_residual = intercept + contributions @ weights
 
             current_pred = current_pred + self.learning_rate * fitted_residual
@@ -497,13 +582,13 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                     "weights": weights,
                 }
             )
-            train_rmse.append(float(np.sqrt(np.mean((y_train - current_pred) ** 2))))
+            train_rmse.append(self._score(y_train, current_pred))
 
             if has_val:
                 val_contributions = weak_learner_contributions(X_val, zone_info, main_effects, interactions, triples)
                 val_fitted = intercept + val_contributions @ weights
                 current_val_pred = current_val_pred + self.learning_rate * val_fitted
-                val_rmse.append(float(np.sqrt(np.mean((y_val - current_val_pred) ** 2))))
+                val_rmse.append(self._score(y_val, current_val_pred))
 
                 if early_stopping and self.n_iter_no_change is not None:
                     best_so_far = min(val_rmse)
@@ -565,7 +650,11 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         ``calibration_fraction > 0`` at `fit` time for a dedicated,
         genuinely separate calibration split instead. Requires
         ``validation_fraction > 0`` or ``calibration_fraction > 0`` at `fit`
-        time.
+        time. Not available when ``loss="quantile"`` -- a constant-width
+        margin around a single conditional quantile isn't a meaningful
+        coverage interval the same way it is around a mean; use
+        :class:`zoneboost.ConformalizedQuantileRegressor` instead for a
+        locally-adaptive interval built from two quantile fits.
 
         Parameters
         ----------
@@ -578,6 +667,12 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         lower, upper : ndarray of shape (n_samples,)
         """
         check_is_fitted(self, "rounds_")
+        if self.loss == "quantile":
+            raise ValueError(
+                "predict_interval is not available when loss='quantile' -- a constant-width margin "
+                "around a single conditional quantile isn't a meaningful coverage interval the same "
+                "way it is around a mean. Use zoneboost.ConformalizedQuantileRegressor instead."
+            )
         if self.conformal_scores_ is None:
             raise ValueError(
                 "predict_interval requires validation_fraction > 0 or calibration_fraction > 0 "

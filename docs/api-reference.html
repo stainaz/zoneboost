@@ -46,7 +46,7 @@
     <h1>API Reference</h1>
     <p class="subtitle">Identical parameter set on <code>ZoneBoostRegressor</code> and
     <code>ZoneBoostClassifier</code>, except <code>calibrate</code>
-    (classifier-only).</p>
+    (classifier-only) and <code>loss</code>/<code>quantile</code> (regressor-only).</p>
 
     <h2 id="parameters">Parameters</h2>
     <table>
@@ -72,6 +72,10 @@
         <tr><td><code>calibrate</code></td><td><code>False</code></td><td><strong>Classifier only.</strong> Isotonic-recalibrate <code>predict_proba</code>; opt-in — see <a href="how-it-works.html#probability-calibration">Probability Calibration</a></td></tr>
         <tr><td><code>calibration_fraction</code></td><td><code>0.0</code></td><td>Fraction held out in a dedicated calibration split, separate from <code>validation_fraction</code>; opt-in — see <a href="how-it-works.html#honest-data-splits">Honest Data Splits</a></td></tr>
         <tr><td><code>refit_on_full_data</code></td><td><code>False</code></td><td>Refit the deployed model on fit+validation data once <code>best_n_rounds_</code> is chosen; requires <code>calibration_fraction &gt; 0</code> — see <a href="how-it-works.html#honest-data-splits">Honest Data Splits</a></td></tr>
+        <tr><td><code>adaptive_boundary_smoothing</code></td><td><code>False</code></td><td>Learn a per-column, per-round hard-vs-smooth zone-lookup blend instead of always fully smooth; opt-in — see <a href="how-it-works.html#adaptive-boundary-continuity">Adaptive Boundary Continuity</a></td></tr>
+        <tr><td><code>boundary_shrinkage_m</code></td><td><code>10.0</code></td><td>Empirical-Bayes shrinkage strength toward full smoothness for <code>adaptive_boundary_smoothing</code> — see <a href="how-it-works.html#adaptive-boundary-continuity">Adaptive Boundary Continuity</a></td></tr>
+        <tr><td><code>loss</code></td><td><code>"squared_error"</code></td><td><strong>Regressor only.</strong> Set to <code>"quantile"</code> to target a conditional quantile instead of the mean — see <a href="how-it-works.html#quantile-regression">Quantile Regression</a></td></tr>
+        <tr><td><code>quantile</code></td><td><code>0.5</code></td><td><strong>Regressor only.</strong> Target quantile level when <code>loss="quantile"</code> (ignored otherwise) — see <a href="how-it-works.html#quantile-regression">Quantile Regression</a></td></tr>
         <tr><td><code>random_state</code></td><td><code>42</code></td><td>Seed for the validation split and subsampling</td></tr>
       </tbody>
     </table>
@@ -82,7 +86,7 @@
       <tbody>
         <tr><td><code>rounds_</code></td><td>One entry per boosting round, each a plain dict with keys <code>"zone_info"</code>, <code>"main_effects"</code>, <code>"interactions"</code>, <code>"triples"</code> (empty unless <code>max_interaction_order=3</code>), and <code>"intercept"</code>/<code>"weights"</code> — the round's fitted Lasso intercept and one weight per term (<code>fitted_residual = intercept + contributions @ weights</code>, in the same order <code>main_effects</code>/<code>interactions</code>/<code>triples</code> are themselves iterated). Nothing hidden in an opaque object.</td></tr>
         <tr><td><code>best_n_rounds_</code></td><td>The round count actually used by <code>predict</code>.</td></tr>
-        <tr><td><code>val_rmse_</code> / <code>train_rmse_</code></td><td>RMSE after each round.</td></tr>
+        <tr><td><code>val_rmse_</code> / <code>train_rmse_</code></td><td>RMSE after each round for <code>loss="squared_error"</code> (the default); mean pinball loss at <code>quantile</code> for <code>loss="quantile"</code> — whichever loss is actually being minimized.</td></tr>
         <tr><td><code>categorical_features_</code></td><td>The resolved set of categorical columns (declared ∪ auto-detected).</td></tr>
         <tr><td><code>monotonic_constraints_</code></td><td>The resolved <code>{column: +1 or -1}</code> dict actually in effect (categorical columns dropped).</td></tr>
         <tr><td><code>conformal_scores_</code></td><td>Sorted absolute residuals on the held-out validation split at <code>best_n_rounds_</code> — the nonconformity scores <code>predict_interval</code> draws its margin from (<code>None</code> if <code>validation_fraction=0</code>). See <a href="how-it-works.html#prediction-intervals">Prediction Intervals</a>.</td></tr>
@@ -97,6 +101,24 @@
         <tr><td><code>multiclass_</code></td><td>Whether native multinomial boosting (3+ classes) was used.</td></tr>
         <tr><td><code>booster_</code> (binary)</td><td>An internal log-odds booster with its own <code>rounds_</code>, <code>best_n_rounds_</code>, and <code>calibrator_</code> (the fitted isotonic calibrator, or <code>None</code> if <code>calibrate=False</code>) — same plain-data structure as the regressor's.</td></tr>
         <tr><td><code>softmax_booster_</code> (3+ classes)</td><td>The single joint multinomial booster — see <a href="how-it-works.html#native-multinomial-boosting">Native Multinomial Boosting</a>. Has its own <code>rounds_</code> (one entry per round, each a <code>{class_index: round_dict}</code> mapping), <code>best_n_rounds_</code>, <code>n_classes_</code>, and <code>calibrators_</code> (a <code>{class_index: IsotonicRegression}</code> dict, or <code>None</code> if <code>calibrate=False</code>).</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="cqr-parameters">ConformalizedQuantileRegressor Parameters</h2>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>estimator</code></td><td><code>None</code></td><td>Unfit <code>ZoneBoostRegressor</code> template supplying every tuning knob other than <code>loss</code>/<code>quantile</code>/<code>calibration_fraction</code>/<code>random_state</code>; <code>None</code> uses a plain <code>ZoneBoostRegressor()</code> — see <a href="how-it-works.html#conformalized-quantile-regression">Conformalized Quantile Regression (CQR)</a></td></tr>
+        <tr><td><code>alpha</code></td><td><code>0.1</code></td><td>Miscoverage rate — e.g. <code>0.1</code> targets 90% coverage. The two internal quantile levels are <code>alpha / 2</code> and <code>1 - alpha / 2</code></td></tr>
+        <tr><td><code>calibration_fraction</code></td><td><code>0.2</code></td><td>Fraction of rows held out purely for CQR calibration — genuinely separate from either quantile model's own internal validation split</td></tr>
+        <tr><td><code>random_state</code></td><td><code>42</code></td><td>Seed for the calibration split and (via the two cloned estimators) their own internal splits/subsampling</td></tr>
+      </tbody>
+    </table>
+    <p><code>ConformalizedQuantileRegressor</code> fitted attributes:</p>
+    <table>
+      <tbody>
+        <tr><td><code>lo_</code> / <code>hi_</code></td><td>The two fitted <code>ZoneBoostRegressor(loss="quantile", ...)</code> instances, at levels <code>alpha / 2</code> and <code>1 - alpha / 2</code>.</td></tr>
+        <tr><td><code>cqr_scores_</code></td><td>Sorted CQR nonconformity scores on the calibration split — the margin <code>predict_interval</code> draws from.</td></tr>
       </tbody>
     </table>
 

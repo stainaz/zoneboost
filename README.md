@@ -5,9 +5,10 @@ gradient descent, no neural weights. Every number in a prediction traces
 back to a quantile, a group count, or a group average, and is inspectable
 directly from the fitted model.
 
-Two estimators, sharing the exact same weak learner: `ZoneBoostRegressor`
-and `ZoneBoostClassifier` (binary and multiclass). Both are
-scikit-learn-compatible: they work with `Pipeline`, `GridSearchCV`,
+Three estimators, sharing the exact same weak learner: `ZoneBoostRegressor`
+and `ZoneBoostClassifier` (binary and multiclass), plus
+`ConformalizedQuantileRegressor` for locally-adaptive prediction intervals.
+All are scikit-learn-compatible: they work with `Pipeline`, `GridSearchCV`,
 `cross_val_score`, and `clone`.
 
 ![Overview of zoneboost's mechanism: zones, per-zone scoring, pairwise interactions, boosting rounds, and a worked prediction with its exact contribution breakdown](docs/assets/images/zoneboost-explanation.png)
@@ -44,6 +45,14 @@ clf = ZoneBoostClassifier(categorical_features=["neighborhood"], random_state=0)
 clf.fit(X, y_class)
 clf.predict_proba(X)   # (n_samples, n_classes), rows sum to 1
 clf.predict(X)          # works for binary and 3+ classes (native multinomial) alike
+```
+
+```python
+from zoneboost import ConformalizedQuantileRegressor
+
+cqr = ConformalizedQuantileRegressor(alpha=0.1, random_state=0)
+cqr.fit(X, y)
+lower, upper = cqr.predict_interval(X)   # locally-adaptive 90% interval, width varies with X
 ```
 
 ## How it works
@@ -456,10 +465,142 @@ slightly). Two new parameters, shared by both estimators, fix this properly:
 Deferred to a future item: cross-conformal/jackknife+ aggregation for small
 datasets that can't afford a dedicated calibration split.
 
+### Adaptive boundary continuity
+
+"Soft zone boundaries" above made every continuous column's zone lookup
+**unconditionally** interpolate between neighboring zones — eliminating the
+cliff-edge discontinuity that hard zone assignment produced, but at the cost
+of blurring a genuinely sharp threshold just as much as a genuinely smooth
+relationship. A column with a real step (a policy cutoff, a regulatory
+cliff) has no way to tell the model "don't smooth me."
+
+`adaptive_boundary_smoothing=True` (opt-in, default `False`) learns one
+mixing weight `λ` per continuous column per round — `0` fully hard, `1`
+fully smooth — instead of always using `1`. Estimated honestly, out of
+fold: reusing the same cross-fitting split every round already builds,
+each fold's zone means are refit from the *other* folds only, then scored
+on the held-out fold both ways (hard lookup vs. full-smooth interpolation)
+against the true residual. `λ` is the fraction of held-out error reduction
+smooth interpolation earns over hard lookup — `1` when smooth wins clearly,
+`0` when hard wins clearly — then shrunk toward `1` (the smoothness prior)
+via the same empirical-Bayes pattern used everywhere else in zoneboost,
+governed by `boundary_shrinkage_m` (default `10.0`): a boundary with few
+held-out rows near it leans back toward full smoothness by construction,
+rather than overreacting to a handful of noisy points.
+
+**Important nuance, found during testing**: the mechanism responds to
+*curvature/approximation error*, not "smoothness" in the abstract. A
+genuinely linear relationship with many zones doesn't give interpolation a
+clear advantage over hard lookup — both already track a line well within
+narrow zones — so `λ` isn't guaranteed to sit near `1` just because the
+true relationship is continuous; it sits near whichever side actually
+reduces held-out error.
+
+**Measured, honestly**, on a synthetic step function (true jump of 5.0):
+the largest single-step prediction change across the true boundary was
+0.36 with the always-smooth default, vs. 3.86 with
+`adaptive_boundary_smoothing=True` — much closer to the real step, not
+blurred away. On a genuinely curved (quadratic) relationship with few
+zones, RMSE improved from 0.90 to 0.29 — the mechanism found real
+approximation error interpolation could fix and leaned into it, rather than
+defaulting to hard lookup out of caution. `explain(X)` still sums exactly
+to `predict(X)` with the feature active (verified to float precision) — no
+new call sites bypass the shared, now `λ`-scaled, blend.
+
+Leaving `adaptive_boundary_smoothing=False` (the default) reproduces the
+exact prior behavior — verified bit-for-bit. This is opt-in because the
+estimate is a cross-fitted heuristic rather than a rigorous statistical
+test, and it adds real per-round cost, matching the precedent set by
+monotonic constraints and pair screening.
+
+### Quantile regression
+
+Every prior release targets the conditional **mean** (`loss=
+"squared_error"`, the default) — a single number, no sense of spread.
+`ZoneBoostRegressor(loss="quantile", quantile=0.9)` instead targets a single
+conditional **quantile** of `y`: every zone's fitted value becomes a shrunk
+*quantile* of the residual at that level rather than a shrunk mean (the
+same `(n * raw + m * prior) / (n + m)` empirical-Bayes shrinkage pattern
+used everywhere else in zoneboost, applied to a quantile instead of a mean).
+Fit several instances at different levels (e.g. `0.05`, `0.5`, `0.95`) to
+get a full conditional distribution.
+
+The raw residual still drives zone-split search, cross-fitting, and pair
+screening's cheap proxy identically regardless of loss (a disclosed
+approximation — those stay squared-error-flavored). The round's
+term-combination step, however, **must** change: combining quantile-shrunk
+terms via an ordinary (squared-error) Lasso would silently re-center every
+round's output back toward the mean/median, actively destroying the
+quantile target rather than merely approximating it — confirmed empirically
+during development (coverage drifted from ~90% down to ~50% over 100
+rounds before this was fixed). `loss="quantile"` instead combines terms via
+`sklearn.linear_model.QuantileRegressor` (pinball loss + L1 penalty), so
+the combination step stays consistent with the same loss every term's own
+value was fit against.
+
+**Measured, honestly**: on synthetic heteroscedastic data (noise scale
+growing with `x`), `ZoneBoostRegressor(loss="quantile", quantile=0.9)`
+achieved 89.4% held-out coverage below its predictions (target 90%).
+`QuantileRegressor`'s linear-programming solver is substantially more
+expensive per round than the default `Lasso` — roughly 30x slower
+end-to-end in one benchmark — a real, disclosed cost of `loss="quantile"`,
+not a free option. `loss="squared_error"` (the default) is completely
+unaffected — verified bit-for-bit. `predict_interval` raises `ValueError`
+when `loss="quantile"`: a constant-width margin around a single quantile
+isn't a meaningful coverage interval the same way it is around a mean — see
+Conformalized Quantile Regression below instead.
+
+### Conformalized Quantile Regression (CQR)
+
+`ZoneBoostRegressor.predict_interval` (split-conformal) gives a
+distribution-free coverage guarantee, but its margin is a single fixed
+width added to every row — it can't narrow where the model is confident or
+widen where `y`'s true spread is genuinely larger. `ConformalizedQuantileRegressor`
+fixes this by conformalizing a **quantile** band instead of a **mean**:
+
+```python
+from zoneboost import ConformalizedQuantileRegressor
+
+cqr = ConformalizedQuantileRegressor(alpha=0.1, random_state=0).fit(X, y)
+lower, upper = cqr.predict_interval(X)
+```
+
+Internally, two `ZoneBoostRegressor(loss="quantile", ...)` models are fit
+at levels `alpha/2` and `1 - alpha/2` (the raw quantile band), on its own
+train split. On a **third**, genuinely held-out calibration split (never
+seen by either quantile model's own training), the CQR nonconformity score
+`E_i = max(q_lo(X_i) - y_i, y_i - q_hi(X_i))` is computed per row, and the
+same fixed additive margin (the finite-sample-corrected quantile of these
+scores — the identical formula `predict_interval` itself uses) is added to
+both quantile predictions. This still gives the exact same distribution-free
+marginal coverage guarantee as split-conformal (`P(y in interval) >= 1 -
+alpha`, under exchangeability) — but because the quantile predictions
+themselves already vary with `X`, so does the total interval width, unlike
+a plain split-conformal band's single constant-width margin.
+
+**Measured, honestly**, on the same synthetic heteroscedastic dataset as
+above: `ConformalizedQuantileRegressor(alpha=0.1)` achieved 88.7% held-out
+coverage (target 90%), with mean interval width **3.13** in the
+low-variance region (`x < 2`) versus **12.70** in the high-variance region
+(`x > 8`) — genuinely adapting to `X`, roughly 4x wider where `y`'s true
+spread actually is larger. For contrast, `ZoneBoostRegressor.predict_interval`
+on the identical data achieved 88.0% coverage with a constant **7.97** width
+in *both* regions, by construction — too narrow where variance is high, too
+wide where it's low.
+
+`estimator` (default `None` → a plain `ZoneBoostRegressor()`) is an unfit
+template supplying every tuning knob *other than* `loss`/`quantile`/
+`calibration_fraction`/`random_state` (which this class always manages
+itself) — the same meta-estimator pattern sklearn itself uses (e.g.
+`CalibratedClassifierCV(estimator=...)`), rather than duplicating dozens of
+`ZoneBoostRegressor` parameters onto this class. Not a `RegressorMixin` —
+there is no meaningful single-point `predict`, only `predict_interval`.
+
 ## Parameters
 
 Identical parameter set on both estimators, except `calibrate`
-(classifier-only — see "Probability calibration" above).
+(classifier-only — see "Probability calibration" above) and `loss`/
+`quantile` (regressor-only — see "Quantile regression" above).
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -483,6 +624,10 @@ Identical parameter set on both estimators, except `calibrate`
 | `calibrate` | False | **Classifier only.** Isotonic-recalibrate `predict_proba`; opt-in, see "Probability calibration" above |
 | `calibration_fraction` | 0.0 | Fraction held out in a dedicated calibration split, separate from `validation_fraction`; opt-in, see "Honest data splits" above |
 | `refit_on_full_data` | False | Refit the deployed model on fit+validation data once `best_n_rounds_` is chosen; requires `calibration_fraction > 0`, see "Honest data splits" above |
+| `adaptive_boundary_smoothing` | False | Learn a per-column, per-round hard-vs-smooth zone-lookup blend instead of always fully smooth; opt-in, see "Adaptive boundary continuity" above |
+| `boundary_shrinkage_m` | 10.0 | Empirical-Bayes shrinkage strength toward full smoothness for `adaptive_boundary_smoothing`; same role as `shrinkage_m` but for the blend weight, see "Adaptive boundary continuity" above |
+| `loss` | `"squared_error"` | **Regressor only.** Set to `"quantile"` to target a conditional quantile instead of the mean; see "Quantile regression" above |
+| `quantile` | 0.5 | **Regressor only.** Target quantile level when `loss="quantile"` (ignored otherwise); see "Quantile regression" above |
 | `random_state` | 42 | Seed for the validation split and subsampling |
 
 **On `max_zones` and `categorical_features`:** if a variable genuinely has
@@ -493,6 +638,19 @@ more per-round fitting flexibility, which in practice mostly helps it
 overfit noise rather than capture real structure — proper categorical
 handling (exact, uncapped, no ordering assumption) is the fix that's
 actually targeted at high-cardinality nominal variables.
+
+## ConformalizedQuantileRegressor parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `estimator` | `None` | Unfit `ZoneBoostRegressor` template supplying every tuning knob other than `loss`/`quantile`/`calibration_fraction`/`random_state`; `None` uses a plain `ZoneBoostRegressor()`. See "Conformalized Quantile Regression (CQR)" above |
+| `alpha` | 0.1 | Miscoverage rate — e.g. `0.1` targets 90% coverage. The two internal quantile levels are `alpha / 2` and `1 - alpha / 2` |
+| `calibration_fraction` | 0.2 | Fraction of rows held out purely for CQR calibration — genuinely separate from either quantile model's own internal validation split |
+| `random_state` | 42 | Seed for the calibration split and (via the two cloned estimators) their own internal splits/subsampling |
+
+Fitted attributes: `lo_`/`hi_` (the two fitted `ZoneBoostRegressor(loss=
+"quantile", ...)` instances) and `cqr_scores_` (sorted CQR nonconformity
+scores on the calibration split — the margin `predict_interval` draws from).
 
 ## Explaining predictions
 
