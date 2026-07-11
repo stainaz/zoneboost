@@ -1,7 +1,8 @@
 """One boosting round's weak learner: per-column zone info, main effects
 (single-variable zone -> average residual), interactions (variable-pair
 zone grid -> average residual), an adaptively-selected small set of 3-way
-interactions, and density-based confidence weighting.
+interactions, and empirical-Bayes (m-estimate) shrinkage of every zone's
+own mean toward a hierarchical prior (cell -> marginal -> global).
 
 Every "weak learner" in ZoneBoostRegressor is built from this module alone
 -- no decision tree, no gradient computation beyond a plain residual, no
@@ -22,36 +23,58 @@ from ._zones import adaptive_zone_boundaries, categorical_zone_index, categorica
 __all__ = ["weak_learner_fit", "weak_learner_score"]
 
 
-def _zone_deviation_confidence(zone_values: np.ndarray, target_values: np.ndarray, overall_mean: float, n_zones: int):
-    """For each zone: the actual average target among fit-rows in that
-    zone (minus the overall mean), and a density-confidence weight
-    relative to the best-supported zone. O(n) via bincount."""
+def _zone_shrunk_deviation(zone_values: np.ndarray, target_values: np.ndarray, overall_mean: float, n_zones: int, m: float):
+    """For each zone: an empirical-Bayes (m-estimate) shrunk average target
+    among fit-rows in that zone, minus the overall mean.
+
+    ``shrunk_mean = (counts * cell_mean + m * overall_mean) / (counts + m)``
+    -- a zone needs about ``m`` rows of its own before it's trusted as much
+    as the prior (here, the global mean); fewer rows lean toward the prior,
+    more rows lean toward its own data. When ``counts == 0``,
+    ``counts * cell_mean == 0`` regardless of the placeholder cell_mean
+    there, so this naturally reduces to ``deviation = 0`` (the prior) with
+    no special-casing needed -- replaces a flat ``counts / counts.max()``
+    confidence discount with a principled, hierarchical estimate. O(n) via
+    bincount."""
     counts = np.bincount(zone_values, minlength=n_zones).astype(float)
     sums = np.bincount(zone_values, weights=target_values, minlength=n_zones)
-    cell_mean = np.where(counts > 0, np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0), overall_mean)
-    deviation = cell_mean - overall_mean
-    base = counts.max()
-    confidence = counts / base if base > 0 else counts
-    return deviation, confidence
+    cell_mean = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
+    shrunk_mean = (counts * cell_mean + m * overall_mean) / (counts + m)
+    return shrunk_mean - overall_mean
 
 
-def _pair_deviation_confidence(
-    za: np.ndarray, zb: np.ndarray, target_values: np.ndarray, overall_mean: float, n_zones_a: int, n_zones_b: int
+def _pair_shrunk_deviation(
+    za: np.ndarray,
+    zb: np.ndarray,
+    target_values: np.ndarray,
+    overall_mean: float,
+    n_zones_a: int,
+    n_zones_b: int,
+    m: float,
 ):
-    """Same idea, gridded over two variables' zones jointly. Combines both
-    zone indices into one flat index and does a single bincount pass."""
+    """Same idea, gridded over two variables' zones jointly -- but shrunk
+    toward a *hierarchical* prior, not the flat global mean: each column's
+    own shrunk marginal deviation (a direct recursive call to
+    :func:`_zone_shrunk_deviation`) is combined additively
+    (``overall_mean + dev_a + dev_b``) into a row+column prior, and the
+    joint cell is shrunk toward *that*. Absent enough of its own data,
+    "what row A's zone alone predicts, plus what column B's zone alone
+    predicts" is a far better guess for a sparse cell than the overall
+    average of everything."""
+    dev_a = _zone_shrunk_deviation(za, target_values, overall_mean, n_zones_a, m)
+    dev_b = _zone_shrunk_deviation(zb, target_values, overall_mean, n_zones_b, m)
+
     combined = za * n_zones_b + zb
     size = n_zones_a * n_zones_b
     counts = np.bincount(combined, minlength=size).astype(float).reshape(n_zones_a, n_zones_b)
     sums = np.bincount(combined, weights=target_values, minlength=size).reshape(n_zones_a, n_zones_b)
-    cell_mean = np.where(counts > 0, np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0), overall_mean)
-    deviation = cell_mean - overall_mean
-    base = counts.max()
-    confidence = counts / base if base > 0 else counts
-    return deviation, confidence
+    cell_mean = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
+    prior = overall_mean + dev_a[:, None] + dev_b[None, :]
+    shrunk_mean = (counts * cell_mean + m * prior) / (counts + m)
+    return shrunk_mean - overall_mean
 
 
-def _triple_deviation_confidence(
+def _triple_shrunk_deviation(
     za: np.ndarray,
     zb: np.ndarray,
     zc: np.ndarray,
@@ -60,25 +83,41 @@ def _triple_deviation_confidence(
     n_zones_a: int,
     n_zones_b: int,
     n_zones_c: int,
+    m: float,
 ):
-    """Same idea as :func:`_pair_deviation_confidence`, gridded over three
-    variables' zones jointly -- one more flattened axis, still a single
-    bincount pass."""
+    """Same recursive pattern as :func:`_pair_shrunk_deviation`, one level
+    deeper: the three main effects and three pairwise interactions
+    (themselves already shrunk) combine additively into the joint 3D cell's
+    prior, and the cell is shrunk toward that."""
+    dev_a = _zone_shrunk_deviation(za, target_values, overall_mean, n_zones_a, m)
+    dev_b = _zone_shrunk_deviation(zb, target_values, overall_mean, n_zones_b, m)
+    dev_c = _zone_shrunk_deviation(zc, target_values, overall_mean, n_zones_c, m)
+    dev_ab = _pair_shrunk_deviation(za, zb, target_values, overall_mean, n_zones_a, n_zones_b, m)
+    dev_ac = _pair_shrunk_deviation(za, zc, target_values, overall_mean, n_zones_a, n_zones_c, m)
+    dev_bc = _pair_shrunk_deviation(zb, zc, target_values, overall_mean, n_zones_b, n_zones_c, m)
+
     combined = (za * n_zones_b + zb) * n_zones_c + zc
     size = n_zones_a * n_zones_b * n_zones_c
     counts = np.bincount(combined, minlength=size).astype(float).reshape(n_zones_a, n_zones_b, n_zones_c)
     sums = np.bincount(combined, weights=target_values, minlength=size).reshape(n_zones_a, n_zones_b, n_zones_c)
-    cell_mean = np.where(counts > 0, np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0), overall_mean)
-    deviation = cell_mean - overall_mean
-    base = counts.max()
-    confidence = counts / base if base > 0 else counts
-    return deviation, confidence
+    cell_mean = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
+    prior = (
+        overall_mean
+        + dev_a[:, None, None]
+        + dev_b[None, :, None]
+        + dev_c[None, None, :]
+        + dev_ab[:, :, None]
+        + dev_ac[:, None, :]
+        + dev_bc[None, :, :]
+    )
+    shrunk_mean = (counts * cell_mean + m * prior) / (counts + m)
+    return shrunk_mean - overall_mean
 
 
-def _term_importance(deviation: np.ndarray, confidence: np.ndarray) -> float:
-    """A term's own confidence-weighted average magnitude -- used to rank
-    pairs/triples by how much signal they carry, independent of ndim."""
-    return float(np.mean(np.abs(deviation) * confidence))
+def _term_importance(deviation: np.ndarray) -> float:
+    """A term's own average magnitude -- used to rank pairs/triples by how
+    much signal they carry, independent of ndim."""
+    return float(np.mean(np.abs(deviation)))
 
 
 def _ols_scale(raw: np.ndarray, residual: np.ndarray) -> tuple:
@@ -134,18 +173,19 @@ def _cross_fitted_raw(
     triple_keys: list,
     fold_ids: np.ndarray,
     n_folds: int,
+    m: float,
 ) -> np.ndarray:
     """Leakage-free version of what ``weak_learner_score`` would compute for
     the exact rows used to build this round's tables: for each fold, every
-    term's ``(deviation, confidence)`` is recomputed from the *other* folds'
-    rows only (reusing ``_zone_deviation_confidence``/
-    ``_pair_deviation_confidence``/``_triple_deviation_confidence`` unchanged
-    on fold-restricted slices), then used to score that fold's own held-out
-    rows. No row is ever scored with a table that included its own value --
-    the CatBoost ordered-target-statistics fix, applied to zoneboost's zone
-    grids. Which terms exist (main effects / which pairs / which triples) is
-    decided once from the full subsample elsewhere; this only recomputes the
-    numeric cell means used to score training rows honestly.
+    term's shrunk deviation is recomputed from the *other* folds' rows only
+    (reusing ``_zone_shrunk_deviation``/``_pair_shrunk_deviation``/
+    ``_triple_shrunk_deviation`` unchanged on fold-restricted slices), then
+    used to score that fold's own held-out rows. No row is ever scored with
+    a table that included its own value -- the CatBoost ordered-target-
+    statistics fix, applied to zoneboost's zone grids. Which terms exist
+    (main effects / which pairs / which triples) is decided once from the
+    full subsample elsewhere; this only recomputes the numeric cell means
+    used to score training rows honestly.
     """
     n = len(residual)
     n_terms = len(main_effect_keys) + len(interaction_keys) + len(triple_keys)
@@ -160,23 +200,21 @@ def _cross_fitted_raw(
 
         col = 0
         for name in main_effect_keys:
-            dev, conf = _zone_deviation_confidence(
-                zones[name][out_mask], residual[out_mask], overall_mean_k, n_zones[name]
-            )
+            dev = _zone_shrunk_deviation(zones[name][out_mask], residual[out_mask], overall_mean_k, n_zones[name], m)
             z_in = zones[name][in_mask]
-            contributions[in_mask, col] = dev[z_in] * conf[z_in]
+            contributions[in_mask, col] = dev[z_in]
             col += 1
 
         for a, b in interaction_keys:
-            dev, conf = _pair_deviation_confidence(
-                zones[a][out_mask], zones[b][out_mask], residual[out_mask], overall_mean_k, n_zones[a], n_zones[b]
+            dev = _pair_shrunk_deviation(
+                zones[a][out_mask], zones[b][out_mask], residual[out_mask], overall_mean_k, n_zones[a], n_zones[b], m
             )
             za_in, zb_in = zones[a][in_mask], zones[b][in_mask]
-            contributions[in_mask, col] = dev[za_in, zb_in] * conf[za_in, zb_in]
+            contributions[in_mask, col] = dev[za_in, zb_in]
             col += 1
 
         for a, b, c in triple_keys:
-            dev, conf = _triple_deviation_confidence(
+            dev = _triple_shrunk_deviation(
                 zones[a][out_mask],
                 zones[b][out_mask],
                 zones[c][out_mask],
@@ -185,17 +223,18 @@ def _cross_fitted_raw(
                 n_zones[a],
                 n_zones[b],
                 n_zones[c],
+                m,
             )
             za_in, zb_in, zc_in = zones[a][in_mask], zones[b][in_mask], zones[c][in_mask]
-            contributions[in_mask, col] = dev[za_in, zb_in, zc_in] * conf[za_in, zb_in, zc_in]
+            contributions[in_mask, col] = dev[za_in, zb_in, zc_in]
             col += 1
 
     return contributions.mean(axis=1)
 
 
 def _get_pair(interactions: dict, x: str, y: str):
-    """Fetch a pair's (deviation, confidence) regardless of which of the two
-    key orders ``interactions`` happened to store it under (pair keys follow
+    """Fetch a pair's value regardless of which of the two key orders
+    ``interactions`` happened to store it under (pair keys follow
     ``predictor_subset``'s order, not alphabetical)."""
     return interactions[(x, y)] if (x, y) in interactions else interactions[(y, x)]
 
@@ -209,6 +248,7 @@ def _select_triples(
     residual: np.ndarray,
     max_triple_interactions: int,
     triple_min_gain: float,
+    m: float,
 ):
     """Adaptive 3-way interaction selection for one round: start from main
     effects + pairwise interactions (already fit), and only add a small
@@ -220,19 +260,19 @@ def _select_triples(
     strongest pairs (not the full C(p, 3) space), then each candidate is
     kept only if, after subtracting what main effects + its three
     constituent pairs would already predict, a joint 3-way zone grouping
-    still carries a confidence-weighted signal worth at least
-    ``triple_min_gain`` times its strongest constituent pair's own
-    importance -- comparing the triple's leftover signal to a pair's signal
-    (both computed identically via ``_term_importance``) rather than to the
-    residual's raw scale, since a zone-averaged, confidence-discounted
-    importance score is not on the same scale as a raw standard deviation.
+    still carries a signal worth at least ``triple_min_gain`` times its
+    strongest constituent pair's own importance -- comparing the triple's
+    leftover signal to a pair's signal (both computed identically via
+    ``_term_importance``) rather than to the residual's raw scale, since a
+    zone-averaged, shrunk importance score is not on the same scale as a
+    raw standard deviation.
     """
     if len(predictor_subset) < 3 or not interactions:
         return {}
     if float(residual.std()) <= 0:
         return {}
 
-    pair_importance = {pair: _term_importance(*interactions[pair]) for pair in interactions}
+    pair_importance = {pair: _term_importance(interactions[pair]) for pair in interactions}
     k_pairs = min(len(pair_importance), max(2 * max_triple_interactions, 6))
     top_pairs = sorted(pair_importance, key=pair_importance.get, reverse=True)[:k_pairs]
 
@@ -245,39 +285,39 @@ def _select_triples(
     scored = []
     for a, b, c in itertools.combinations(candidate_cols, 3):
         za, zb, zc = zones[a], zones[b], zones[c]
-        dev_a, conf_a = main_effects[a]
-        dev_b, conf_b = main_effects[b]
-        dev_c, conf_c = main_effects[c]
-        dev_ab, conf_ab = _get_pair(interactions, a, b)
-        dev_ac, conf_ac = _get_pair(interactions, a, c)
-        dev_bc, conf_bc = _get_pair(interactions, b, c)
+        dev_a = main_effects[a]
+        dev_b = main_effects[b]
+        dev_c = main_effects[c]
+        dev_ab = _get_pair(interactions, a, b)
+        dev_ac = _get_pair(interactions, a, c)
+        dev_bc = _get_pair(interactions, b, c)
         max_pair_importance = max(
             _get_pair(pair_importance, a, b), _get_pair(pair_importance, a, c), _get_pair(pair_importance, b, c)
         )
         lower_order_raw = np.column_stack(
             [
-                dev_a[za] * conf_a[za],
-                dev_b[zb] * conf_b[zb],
-                dev_c[zc] * conf_c[zc],
-                dev_ab[za, zb] * conf_ab[za, zb],
-                dev_ac[za, zc] * conf_ac[za, zc],
-                dev_bc[zb, zc] * conf_bc[zb, zc],
+                dev_a[za],
+                dev_b[zb],
+                dev_c[zc],
+                dev_ab[za, zb],
+                dev_ac[za, zc],
+                dev_bc[zb, zc],
             ]
         ).mean(axis=1)
         double_residual = _residualize(lower_order_raw, residual)
 
-        gain_dev, gain_conf = _triple_deviation_confidence(
-            za, zb, zc, double_residual, float(double_residual.mean()), n_zones[a], n_zones[b], n_zones[c]
+        gain_dev = _triple_shrunk_deviation(
+            za, zb, zc, double_residual, float(double_residual.mean()), n_zones[a], n_zones[b], n_zones[c], m
         )
-        gain = _term_importance(gain_dev, gain_conf)
+        gain = _term_importance(gain_dev)
         if gain >= triple_min_gain * max_pair_importance:
-            dev_abc, conf_abc = _triple_deviation_confidence(
-                za, zb, zc, residual, float(residual.mean()), n_zones[a], n_zones[b], n_zones[c]
+            dev_abc = _triple_shrunk_deviation(
+                za, zb, zc, residual, float(residual.mean()), n_zones[a], n_zones[b], n_zones[c], m
             )
-            scored.append(((a, b, c), gain, dev_abc, conf_abc))
+            scored.append(((a, b, c), gain, dev_abc))
 
     scored.sort(key=lambda item: item[1], reverse=True)
-    return {key: (dev, conf) for key, _, dev, conf in scored[:max_triple_interactions]}
+    return {key: dev for key, _, dev in scored[:max_triple_interactions]}
 
 
 def _column_zone_info(x_col: pd.Series, residual: np.ndarray, is_categorical: bool, max_zones: int, min_zone_frac: float):
@@ -317,6 +357,7 @@ def weak_learner_fit(
     max_triple_interactions: int = 5,
     triple_min_gain: float = 0.05,
     cross_fit_folds: int = 5,
+    shrinkage_m: float = 10.0,
 ):
     """Fit one boosting round's weak learner: zone info (adaptive-continuous
     or exact-categorical per column), main effects, interactions, and
@@ -344,31 +385,33 @@ def weak_learner_fit(
         Cap on how many 3-way terms a single round may add (only relevant
         when ``max_interaction_order >= 3``).
     triple_min_gain : float, default=0.05
-        Minimum confidence-weighted residual-explained magnitude a
-        candidate triple must retain after subtracting the main-effect +
-        pairwise fit for its three columns, expressed as a fraction of its
-        strongest constituent pair's own importance (both measured
-        identically, so this is a like-for-like comparison rather than one
-        against the residual's raw scale) -- to be judged genuine
-        higher-order structure rather than something pairwise interactions
-        already explain.
+        Minimum residual-explained magnitude a candidate triple must retain
+        after subtracting the main-effect + pairwise fit for its three
+        columns, expressed as a fraction of its strongest constituent
+        pair's own importance (both measured identically, so this is a
+        like-for-like comparison rather than one against the residual's
+        raw scale) -- to be judged genuine higher-order structure rather
+        than something pairwise interactions already explain.
     cross_fit_folds : int, default=5
         Number of folds used to compute ``oof_raw`` honestly (see above).
         Falls back to the in-sample score (no cross-fitting) if the round's
         row count is smaller than 2 folds.
+    shrinkage_m : float, default=10.0
+        Empirical-Bayes shrinkage strength -- a zone needs about this many
+        rows of its own before it's trusted as much as its (hierarchical)
+        prior; see :func:`_zone_shrunk_deviation`.
 
     Returns
     -------
     zone_info : dict
         column -> ``("continuous", boundaries)`` or ``("categorical", map)``.
     main_effects : dict
-        column -> ``(deviation, confidence)`` arrays.
+        column -> shrunk deviation array.
     interactions : dict
-        ``(col_a, col_b)`` -> ``(deviation, confidence)`` 2D arrays.
+        ``(col_a, col_b)`` -> shrunk deviation 2D array.
     triples : dict
-        ``(col_a, col_b, col_c)`` -> ``(deviation, confidence)`` 3D arrays.
-        Empty unless ``max_interaction_order >= 3`` and evidence clears
-        ``triple_min_gain``.
+        ``(col_a, col_b, col_c)`` -> shrunk deviation 3D array. Empty unless
+        ``max_interaction_order >= 3`` and evidence clears ``triple_min_gain``.
     oof_raw : ndarray
         Cross-fitted raw score for this round's own rows, aligned to
         ``residual``'s order.
@@ -382,10 +425,11 @@ def weak_learner_fit(
     overall_mean = float(residual.mean())
 
     main_effects = {
-        col: _zone_deviation_confidence(zones[col], residual, overall_mean, n_zones[col]) for col in predictor_subset
+        col: _zone_shrunk_deviation(zones[col], residual, overall_mean, n_zones[col], shrinkage_m)
+        for col in predictor_subset
     }
     interactions = {
-        (a, b): _pair_deviation_confidence(zones[a], zones[b], residual, overall_mean, n_zones[a], n_zones[b])
+        (a, b): _pair_shrunk_deviation(zones[a], zones[b], residual, overall_mean, n_zones[a], n_zones[b], shrinkage_m)
         for a, b in itertools.combinations(predictor_subset, 2)
     }
     triples = (
@@ -398,6 +442,7 @@ def weak_learner_fit(
             residual,
             max_triple_interactions,
             triple_min_gain,
+            shrinkage_m,
         )
         if max_interaction_order >= 3
         else {}
@@ -418,6 +463,7 @@ def weak_learner_fit(
             list(triples.keys()),
             fold_ids,
             effective_folds,
+            shrinkage_m,
         )
     return zone_info, main_effects, interactions, triples, oof_raw
 
@@ -440,13 +486,13 @@ def weak_learner_score(
     zones = {c: _column_zone_index(X[c], zone_info[c]) for c in needed_cols}
 
     contributions = []
-    for col, (deviation, confidence) in main_effects.items():
+    for col, deviation in main_effects.items():
         z = zones[col]
-        contributions.append(deviation[z] * confidence[z])
-    for (a, b), (deviation, confidence) in interactions.items():
+        contributions.append(deviation[z])
+    for (a, b), deviation in interactions.items():
         za, zb = zones[a], zones[b]
-        contributions.append(deviation[za, zb] * confidence[za, zb])
-    for (a, b, c), (deviation, confidence) in triples.items():
+        contributions.append(deviation[za, zb])
+    for (a, b, c), deviation in triples.items():
         za, zb, zc = zones[a], zones[b], zones[c]
-        contributions.append(deviation[za, zb, zc] * confidence[za, zb, zc])
+        contributions.append(deviation[za, zb, zc])
     return np.column_stack(contributions).mean(axis=1)

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>How It Works — zoneboost docs</title>
-<meta name="description" content="How zoneboost's zone-based weak learner works: main effects, interactions, density confidence, categorical zones, and missing values.">
+<meta name="description" content="How zoneboost's zone-based weak learner works: main effects, interactions, empirical-Bayes shrinkage, categorical zones, and missing values.">
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/style.css">
 </head>
@@ -69,10 +69,11 @@
     explained as its own term (see <a href="explaining-predictions.html">Explaining
     Predictions</a>).</p>
 
-    <h3 id="density-confidence">Density Confidence</h3>
-    <p>Every zone's contribution is weighted by its <strong>density confidence</strong> —
-    its row count relative to the best-supported zone that round — so sparse zones
-    contribute less than well-supported ones. Each round's correction is applied at a
+    <h3 id="density-confidence">Empirical Bayes Shrinkage</h3>
+    <p>Every zone's own mean is shrunk toward a hierarchical prior via <strong>empirical
+    Bayes</strong> — so sparse zones lean toward their prior instead of overfitting a
+    handful of rows (see <a href="#empirical-bayes-shrinkage">Empirical Bayes
+    Shrinkage</a> below for the full mechanics). Each round's correction is applied at a
     small, shrunk step (<code>learning_rate</code>) and added to a running prediction,
     exactly like standard gradient boosting. <code>row_subsample</code> /
     <code>col_subsample</code> add stochastic-gradient-boosting-style regularization by
@@ -110,7 +111,7 @@
 
     <h2 id="classification">From Regression to Classification</h2>
     <p><code>ZoneBoostClassifier</code> uses the <em>identical</em> weak learner — same
-    main effects, same interactions, same density confidence. The only change is where
+    main effects, same interactions, same empirical-Bayes shrinkage. The only change is where
     boosting happens: each round is fit against the residual in <strong>log-odds
     space</strong> (<code>y - sigmoid(current_score)</code>, the standard logistic-loss
     gradient) instead of the raw target, and predictions are squashed through a sigmoid at
@@ -188,6 +189,38 @@
       <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>cross_fit_folds</code></td><td><code>5</code></td><td>Number of folds used to compute each round's training signal honestly. Falls back to no cross-fitting if a round's row count is smaller than 2 folds.</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="empirical-bayes-shrinkage">Empirical Bayes Shrinkage</h2>
+    <p>Every prior release weighted a zone's contribution by
+    <code>confidence = counts / counts.max()</code> — a flat, ad hoc discount relative to
+    that round's busiest zone. This is replaced by an <strong>empirical-Bayes
+    (m-estimate) shrinkage</strong> of the zone's mean itself:</p>
+    <pre><code>shrunk_mean = (n * cell_mean + m * prior) / (n + m)</code></pre>
+    <p>A zone needs about <code>m</code> rows of its own (<code>shrinkage_m</code>,
+    default 10) before it's trusted as much as its prior; fewer rows lean toward the
+    prior, more rows lean toward its own data. Critically, the prior is
+    <strong>hierarchical</strong>, not the flat global mean:</p>
+    <ul>
+      <li><strong>Main effects</strong> shrink toward the global mean.</li>
+      <li><strong>Pairwise interactions</strong> shrink toward the additive combination
+      of their own row and column marginals (each already shrunk the same way) — for a
+      sparse joint cell, "what row A's zone alone predicts, plus what column B's zone
+      alone predicts" is a far better guess than the overall average of everything.</li>
+      <li><strong>3-way interactions</strong> shrink one level deeper still, toward the
+      additive combination of their three main effects and three pairwise interactions
+      (all already shrunk).</li>
+    </ul>
+    <p>This fully replaces the confidence mechanism rather than supplementing it — once a
+    cell's own mean is properly shrunk in proportion to how little data supports it, a
+    separate trust-discount multiplied on top is redundant. Like the cross-fitting fix,
+    this is on by default: a more principled estimate, not a
+    <code>max_interaction_order</code>-style opt-in.</p>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>shrinkage_m</code></td><td><code>10.0</code></td><td>Empirical-Bayes shrinkage strength — a zone needs about this many rows of its own before it's trusted as much as its (hierarchical) prior.</td></tr>
       </tbody>
     </table>
 

@@ -71,13 +71,14 @@ assumes two values that are numerically close behave alike — true for a
 continuous variable, false for a nominal category like a neighborhood ID,
 where there's no reason two adjacent label-encoded values behave similarly.
 
-Every zone's contribution is weighted by **density confidence** — its row
-count relative to the best-supported zone that round — so sparse zones
-contribute less than well-supported ones. Each round's correction is
-applied at a small, shrunk step (`learning_rate`) and added to a running
-prediction, exactly like standard gradient boosting. `row_subsample` /
-`col_subsample` add stochastic-gradient-boosting-style regularization by
-fitting each round on a random subsample of rows and columns.
+Every zone's own mean is shrunk toward a hierarchical prior via
+**empirical Bayes** (see "Empirical Bayes shrinkage" below) — so sparse
+zones lean toward their prior instead of overfitting a handful of rows.
+Each round's correction is applied at a small, shrunk step
+(`learning_rate`) and added to a running prediction, exactly like standard
+gradient boosting. `row_subsample` / `col_subsample` add
+stochastic-gradient-boosting-style regularization by fitting each round on
+a random subsample of rows and columns.
 
 ### Missing values
 
@@ -95,8 +96,8 @@ adaptive split search for the column's present values.
 ### Classification
 
 `ZoneBoostClassifier` uses the *identical* weak learner — same main
-effects, same interactions, same density confidence. The only change is
-where boosting happens: each round is fit against the residual in
+effects, same interactions, same empirical-Bayes shrinkage. The only
+change is where boosting happens: each round is fit against the residual in
 **log-odds space** (`y - sigmoid(current_score)`, the standard logistic-loss
 gradient) instead of the raw target, and predictions are squashed through
 a sigmoid at the end. This is the standard way gradient boosting
@@ -158,6 +159,38 @@ near-zero value amplifies noise instead of correctly damping it. OLS
 doesn't have this failure mode: with weak or no correlation, `beta` is
 naturally small rather than amplified.
 
+### Empirical Bayes shrinkage
+
+Every prior release weighted a zone's contribution by
+`confidence = counts / counts.max()` — a flat, ad hoc discount relative to
+that round's busiest zone. This is replaced by an **empirical-Bayes
+(m-estimate) shrinkage** of the zone's mean itself:
+
+```
+shrunk_mean = (n · cell_mean + m · prior) / (n + m)
+```
+
+A zone needs about `m` rows of its own (`shrinkage_m`, default 10) before
+it's trusted as much as its prior; fewer rows lean toward the prior, more
+rows lean toward its own data. Critically, the prior is **hierarchical**,
+not the flat global mean:
+
+- **Main effects** shrink toward the global mean.
+- **Pairwise interactions** shrink toward the additive combination of
+  their own row and column marginals (each already shrunk the same way) —
+  for a sparse joint cell, "what row A's zone alone predicts, plus what
+  column B's zone alone predicts" is a far better guess than the overall
+  average of everything.
+- **3-way interactions** shrink one level deeper still, toward the
+  additive combination of their three main effects and three pairwise
+  interactions (all already shrunk).
+
+This fully replaces the confidence mechanism rather than supplementing
+it — once a cell's own mean is properly shrunk in proportion to how little
+data supports it, a separate trust-discount multiplied on top is
+redundant. Like the cross-fitting fix, this is on by default: a more
+principled estimate, not a `max_interaction_order`-style opt-in.
+
 ## Parameters
 
 Identical parameter set on both estimators.
@@ -177,6 +210,7 @@ Identical parameter set on both estimators.
 | `max_triple_interactions` | 5 | Cap on how many 3-way terms a single round may add (only relevant when `max_interaction_order=3`) |
 | `triple_min_gain` | 0.05 | Minimum residual-explained evidence, relative to a candidate's strongest constituent pair, required to keep a 3-way interaction |
 | `cross_fit_folds` | 5 | Number of folds used to compute each round's training signal honestly (see "Cross-fitted cell means" above); falls back to no cross-fitting if a round's row count is smaller than 2 folds |
+| `shrinkage_m` | 10.0 | Empirical-Bayes shrinkage strength — a zone needs about this many rows of its own before it's trusted as much as its (hierarchical) prior; see "Empirical Bayes shrinkage" above |
 | `random_state` | 42 | Seed for the validation split and subsampling |
 
 **On `max_zones` and `categorical_features`:** if a variable genuinely has

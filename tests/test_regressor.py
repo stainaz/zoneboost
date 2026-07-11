@@ -200,6 +200,28 @@ def test_ols_rescale_stays_stable_on_pure_noise_without_early_stopping():
     assert test_r2 > -0.5
 
 
+def test_shrinkage_recovers_real_high_cardinality_group_effects():
+    # Unlike the pure-noise tests above (which check the model doesn't
+    # overfit sparse zones), this checks the complementary property:
+    # with genuine group-level signal but few rows per category, the
+    # empirical-Bayes shrinkage should still recover it well on held-out
+    # data from the same categories.
+    rng = np.random.default_rng(0)
+    n_categories, rows_per_cat = 150, 4
+    true_effects = rng.normal(0, 2.0, n_categories)
+    n_train = n_categories * rows_per_cat
+    train_ids = rng.integers(0, n_categories, n_train)
+    y_train = true_effects[train_ids] + rng.normal(0, 1.0, n_train)
+    n_test = n_categories * 20
+    test_ids = rng.integers(0, n_categories, n_test)
+    y_test = true_effects[test_ids] + rng.normal(0, 1.0, n_test)
+    X_train = pd.DataFrame({"id": train_ids.astype(str)})
+    X_test = pd.DataFrame({"id": test_ids.astype(str)})
+
+    model = ZoneBoostRegressor(n_rounds=100, categorical_features=["id"], random_state=0).fit(X_train, y_train)
+    assert model.score(X_test, y_test) > 0.5
+
+
 def test_max_interaction_order_3_improves_fit_on_genuine_triple_interaction():
     # col_subsample=1.0: with only 3 predictors, the default 0.7 subsample
     # rounds down to 2 columns per round, which never gives a 3-way search

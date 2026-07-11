@@ -44,7 +44,7 @@ class _LogOddsBooster:
     def __init__(self, n_rounds, learning_rate, row_subsample, col_subsample,
                  max_zones, min_zone_frac, categorical_features, n_iter_no_change,
                  max_interaction_order, max_triple_interactions, triple_min_gain,
-                 cross_fit_folds, random_state):
+                 cross_fit_folds, shrinkage_m, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
         self.row_subsample = row_subsample
@@ -57,6 +57,7 @@ class _LogOddsBooster:
         self.max_triple_interactions = max_triple_interactions
         self.triple_min_gain = triple_min_gain
         self.cross_fit_folds = cross_fit_folds
+        self.shrinkage_m = shrinkage_m
         self.random_state = random_state
 
     def fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray, X_val=None, y_val=None):
@@ -94,6 +95,7 @@ class _LogOddsBooster:
                 max_triple_interactions=self.max_triple_interactions,
                 triple_min_gain=self.triple_min_gain,
                 cross_fit_folds=self.cross_fit_folds,
+                shrinkage_m=self.shrinkage_m,
             )
             raw = weak_learner_score(X_fit, zone_info, main_effects, interactions, triples)
             raw[row_idx] = oof_raw
@@ -197,15 +199,20 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         Cap on how many 3-way terms a single round may add. Only relevant
         when ``max_interaction_order=3``.
     triple_min_gain : float, default=0.05
-        Minimum confidence-weighted residual-explained magnitude a
-        candidate 3-way interaction must retain after subtracting the
-        main-effect + pairwise fit for its three columns, expressed as a
-        fraction of its strongest constituent pair's own importance. Only
-        relevant when ``max_interaction_order=3``.
+        Minimum residual-explained magnitude a candidate 3-way interaction
+        must retain after subtracting the main-effect + pairwise fit for
+        its three columns, expressed as a fraction of its strongest
+        constituent pair's own importance. Only relevant when
+        ``max_interaction_order=3``.
     cross_fit_folds : int, default=5
         Each round splits its rows into this many folds and scores each
         fold only with zone tables built from the other folds, so no row's
         own residual leaks into the zone mean it's judged against -- see
+        :class:`~zoneboost.ZoneBoostRegressor` for the full description.
+    shrinkage_m : float, default=10.0
+        Every zone's mean is shrunk toward a hierarchical prior via an
+        empirical-Bayes (m-estimate) fit, replacing the flat confidence
+        discount used by every prior release -- see
         :class:`~zoneboost.ZoneBoostRegressor` for the full description.
     random_state : int, default=42
         Seed controlling the validation split and per-round subsampling.
@@ -257,6 +264,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         max_triple_interactions: int = 5,
         triple_min_gain: float = 0.05,
         cross_fit_folds: int = 5,
+        shrinkage_m: float = 10.0,
         random_state: int = 42,
     ):
         self.n_rounds = n_rounds
@@ -272,6 +280,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.max_triple_interactions = max_triple_interactions
         self.triple_min_gain = triple_min_gain
         self.cross_fit_folds = cross_fit_folds
+        self.shrinkage_m = shrinkage_m
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -291,6 +300,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             max_triple_interactions=self.max_triple_interactions,
             triple_min_gain=self.triple_min_gain,
             cross_fit_folds=self.cross_fit_folds,
+            shrinkage_m=self.shrinkage_m,
             random_state=self.random_state,
         )
 

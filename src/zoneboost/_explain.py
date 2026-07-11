@@ -69,16 +69,16 @@ def explain_rounds(X: pd.DataFrame, rounds: list, baseline: float, learning_rate
             continue
         baseline_total += learning_rate * alpha
 
-        for col, (deviation, confidence) in main_effects.items():
+        for col, deviation in main_effects.items():
             z = _column_zone_index(X[col], zone_info[col])
-            share = learning_rate * (beta / n_terms) * (deviation[z] * confidence[z])
+            share = learning_rate * (beta / n_terms) * deviation[z]
             term_totals.setdefault(col, np.zeros(n))
             term_totals[col] += share
 
-        for (a, b), (deviation, confidence) in interactions.items():
+        for (a, b), deviation in interactions.items():
             za = _column_zone_index(X[a], zone_info[a])
             zb = _column_zone_index(X[b], zone_info[b])
-            share = learning_rate * (beta / n_terms) * (deviation[za, zb] * confidence[za, zb])
+            share = learning_rate * (beta / n_terms) * deviation[za, zb]
             # Canonicalize: a pair's fit order varies round to round (each
             # round samples/orders columns independently), so without
             # sorting, "A x B" and "B x A" would fragment into separate
@@ -87,11 +87,11 @@ def explain_rounds(X: pd.DataFrame, rounds: list, baseline: float, learning_rate
             term_totals.setdefault(key, np.zeros(n))
             term_totals[key] += share
 
-        for (a, b, c), (deviation, confidence) in triples.items():
+        for (a, b, c), deviation in triples.items():
             za = _column_zone_index(X[a], zone_info[a])
             zb = _column_zone_index(X[b], zone_info[b])
             zc = _column_zone_index(X[c], zone_info[c])
-            share = learning_rate * (beta / n_terms) * (deviation[za, zb, zc] * confidence[za, zb, zc])
+            share = learning_rate * (beta / n_terms) * deviation[za, zb, zc]
             key = " x ".join(sorted((a, b, c)))
             term_totals.setdefault(key, np.zeros(n))
             term_totals[key] += share

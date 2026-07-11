@@ -111,14 +111,13 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         Cap on how many 3-way terms a single round may add. Only relevant
         when ``max_interaction_order=3``.
     triple_min_gain : float, default=0.05
-        Minimum confidence-weighted residual-explained magnitude a
-        candidate 3-way interaction must retain after subtracting the
-        main-effect + pairwise fit for its three columns, expressed as a
-        fraction of its strongest constituent pair's own importance (a
-        like-for-like comparison, not one against the residual's raw
-        scale) -- to be judged genuine higher-order structure rather than
-        something pairwise interactions already explain. Only relevant
-        when ``max_interaction_order=3``.
+        Minimum residual-explained magnitude a candidate 3-way interaction
+        must retain after subtracting the main-effect + pairwise fit for
+        its three columns, expressed as a fraction of its strongest
+        constituent pair's own importance (a like-for-like comparison, not
+        one against the residual's raw scale) -- to be judged genuine
+        higher-order structure rather than something pairwise interactions
+        already explain. Only relevant when ``max_interaction_order=3``.
     cross_fit_folds : int, default=5
         Every zone's cell mean is otherwise computed from the same rows a
         round then scores -- each row's own residual partly determines the
@@ -132,6 +131,18 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         affected; the tables stored in ``rounds_`` and used by `predict`
         still use every available row. Falls back to no cross-fitting if a
         round's row count is smaller than 2 folds.
+    shrinkage_m : float, default=10.0
+        Every zone's mean is shrunk toward a hierarchical prior via an
+        empirical-Bayes (m-estimate) fit --
+        ``shrunk_mean = (n * cell_mean + m * prior) / (n + m)`` -- rather
+        than the flat ``counts / counts.max()`` confidence discount used by
+        every prior release. A zone needs about ``shrinkage_m`` rows of its
+        own before it's trusted as much as its prior; for a main effect the
+        prior is the global mean, for an interaction/triple it's the
+        additive combination of its already-shrunk lower-order marginals
+        (row+column, or main effects+pairs), not the flat global mean --
+        a materially better guess for a sparse cell than the overall
+        average of everything.
     random_state : int, default=42
         Seed controlling the validation split and the per-round row/column
         subsampling.
@@ -204,6 +215,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         max_triple_interactions: int = 5,
         triple_min_gain: float = 0.05,
         cross_fit_folds: int = 5,
+        shrinkage_m: float = 10.0,
         random_state: int = 42,
     ):
         # scikit-learn convention: __init__ only assigns parameters as-is,
@@ -222,6 +234,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.max_triple_interactions = max_triple_interactions
         self.triple_min_gain = triple_min_gain
         self.cross_fit_folds = cross_fit_folds
+        self.shrinkage_m = shrinkage_m
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -305,6 +318,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 max_triple_interactions=self.max_triple_interactions,
                 triple_min_gain=self.triple_min_gain,
                 cross_fit_folds=self.cross_fit_folds,
+                shrinkage_m=self.shrinkage_m,
             )
             raw = weak_learner_score(X_fit, zone_info, main_effects, interactions, triples)
             # The round's own (sub)sampled rows would otherwise be scored by a

@@ -167,9 +167,9 @@ clf.predict(X)          # binary and 3+ classes alike</code></pre>
     two transparent pieces: a <strong>main effect</strong> (a 1D lookup from zone to
     average residual) for every predictor, and an <strong>interaction</strong> (a 2D
     lookup from joint zones to average residual) for every pair of predictors. Every
-    zone's contribution is weighted by its <strong>density confidence</strong> — its row
-    count relative to that round's best-supported zone — so sparse zones contribute less
-    than well-supported ones. Read the full mechanics, including missing-value handling
+    zone's own mean is shrunk toward a hierarchical prior via <strong>empirical
+    Bayes</strong> — so sparse zones lean toward their prior instead of overfitting a
+    handful of rows. Read the full mechanics, including missing-value handling
     and how classification reuses the same learner, in
     <a href="how-it-works.html">How It Works</a>.</p>
   </section>
