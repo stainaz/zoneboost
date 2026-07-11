@@ -44,7 +44,8 @@ class _LogOddsBooster:
     def __init__(self, n_rounds, learning_rate, row_subsample, col_subsample,
                  max_zones, min_zone_frac, categorical_features, n_iter_no_change,
                  max_interaction_order, max_triple_interactions, triple_min_gain,
-                 cross_fit_folds, shrinkage_m, stacking_alpha, monotonic_constraints, random_state):
+                 cross_fit_folds, shrinkage_m, stacking_alpha, monotonic_constraints,
+                 max_pair_interactions, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
         self.row_subsample = row_subsample
@@ -60,6 +61,7 @@ class _LogOddsBooster:
         self.shrinkage_m = shrinkage_m
         self.stacking_alpha = stacking_alpha
         self.monotonic_constraints = monotonic_constraints
+        self.max_pair_interactions = max_pair_interactions
         self.random_state = random_state
 
     def fit(self, X_fit: pd.DataFrame, y_fit: np.ndarray, X_val=None, y_val=None):
@@ -99,6 +101,7 @@ class _LogOddsBooster:
                 cross_fit_folds=self.cross_fit_folds,
                 shrinkage_m=self.shrinkage_m,
                 monotonic_constraints=self.monotonic_constraints,
+                max_pair_interactions=self.max_pair_interactions,
             )
             contributions = weak_learner_contributions(X_fit, zone_info, main_effects, interactions, triples)
             contributions[row_idx, :] = oof_contributions
@@ -201,6 +204,12 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
     max_triple_interactions : int, default=5
         Cap on how many 3-way terms a single round may add. Only relevant
         when ``max_interaction_order=3``.
+    max_pair_interactions : int, default=None
+        Cap on how many pairwise interactions a single round keeps, ranked
+        by mean absolute contribution, applied after 3-way interaction
+        selection so it never changes which triples are found. ``None``
+        (default) keeps every pair -- see
+        :class:`~zoneboost.ZoneBoostRegressor` for the full description.
     triple_min_gain : float, default=0.05
         Minimum residual-explained magnitude a candidate 3-way interaction
         must retain after subtracting the main-effect + pairwise fit for
@@ -283,6 +292,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         shrinkage_m: float = 10.0,
         stacking_alpha: float = 0.01,
         monotonic_constraints=None,
+        max_pair_interactions=None,
         random_state: int = 42,
     ):
         self.n_rounds = n_rounds
@@ -301,6 +311,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.shrinkage_m = shrinkage_m
         self.stacking_alpha = stacking_alpha
         self.monotonic_constraints = monotonic_constraints
+        self.max_pair_interactions = max_pair_interactions
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -323,6 +334,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             shrinkage_m=self.shrinkage_m,
             stacking_alpha=self.stacking_alpha,
             monotonic_constraints=self.monotonic_constraints_,
+            max_pair_interactions=self.max_pair_interactions,
             random_state=self.random_state,
         )
 

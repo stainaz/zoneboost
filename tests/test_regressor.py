@@ -338,3 +338,29 @@ def test_monotonic_constraints_default_none_reproduces_unconstrained_predictions
         n_rounds=40, random_state=0, validation_fraction=0, monotonic_constraints=None
     ).fit(X, y)
     np.testing.assert_array_equal(model_default.predict(X), model_explicit_none.predict(X))
+
+
+def test_max_pair_interactions_default_none_reproduces_unconstrained_predictions():
+    X, y = _synthetic_regression()
+    model_default = ZoneBoostRegressor(n_rounds=30, categorical_features=["cat"], random_state=0).fit(X, y)
+    model_explicit_none = ZoneBoostRegressor(
+        n_rounds=30, categorical_features=["cat"], random_state=0, max_pair_interactions=None
+    ).fit(X, y)
+    np.testing.assert_array_equal(model_default.predict(X), model_explicit_none.predict(X))
+
+
+def test_max_pair_interactions_with_many_noise_columns_stays_finite_and_consistent():
+    rng = np.random.default_rng(0)
+    n = 400
+    X, y = _synthetic_regression(n=n)
+    for i in range(15):
+        X[f"noise{i}"] = rng.uniform(-1, 1, n)
+
+    model = ZoneBoostRegressor(
+        n_rounds=30, categorical_features=["cat"], random_state=0, max_pair_interactions=3
+    ).fit(X, y)
+    pred = model.predict(X)
+    assert np.all(np.isfinite(pred))
+
+    contrib = model.explain(X)
+    np.testing.assert_allclose(contrib.sum(axis=1).to_numpy(), pred, atol=1e-6)

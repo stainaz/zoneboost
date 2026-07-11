@@ -455,6 +455,26 @@ def _select_triples(
     return {key: dev for key, _, dev in scored[:max_triple_interactions]}
 
 
+def _screen_pairs(interactions: dict, max_pair_interactions: int) -> dict:
+    """Keep only the ``max_pair_interactions`` pairs with the largest
+    ``_term_importance`` -- for datasets with enough predictors that
+    cross-fitting and stacking every ``C(p, 2)`` pair becomes the per-round
+    bottleneck. Must be called *after* :func:`_select_triples` has already
+    seen the full, unfiltered dict: triples are self-contained (their own
+    3D grid and gain test recompute marginal priors fresh from ``zones``/
+    ``residual``) and don't depend on a constituent pair still being present
+    here, so screening pairs afterward doesn't disturb triple selection.
+    A no-op when ``max_pair_interactions`` is ``None`` or already covers
+    every pair -- ties broken by original insertion order (stable sort), so
+    results are deterministic without any new randomness.
+    """
+    if max_pair_interactions is None or len(interactions) <= max_pair_interactions:
+        return interactions
+    ranked = sorted(interactions, key=lambda pair: _term_importance(interactions[pair]), reverse=True)
+    keep = set(ranked[:max_pair_interactions])
+    return {pair: dev for pair, dev in interactions.items() if pair in keep}
+
+
 def _column_zone_info(x_col: pd.Series, residual: np.ndarray, is_categorical: bool, max_zones: int, min_zone_frac: float):
     """Returns a ``("continuous", boundaries, centers)`` or ``("categorical",
     category_map)`` tagged tuple -- the one place that decides which zone
@@ -551,6 +571,7 @@ def weak_learner_fit(
     cross_fit_folds: int = 5,
     shrinkage_m: float = 10.0,
     monotonic_constraints: dict = None,
+    max_pair_interactions: int = None,
 ):
     """Fit one boosting round's weak learner: zone info (adaptive-continuous
     or exact-categorical per column), main effects, interactions, and
@@ -601,6 +622,14 @@ def weak_learner_fit(
         constrained. Unlike every other tuning knob here, this encodes
         domain knowledge the model can't infer on its own, so there's no
         default direction -- an unlisted column is simply unconstrained.
+    max_pair_interactions : int, default=None
+        Cap on how many pairwise interactions a round keeps, ranked by
+        :func:`_term_importance` -- see :func:`_screen_pairs`. Applied after
+        triple selection so it never affects which triples are found.
+        ``None`` (default) keeps every pair, identical to every prior
+        release; only relevant once ``C(len(predictor_subset), 2)`` is large
+        enough that cross-fitting/stacking every pair becomes the
+        per-round bottleneck.
 
     Returns
     -------
@@ -652,6 +681,7 @@ def weak_learner_fit(
         if max_interaction_order >= 3
         else {}
     )
+    interactions = _screen_pairs(interactions, max_pair_interactions)
 
     n = len(residual)
     effective_folds = min(cross_fit_folds, n)

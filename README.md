@@ -278,6 +278,31 @@ narrow:
 Leaving `monotonic_constraints=None` (the default) reproduces the exact
 same predictions as before this change — verified bit-for-bit.
 
+### Pair screening
+
+Every round fits **every** `C(p, 2)` pairwise interaction among that
+round's (subsampled) predictors — fine for a modest number of columns,
+but two costs scale with pair count: cross-fitting recomputes every
+pair once per fold (a straight `cross_fit_folds×` multiplier), and Lasso
+stacking fits one feature per term, so hundreds/thousands of pairs make
+the per-round Lasso fit itself the bottleneck. Like monotonic
+constraints, this is **opt-in** — dropping weak pairs entirely changes
+results (some would have gotten a small nonzero Lasso weight), so it's
+a genuine approximation tradeoff, not a free correctness fix.
+
+`max_pair_interactions` caps how many pairs a round keeps, ranked by the
+same mean-absolute-contribution importance measure already used to rank
+candidate triples — reusing an existing measure rather than a separate
+"fast approximate" statistic, since per-pair scoring (bincount-based) is
+already cheap; screening targets the two real multipliers above, not
+the scoring pass itself. Applied *after* triple selection runs on the
+full, unfiltered pair set, so it never changes which triples are found.
+On a synthetic 35-column dataset, `max_pair_interactions=5` cut per-round
+fit time roughly 5x versus leaving every one of the ~595 candidate pairs
+in the model. Leaving `max_pair_interactions=None` (the default) keeps
+every pair — the exact same behavior as before this change, verified
+bit-for-bit.
+
 ## Parameters
 
 Identical parameter set on both estimators.
@@ -300,6 +325,7 @@ Identical parameter set on both estimators.
 | `shrinkage_m` | 10.0 | Empirical-Bayes shrinkage strength — a zone needs about this many rows of its own before it's trusted as much as its (hierarchical) prior; see "Empirical Bayes shrinkage" above |
 | `stacking_alpha` | 0.01 | Lasso regularization strength for combining a round's terms; see "Lasso stacking" above |
 | `monotonic_constraints` | None | `{column: +1 or -1}` — forces a continuous column's main effect to be non-decreasing/non-increasing; opt-in, see "Monotonic constraints" above |
+| `max_pair_interactions` | None | Cap on how many pairwise interactions a round keeps, ranked by importance; opt-in, see "Pair screening" above |
 | `random_state` | 42 | Seed for the validation split and subsampling |
 
 **On `max_zones` and `categorical_features`:** if a variable genuinely has

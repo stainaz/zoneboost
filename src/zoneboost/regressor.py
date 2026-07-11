@@ -110,6 +110,14 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
     max_triple_interactions : int, default=5
         Cap on how many 3-way terms a single round may add. Only relevant
         when ``max_interaction_order=3``.
+    max_pair_interactions : int, default=None
+        Cap on how many pairwise interactions a single round keeps, ranked
+        by mean absolute contribution. Applied after 3-way interaction
+        selection, so it never changes which triples are found. ``None``
+        (default) keeps every pair -- identical to every prior release; only
+        relevant once the number of candidate pairs (``C(p, 2)`` for ``p``
+        columns) is large enough that cross-fitting and Lasso-stacking every
+        one of them becomes the per-round bottleneck.
     triple_min_gain : float, default=0.05
         Minimum residual-explained magnitude a candidate 3-way interaction
         must retain after subtracting the main-effect + pairwise fit for
@@ -249,6 +257,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         shrinkage_m: float = 10.0,
         stacking_alpha: float = 0.01,
         monotonic_constraints=None,
+        max_pair_interactions=None,
         random_state: int = 42,
     ):
         # scikit-learn convention: __init__ only assigns parameters as-is,
@@ -270,6 +279,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.shrinkage_m = shrinkage_m
         self.stacking_alpha = stacking_alpha
         self.monotonic_constraints = monotonic_constraints
+        self.max_pair_interactions = max_pair_interactions
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -358,6 +368,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 cross_fit_folds=self.cross_fit_folds,
                 shrinkage_m=self.shrinkage_m,
                 monotonic_constraints=self.monotonic_constraints_,
+                max_pair_interactions=self.max_pair_interactions,
             )
             contributions = weak_learner_contributions(X_fit, zone_info, main_effects, interactions, triples)
             # The round's own (sub)sampled rows would otherwise be scored by a

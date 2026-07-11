@@ -7,6 +7,7 @@ from zoneboost._weak_learner import (
     _fit_lasso_weights,
     _make_folds,
     _pair_shrunk_deviation,
+    _screen_pairs,
     _triple_shrunk_deviation,
     _zone_shrunk_deviation,
     weak_learner_contributions,
@@ -190,6 +191,71 @@ def test_high_triple_min_gain_rejects_weak_candidates():
         X, residual, list(X.columns), set(), rng, max_interaction_order=3, triple_min_gain=1e6
     )
     assert triples == {}
+
+
+def test_screen_pairs_keeps_top_k_by_importance():
+    interactions = {
+        ("a", "b"): np.array([[10.0, -10.0]]),  # importance 10
+        ("a", "c"): np.array([[1.0, -1.0]]),  # importance 1
+        ("b", "c"): np.array([[5.0, -5.0]]),  # importance 5
+    }
+    screened = _screen_pairs(interactions, max_pair_interactions=2)
+    assert set(screened.keys()) == {("a", "b"), ("b", "c")}
+
+
+def test_screen_pairs_is_noop_when_cap_is_none():
+    interactions = {("a", "b"): np.array([[1.0]]), ("a", "c"): np.array([[2.0]])}
+    screened = _screen_pairs(interactions, max_pair_interactions=None)
+    assert screened is interactions
+
+
+def test_screen_pairs_is_noop_when_cap_covers_every_pair():
+    interactions = {("a", "b"): np.array([[1.0]]), ("a", "c"): np.array([[2.0]])}
+    screened = _screen_pairs(interactions, max_pair_interactions=5)
+    assert screened is interactions
+
+
+def test_weak_learner_fit_max_pair_interactions_keeps_only_the_strongest_pair():
+    rng = np.random.default_rng(0)
+    n = 600
+    x1 = rng.uniform(-3, 3, n)
+    x2 = rng.uniform(-3, 3, n)
+    noise_cols = {f"n{i}": rng.uniform(-3, 3, n) for i in range(4)}
+    X = pd.DataFrame({"x1": x1, "x2": x2, **noise_cols})
+    y = x1 * x2 + rng.normal(0, 0.1, n)  # only x1*x2 carries real interaction signal
+    residual = y - y.mean()
+
+    fit_rng = np.random.default_rng(1)
+    _, _, interactions, _, _ = weak_learner_fit(
+        X, residual, list(X.columns), set(), fit_rng, max_pair_interactions=1
+    )
+    assert len(interactions) == 1
+    (kept_pair,) = interactions.keys()
+    assert set(kept_pair) == {"x1", "x2"}
+
+
+def test_max_pair_interactions_does_not_affect_triple_selection():
+    # Same setup as test_max_interaction_order_3_finds_the_genuine_triple, but
+    # with max_pair_interactions low enough to drop weak pairs -- triple
+    # selection sees the full, unfiltered interactions dict internally, so
+    # the genuine triple must still be found regardless of pair screening.
+    X, y = _three_way_data()
+    residual = y - y.mean()
+    rng = np.random.default_rng(0)
+    _, _, interactions, triples, _ = weak_learner_fit(
+        X,
+        residual,
+        list(X.columns),
+        set(),
+        rng,
+        max_interaction_order=3,
+        triple_min_gain=0.01,
+        max_pair_interactions=1,
+    )
+    assert len(interactions) == 1
+    assert len(triples) >= 1
+    (key,) = triples.keys()
+    assert set(key) == {"x1", "x2", "x3"}
 
 
 def test_make_folds_covers_every_row_and_is_balanced():
