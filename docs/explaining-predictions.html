@@ -275,6 +275,112 @@ lower, upper = model.predict_diff_interval(X_a, X_b)  # is this pair's differenc
     missing genuine ones, by design — a false "exceeds uncertainty" costs a second look; a
     missed one costs trust in a "governed" editing feature.</p>
 
+    <h2 id="zone-native-counterfactuals">Zone-Native Counterfactuals</h2>
+    <p><code>ZoneBoostRegressor.counterfactual(X, target, actionable, immutable=None,
+    tol=None, n_candidates=200)</code> answers "what's the smallest change to these
+    actionable features that gets the prediction to <code>target</code>?" — computed by
+    directly evaluating the model's own <strong>exact, known</strong> <code>predict()</code>
+    function over a dense grid, not by training a surrogate or searching an opaque black
+    box the way generic counterfactual-explanation tools (DiCE etc.) must:</p>
+    <pre><code>result = model.counterfactual(row, target=pred - 0.10, actionable=["affordability", "income"])
+# Moving 'affordability' from 0.654 to 0.773 would change the prediction
+# by -0.098, assuming other variables remain fixed.</code></pre>
+    <p>Single-feature solutions are always preferred when one alone can reach
+    <code>target</code> within <code>tol</code> — the fewest "zone transitions." A greedy,
+    coordinate-descent-style multi-feature search is the fallback when no single feature
+    suffices (a disclosed heuristic, not a guaranteed joint-optimal minimal change when
+    actionable features genuinely interact).</p>
+    <p>Returns a dict: <code>feasible</code>,
+    <code>original_prediction</code>/<code>counterfactual_prediction</code>/<code>prediction_change</code>,
+    <code>changes</code> (<code>{feature: (original_value, new_value)}</code>),
+    <code>zone_transition_frequency</code> (<code>{feature: fraction}</code> — of the
+    rounds that included this feature, how often its own zone assignment actually
+    changed — the honest "zone transitions" statistic, since zoneboost's zones are
+    re-derived fresh every round, not a single stable index the way EBM's fixed bins
+    would allow), <code>interaction_consequences</code> (<code>{term:
+    contribution_change}</code> from <code>explain(X)</code> vs. <code>explain(X_cf)</code>
+    — the <em>exact</em> decomposition <code>explain</code> already provides, separating a
+    changed feature's own main effect from any interaction it participates in),
+    <code>extrapolating</code>, and <code>evidence</code>
+    (<code>evidence_report</code>'s own output for the counterfactual row if
+    <code>track_reliability=True</code>, else <code>None</code> — "confidence in the
+    counterfactual," reusing evidence reports rather than inventing a new mechanism).</p>
+    <div class="note">
+      <strong>Scope:</strong> regressor only; actionable features must be continuous
+      columns that appeared as a main effect in at least one round. <strong>Deferred:</strong>
+      classifier support, and a guaranteed joint-optimal multi-feature search (the current
+      one is a disclosed greedy heuristic).
+    </div>
+    <p><strong>Measured, honestly</strong>: on data with a genuine <code>x1 × x2</code>
+    interaction (no real main effects), targeting a value neither <code>x1</code> nor
+    <code>x2</code> alone could reach moved <em>both</em> features, and
+    <code>interaction_consequences</code> correctly showed the interaction term
+    dominating the change — not either main effect — matching the true underlying
+    relationship exactly.</p>
+
+    <h2 id="time-based-drift-comparison">Time-Based Drift Comparison</h2>
+    <p><code>compare_models(model_old, model_new, X_eval, y_eval=None)</code> is a
+    top-level function (not a method) that compares two <strong>already-fitted</strong>
+    <code>ZoneBoostRegressor</code> models — e.g. last quarter's model and this
+    quarter's — on a shared evaluation dataset. zoneboost doesn't monitor anything over
+    time or retain training data after <code>fit</code>, so there's no other way to
+    compare "the same rows" across two fits; you retrain each period and call
+    <code>compare_models</code> against the previous model:</p>
+    <pre><code>from zoneboost import compare_models
+
+result = compare_models(model_q1, model_q2, X_q2, y_q2)
+result["feature_importance_change"]
+#                 old       new    change
+# age            0.94      0.56    -0.38
+# age x income    0.60      0.28    -0.32
+# income         2.20      2.12    -0.08</code></pre>
+    <p>Returns a dict:</p>
+    <ul>
+      <li><code>feature_importance_change</code> — a DataFrame indexed by term name
+      (<code>old</code>/<code>new</code>/<code>change</code> columns, outer-joined so a
+      term absent from one model contributes <code>0</code>), sorted by
+      <code>|change|</code> descending — directly the "the interaction lost X% of its
+      importance" statistic.</li>
+      <li><code>new_terms</code>/<code>disappeared_terms</code> — term names present in
+      only one model's <code>feature_importance</code>.</li>
+      <li><code>boundary_shift</code> — <code>{feature: {"old_range", "new_range",
+      "center_shift"}}</code> for every continuous main-effect column present in both
+      models, comparing each model's own <em>observed</em> range (min/max of that
+      column's zone centers across its rounds — the same range <code>counterfactual</code>
+      uses). <strong>This tracks how the column's observed range itself moved, not the
+      location of any particular decision threshold</strong> — a threshold sitting
+      anywhere inside a stable range won't show up here; look at
+      <code>population_migration</code> and <code>feature_importance_change</code> for
+      that instead.</li>
+      <li><code>population_migration</code> — <code>{feature: fraction}</code>: using
+      each model's own <em>last</em> fitted round's zone boundaries (a representative
+      snapshot, not a full per-round history), the fraction of <code>X_eval</code> rows
+      whose hard zone assignment differs between the old and new model — the honest
+      signal for "a boundary moved enough to reclassify rows."</li>
+      <li><code>performance_change</code> — <code>{"rmse_old", "rmse_new"}</code> if
+      <code>y_eval</code> given, else <code>None</code>.</li>
+      <li><code>prediction_shift</code> — <code>{"mean", "std"}</code> of
+      <code>predict_new(X_eval) - predict_old(X_eval)</code>, always available (no
+      <code>y_eval</code> needed).</li>
+    </ul>
+    <div class="note">
+      <strong>Scope:</strong> regressor only (classifier's multiclass, per-class nested
+      <code>rounds_</code> would meaningfully complicate every comparison here —
+      deferred, disclosed); compares exactly two snapshots (call it pairwise across more
+      periods for a longer trend); an aggregate boundary summary, not each model's full
+      per-round boundary provenance.
+    </div>
+    <p><strong>Measured, honestly</strong>: on synthetic data engineered so a risk
+    score's high-income boundary moves from $52k to $61k between two periods and an
+    <code>age x income</code> interaction bump is roughly halved, <code>compare_models</code>
+    reported the interaction term losing <strong>53.8%</strong> of its importance
+    (<code>0.598</code> → <code>0.276</code>) and
+    <code>population_migration["income"]</code> at <strong>0.76</strong> (76% of
+    evaluation rows fall in a different income zone than the old model would have placed
+    them) — <code>boundary_shift["income"]["center_shift"]</code> stayed small (both
+    periods draw income from the same overall range), which is the expected, disclosed
+    limitation above: the <em>threshold</em> moved, not the column's observed range.</p>
+
     <h2 id="vs-shap-lime">How This Differs from SHAP/LIME</h2>
     <ul>
       <li><strong>No sampling.</strong> SHAP and LIME approximate a black-box model by

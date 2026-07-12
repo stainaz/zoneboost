@@ -144,6 +144,21 @@
     <code>bootstrap_models_</code> — the <code>n_bootstrap</code> fitted clones, in
     resampling order.</p>
 
+    <h2 id="compare-models-signature">compare_models Signature</h2>
+    <p><code>compare_models(model_old, model_new, X_eval, y_eval=None)</code> — a
+    top-level function, not a method, comparing two already-fitted
+    <code>ZoneBoostRegressor</code> instances on a shared evaluation dataset. See
+    <a href="explaining-predictions.html#time-based-drift-comparison">Time-Based Drift
+    Comparison</a> for the full return-value reference.</p>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>model_old</code> / <code>model_new</code></td><td>—</td><td>Both already-fitted <code>ZoneBoostRegressor</code> instances (classifier not yet supported)</td></tr>
+        <tr><td><code>X_eval</code></td><td>—</td><td>Shared evaluation data both models can score — every column either model needs, even if only one uses it</td></tr>
+        <tr><td><code>y_eval</code></td><td><code>None</code></td><td>If given, adds <code>performance_change</code> (<code>rmse_old</code>/<code>rmse_new</code>) to the result</td></tr>
+      </tbody>
+    </table>
+
     <h2 id="scope">Scope &amp; Compatibility</h2>
     <p>This estimator targets practical scikit-learn compatibility —
     <code>get_params</code>/<code>set_params</code>/<code>clone</code>, use inside a

@@ -914,3 +914,123 @@ def test_no_edits_reproduces_bit_identical_predictions():
     model_b = ZoneBoostRegressor(n_rounds=40, random_state=0, validation_fraction=0).fit(X, y)
     np.testing.assert_array_equal(model_a.predict(X), model_b.predict(X))
     assert model_a.effect_overrides_ == []
+
+
+def _additive_two_feature_data(n=4000, seed=0):
+    rng = np.random.default_rng(seed)
+    affordability = rng.uniform(0, 1, n)
+    income = rng.uniform(0, 1, n)
+    risk = -0.9 * affordability - 0.4 * income + rng.normal(0, 0.1, n)
+    X = pd.DataFrame({"affordability": affordability, "income": income})
+    return X, risk
+
+
+def test_counterfactual_already_at_target_returns_no_changes():
+    X, y = _additive_two_feature_data()
+    model = ZoneBoostRegressor(n_rounds=40, random_state=0, validation_fraction=0).fit(X, y)
+    row = X.iloc[[0]]
+    pred = model.predict(row)[0]
+    result = model.counterfactual(row, target=pred, actionable=["affordability"])
+    assert result["feasible"] is True
+    assert result["changes"] == {}
+
+
+def test_counterfactual_prefers_single_feature_solution_when_achievable():
+    X, y = _additive_two_feature_data()
+    model = ZoneBoostRegressor(n_rounds=60, random_state=0, validation_fraction=0).fit(X, y)
+    row = X.iloc[[0]]
+    pred = model.predict(row)[0]
+    result = model.counterfactual(row, target=pred - 0.15, actionable=["affordability", "income"])
+    assert result["feasible"] is True
+    assert len(result["changes"]) == 1  # single-feature solution preferred
+
+
+def test_counterfactual_prediction_change_matches_report():
+    X, y = _additive_two_feature_data()
+    model = ZoneBoostRegressor(n_rounds=60, random_state=0, validation_fraction=0).fit(X, y)
+    row = X.iloc[[0]]
+    result = model.counterfactual(row, target=model.predict(row)[0] - 0.15, actionable=["affordability", "income"])
+    assert result["prediction_change"] == pytest.approx(
+        result["counterfactual_prediction"] - result["original_prediction"]
+    )
+
+
+def test_counterfactual_multi_feature_fallback_engages_for_interaction_target():
+    rng = np.random.default_rng(0)
+    n = 4000
+    x1 = rng.uniform(-3, 3, n)
+    x2 = rng.uniform(-3, 3, n)
+    y = x1 * x2 + rng.normal(0, 0.2, n)
+    X = pd.DataFrame({"x1": x1, "x2": x2})
+    model = ZoneBoostRegressor(n_rounds=60, random_state=0, validation_fraction=0, max_zones=6).fit(X, y)
+    row = pd.DataFrame({"x1": [0.1], "x2": [0.1]})
+
+    result = model.counterfactual(row, target=4.0, actionable=["x1", "x2"], tol=0.3)
+    assert result["feasible"] is True
+    assert len(result["changes"]) == 2  # neither feature alone can reach target=4.0
+    # the interaction term should dominate the consequence, since the true
+    # relationship is a pure interaction (y = x1 * x2)
+    assert abs(result["interaction_consequences"]["x1 x x2"]) > abs(
+        result["interaction_consequences"].get("x1", 0.0)
+    )
+    assert abs(result["interaction_consequences"]["x1 x x2"]) > abs(
+        result["interaction_consequences"].get("x2", 0.0)
+    )
+
+
+def test_counterfactual_infeasible_target_reported_honestly():
+    X, y = _additive_two_feature_data()
+    model = ZoneBoostRegressor(n_rounds=40, random_state=0, validation_fraction=0).fit(X, y)
+    row = X.iloc[[0]]
+    result = model.counterfactual(row, target=-100.0, actionable=["affordability"])
+    assert result["feasible"] is False
+
+
+def test_counterfactual_invalid_actionable_feature_raises():
+    X, y = _additive_two_feature_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0, validation_fraction=0).fit(X, y)
+    row = X.iloc[[0]]
+    with pytest.raises(ValueError):
+        model.counterfactual(row, target=0.0, actionable=["nonexistent"])
+
+
+def test_counterfactual_overlapping_actionable_immutable_raises():
+    X, y = _additive_two_feature_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0, validation_fraction=0).fit(X, y)
+    row = X.iloc[[0]]
+    with pytest.raises(ValueError):
+        model.counterfactual(row, target=0.0, actionable=["affordability"], immutable=["affordability"])
+
+
+def test_counterfactual_multi_row_input_raises():
+    X, y = _additive_two_feature_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0, validation_fraction=0).fit(X, y)
+    with pytest.raises(ValueError):
+        model.counterfactual(X.iloc[:2], target=0.0, actionable=["affordability"])
+
+
+def test_counterfactual_zone_transition_frequency_present_for_changed_features():
+    X, y = _additive_two_feature_data()
+    model = ZoneBoostRegressor(n_rounds=60, random_state=0, validation_fraction=0).fit(X, y)
+    row = X.iloc[[0]]
+    result = model.counterfactual(row, target=model.predict(row)[0] - 0.15, actionable=["affordability", "income"])
+    for feat in result["changes"]:
+        assert feat in result["zone_transition_frequency"]
+        assert 0.0 <= result["zone_transition_frequency"][feat] <= 1.0
+
+
+def test_counterfactual_evidence_none_without_track_reliability():
+    X, y = _additive_two_feature_data()
+    model = ZoneBoostRegressor(n_rounds=40, random_state=0, validation_fraction=0).fit(X, y)
+    row = X.iloc[[0]]
+    result = model.counterfactual(row, target=model.predict(row)[0] - 0.15, actionable=["affordability"])
+    assert result["evidence"] is None
+
+
+def test_counterfactual_evidence_present_with_track_reliability():
+    X, y = _additive_two_feature_data()
+    model = ZoneBoostRegressor(n_rounds=40, random_state=0, track_reliability=True, validation_fraction=0).fit(X, y)
+    row = X.iloc[[0]]
+    result = model.counterfactual(row, target=model.predict(row)[0] - 0.15, actionable=["affordability"])
+    assert result["evidence"] is not None
+    assert "evidence_score" in result["evidence"].columns

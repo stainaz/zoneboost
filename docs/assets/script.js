@@ -118,6 +118,7 @@
     { title: "ZoneBoostClassifier Fitted Attributes", crumb: "API Reference", url: "api-reference.html#classifier-attributes" },
     { title: "ConformalizedQuantileRegressor Parameters", crumb: "API Reference", url: "api-reference.html#cqr-parameters" },
     { title: "BootstrapStability Parameters", crumb: "API Reference", url: "api-reference.html#bootstrap-parameters" },
+    { title: "compare_models Signature", crumb: "API Reference", url: "api-reference.html#compare-models-signature" },
     { title: "Scope & Compatibility", crumb: "API Reference", url: "api-reference.html#scope" },
 
     { title: "Explaining Predictions", crumb: "Docs", url: "explaining-predictions.html" },
@@ -128,6 +129,8 @@
     { title: "Bootstrap Stability", crumb: "Explaining Predictions", url: "explaining-predictions.html#bootstrap-stability" },
     { title: "Evidence Report", crumb: "Explaining Predictions", url: "explaining-predictions.html#evidence-report" },
     { title: "Audited Human Editing", crumb: "Explaining Predictions", url: "explaining-predictions.html#audited-human-editing" },
+    { title: "Zone-Native Counterfactuals", crumb: "Explaining Predictions", url: "explaining-predictions.html#zone-native-counterfactuals" },
+    { title: "Time-Based Drift Comparison", crumb: "Explaining Predictions", url: "explaining-predictions.html#time-based-drift-comparison" },
     { title: "How This Differs from SHAP/LIME", crumb: "Explaining Predictions", url: "explaining-predictions.html#vs-shap-lime" },
 
     { title: "Benchmarks", crumb: "Docs", url: "benchmarks.html" },

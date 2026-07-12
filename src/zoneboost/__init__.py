@@ -17,6 +17,7 @@ parameter and attribute reference.
 
 from ._bootstrap import BootstrapStability
 from ._conformal import ConformalizedQuantileRegressor
+from ._drift import compare_models
 from ._version import __version__
 from .classifier import ZoneBoostClassifier
 from .regressor import ZoneBoostRegressor
@@ -26,5 +27,6 @@ __all__ = [
     "ZoneBoostClassifier",
     "ConformalizedQuantileRegressor",
     "BootstrapStability",
+    "compare_models",
     "__version__",
 ]

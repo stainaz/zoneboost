@@ -20,9 +20,10 @@ from ._common import (
     resolve_forbidden_interactions,
     resolve_monotonic_constraints,
 )
+from ._drift import _observed_range as _drift_observed_range
 from ._explain import explain_rounds
 from ._reliability import evidence_report, explain_reliability
-from ._weak_learner import _fit_lasso_weights, weak_learner_contributions, weak_learner_fit
+from ._weak_learner import _column_zone_index, _fit_lasso_weights, weak_learner_contributions, weak_learner_fit
 
 __all__ = ["ZoneBoostRegressor"]
 
@@ -1059,3 +1060,204 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         reflect the original, unedited model again."""
         check_is_fitted(self, "rounds_")
         self.effect_overrides_ = []
+
+    def _observed_range(self, feature) -> tuple:
+        """Min/max of ``feature``'s own zone centers across every round it
+        appeared in as a continuous main effect -- what the model
+        actually has information about, not the column's full theoretical
+        range (the same range :func:`zoneboost._reliability.
+        evidence_report`'s extrapolation check is built on). Thin wrapper
+        around the standalone :func:`zoneboost._drift._observed_range`,
+        shared with :func:`zoneboost._drift.compare_models`."""
+        return _drift_observed_range(self, feature)
+
+    def _zone_transition_frequency(self, feature, old_value: float, new_value: float) -> float:
+        """Of the rounds that included ``feature`` as a continuous main
+        effect, the fraction where its (hard) zone index actually differs
+        between ``old_value`` and ``new_value`` -- the honest "zone
+        transitions" statistic :meth:`counterfactual` reports, given
+        zoneboost's zones are re-derived fresh every round (no single
+        stable zone index to compare across the whole model)."""
+        n_with_feature = 0
+        n_transitions = 0
+        old_series = pd.Series([old_value])
+        new_series = pd.Series([new_value])
+        for round_ in self.rounds_:
+            if feature not in round_["main_effects"]:
+                continue
+            zone_info_col = round_["zone_info"][feature]
+            if zone_info_col[0] != "continuous":
+                continue
+            n_with_feature += 1
+            old_zone = _column_zone_index(old_series, zone_info_col)[0]
+            new_zone = _column_zone_index(new_series, zone_info_col)[0]
+            if old_zone != new_zone:
+                n_transitions += 1
+        return n_transitions / n_with_feature if n_with_feature > 0 else 0.0
+
+    def counterfactual(
+        self, X, target: float, actionable: list, immutable: list = None, tol: float = None,
+        n_candidates: int = 200,
+    ) -> dict:
+        """Zone-native counterfactual search: "what's the smallest change
+        to these actionable features that gets the prediction to
+        `target`?" -- computed by directly evaluating the model's own
+        *exact*, known `predict()` function over a dense grid spanning
+        each actionable feature's own observed range, not by training a
+        surrogate or searching an opaque black box the way generic
+        counterfactual-explanation tools must.
+
+        Single-feature solutions are always preferred when one alone can
+        reach `target` within `tol` (the fewest "zone transitions"); a
+        greedy, coordinate-descent-style multi-feature search is the
+        fallback otherwise -- a disclosed heuristic, not a guaranteed
+        joint-optimal minimal change when actionable features interact.
+
+        **Scope**: a single row; actionable features must be continuous
+        columns that appeared as a main effect in at least one round
+        (raises ``ValueError`` otherwise).
+
+        Parameters
+        ----------
+        X : DataFrame or array-like of shape (1, n_features)
+        target : float
+            The desired prediction value.
+        actionable : list of str
+            Columns allowed to change.
+        immutable : list of str, default=None
+            Purely informational -- everything not in ``actionable`` is
+            already implicitly immutable. Raises ``ValueError`` if it
+            overlaps ``actionable``.
+        tol : float, default=None
+            How close to `target` counts as "close enough". Defaults to
+            ``max(1e-6, 0.05 * abs(target - original_prediction))`` --
+            self-scaling to the size of the gap being closed.
+        n_candidates : int, default=200
+            Grid resolution per actionable feature.
+
+        Returns
+        -------
+        dict with keys:
+            ``feasible`` (bool), ``original_prediction``,
+            ``counterfactual_prediction``, ``prediction_change``.
+            ``changes`` -- ``{feature: (original_value, new_value)}``,
+            only features that actually changed.
+            ``zone_transition_frequency`` -- ``{feature: fraction}``, only
+            for changed features.
+            ``interaction_consequences`` -- ``{term: contribution_change}``
+            from `explain(X)` vs. `explain(X_cf)`, for every term whose
+            contribution changed by more than a tiny epsilon -- the
+            *exact* decomposition `explain` already provides, separating a
+            changed feature's own main effect from any interaction it
+            participates in.
+            ``extrapolating`` -- whether the *original* row already had a
+            changed feature sitting outside its own observed range.
+            ``evidence`` -- :meth:`evidence_report`'s output for the
+            counterfactual row if ``track_reliability=True``, else
+            ``None`` -- "confidence in the counterfactual."
+        """
+        check_is_fitted(self, "rounds_")
+        X = self._ensure_dataframe(X)
+        if len(X) != 1:
+            raise ValueError(f"counterfactual expects a single row, got {len(X)}")
+
+        continuous_cols = self._continuous_main_effect_columns()
+        for feat in actionable:
+            if feat not in continuous_cols:
+                raise ValueError(
+                    f"{feat!r} must be a continuous column that appeared as a main effect in "
+                    "at least one round -- counterfactual only supports continuous main effects."
+                )
+        if immutable:
+            overlap = set(actionable) & set(immutable)
+            if overlap:
+                raise ValueError(f"actionable and immutable overlap: {sorted(overlap)}")
+
+        original_prediction = float(self.predict(X)[0])
+        gap = target - original_prediction
+        tol = tol if tol is not None else max(1e-6, 0.05 * abs(gap))
+
+        working_row = X.copy()
+
+        if abs(gap) > tol:
+            grids = {feat: np.linspace(*self._observed_range(feat), n_candidates) for feat in actionable}
+
+            best_single = None  # (feature, value, relative_change)
+            for feat in actionable:
+                candidates = pd.concat([working_row] * n_candidates, ignore_index=True)
+                candidates[feat] = grids[feat]
+                preds = self.predict(candidates)
+                within_tol = np.abs(preds - target) <= tol
+                if not np.any(within_tol):
+                    continue
+                current_val = float(working_row[feat].iloc[0])
+                grid_range = grids[feat].max() - grids[feat].min()
+                grid_range = grid_range if grid_range > 0 else 1.0
+                candidate_vals = grids[feat][within_tol]
+                rel_changes = np.abs(candidate_vals - current_val) / grid_range
+                best_idx = int(np.argmin(rel_changes))
+                if best_single is None or rel_changes[best_idx] < best_single[2]:
+                    best_single = (feat, float(candidate_vals[best_idx]), float(rel_changes[best_idx]))
+
+            if best_single is not None:
+                feat, val, _ = best_single
+                working_row[feat] = val
+            else:
+                remaining = list(actionable)
+                for _ in range(len(actionable)):
+                    current_pred = float(self.predict(working_row)[0])
+                    if abs(target - current_pred) <= tol or not remaining:
+                        break
+                    best_this_round = None  # (feature, value, resulting_gap)
+                    for feat in remaining:
+                        candidates = pd.concat([working_row] * n_candidates, ignore_index=True)
+                        candidates[feat] = grids[feat]
+                        preds = self.predict(candidates)
+                        idx = int(np.argmin(np.abs(preds - target)))
+                        resulting_gap = float(abs(preds[idx] - target))
+                        if best_this_round is None or resulting_gap < best_this_round[2]:
+                            best_this_round = (feat, float(grids[feat][idx]), resulting_gap)
+                    feat, val, resulting_gap = best_this_round
+                    working_row[feat] = val
+                    remaining.remove(feat)
+
+        X_cf = working_row
+        counterfactual_prediction = float(self.predict(X_cf)[0])
+        feasible = bool(abs(target - counterfactual_prediction) <= tol)
+
+        changes = {}
+        zone_transition_frequency = {}
+        extrapolating = False
+        for feat in actionable:
+            old_val = float(X[feat].iloc[0])
+            new_val = float(X_cf[feat].iloc[0])
+            obs_lo, obs_hi = self._observed_range(feat)
+            if old_val < obs_lo or old_val > obs_hi:
+                extrapolating = True
+            if new_val != old_val:
+                changes[feat] = (old_val, new_val)
+                zone_transition_frequency[feat] = self._zone_transition_frequency(feat, old_val, new_val)
+
+        contrib_orig = self.explain(X)
+        contrib_cf = self.explain(X_cf)
+        interaction_consequences = {}
+        for term in contrib_orig.columns:
+            if term == "baseline":
+                continue
+            delta = float(contrib_cf[term].iloc[0] - contrib_orig[term].iloc[0])
+            if abs(delta) > 1e-9:
+                interaction_consequences[term] = delta
+
+        evidence = self.evidence_report(X_cf) if self.track_reliability else None
+
+        return {
+            "feasible": feasible,
+            "original_prediction": original_prediction,
+            "counterfactual_prediction": counterfactual_prediction,
+            "prediction_change": counterfactual_prediction - original_prediction,
+            "changes": changes,
+            "zone_transition_frequency": zone_transition_frequency,
+            "interaction_consequences": interaction_consequences,
+            "extrapolating": extrapolating,
+            "evidence": evidence,
+        }
