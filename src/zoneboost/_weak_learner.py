@@ -613,7 +613,8 @@ def _cross_fitted_contributions(
     m: float,
     monotonic_constraints: dict = None,
     quantile: float = None,
-) -> np.ndarray:
+    return_fold_std: bool = False,
+):
     """Leakage-free version of what ``weak_learner_contributions`` would
     compute for the exact rows used to build this round's tables: for each
     fold, every term's shrunk deviation is recomputed from the *other*
@@ -640,11 +641,31 @@ def _cross_fitted_contributions(
     ``main_effect_keys`` (both are only ever built from the same
     ``predictor_subset``), so this is always well-defined regardless of
     which pairs a caller's own screening step kept.
+
+    ``return_fold_std`` (default ``False``): when ``True``, also returns a
+    second value, ``{term_key: fold_std_array}`` -- for every term, the
+    elementwise standard deviation (same shape as the term's own deviation
+    array) across the ``n_folds`` per-fold deviation arrays this function
+    already computes internally (no new fold loop -- just retained instead
+    of discarded). A reliability signal: a zone/cell whose shrunk value
+    swings a lot across which fold happened to estimate it is less
+    trustworthy than one that's stable regardless of which rows were held
+    out. `NaN` at any position no fold ever populated with a real
+    (non-prior) estimate is not specially handled -- ``np.std`` naturally
+    reflects however close every fold's prior-shrunk placeholder value was.
     """
     monotonic_constraints = monotonic_constraints or {}
     n = len(residual)
     n_terms = len(main_effect_keys) + len(interaction_keys) + len(triple_keys)
     contributions = np.empty((n, n_terms))
+    fold_devs: dict = {}
+    if return_fold_std:
+        for name in main_effect_keys:
+            fold_devs[name] = []
+        for key in interaction_keys:
+            fold_devs[key] = []
+        for key in triple_keys:
+            fold_devs[key] = []
 
     for k in range(n_folds):
         out_mask = fold_ids != k
@@ -666,6 +687,8 @@ def _cross_fitted_contributions(
                 quantile=quantile,
             )
             main_dev_k[name] = dev
+            if return_fold_std:
+                fold_devs[name].append(dev)
             z_lo, z_hi, w = soft[name]
             contributions[in_mask, col] = _blend_1d(dev, z_lo[in_mask], z_hi[in_mask], w[in_mask])
             col += 1
@@ -688,6 +711,8 @@ def _cross_fitted_contributions(
                 monotonic_a=monotonic_constraints.get(a, 0),
                 monotonic_b=monotonic_constraints.get(b, 0),
             )
+            if return_fold_std:
+                fold_devs[(a, b)].append(dev)
             za_lo, za_hi, wa = soft[a]
             zb_lo, zb_hi, wb = soft[b]
             contributions[in_mask, col] = _blend_2d(
@@ -717,6 +742,8 @@ def _cross_fitted_contributions(
                 monotonic_b=monotonic_constraints.get(b, 0),
                 monotonic_c=monotonic_constraints.get(c, 0),
             )
+            if return_fold_std:
+                fold_devs[(a, b, c)].append(dev)
             za_lo, za_hi, wa = soft[a]
             zb_lo, zb_hi, wb = soft[b]
             zc_lo, zc_hi, wc = soft[c]
@@ -734,7 +761,14 @@ def _cross_fitted_contributions(
             )
             col += 1
 
-    return contributions
+    if not return_fold_std:
+        return contributions
+
+    fold_std = {
+        key: (np.std(np.stack(devs), axis=0) if len(devs) >= 2 else np.zeros_like(devs[0]))
+        for key, devs in fold_devs.items()
+    }
+    return contributions, fold_std
 
 
 def _get_pair(interactions: dict, x: str, y: str):
@@ -1040,6 +1074,7 @@ def weak_learner_fit(
     convexity_constraints: dict = None,
     bounded_effects: dict = None,
     forbidden_interactions: frozenset = frozenset(),
+    track_reliability: bool = False,
 ):
     """Fit one boosting round's weak learner: zone info (adaptive-continuous
     or exact-categorical per column), main effects, interactions, and
@@ -1163,6 +1198,13 @@ def weak_learner_fit(
         exhaustive or screened path), and any 3-way candidate whose three
         constituent pairs include a forbidden one is skipped too -- see
         :func:`_select_triples`.
+    track_reliability : bool, default=False
+        If ``True``, also computes and returns ``diagnostics`` (see below)
+        -- real per-round memory/compute cost (an extra counts array per
+        term, plus reusing the cross-fitting fold loop's own per-fold
+        deviations instead of discarding them), so opt-in like
+        ``adaptive_boundary_smoothing``/``max_pair_interactions``. ``False``
+        (default) is bit-identical to every prior release.
 
     Returns
     -------
@@ -1179,6 +1221,17 @@ def weak_learner_fit(
         Cross-fitted per-term contributions for this round's own rows,
         aligned to ``residual``'s row order and to the column order
         ``weak_learner_contributions`` would produce for the same tables.
+    diagnostics : dict or None
+        ``None`` unless ``track_reliability=True``. Otherwise
+        ``{"main_effects": {col: {"counts": arr, "fold_std": arr_or_None}},
+        "interactions": {(a, b): {...}}, "triples": {(a, b, c): {...}}}`` --
+        ``counts`` is each zone/cell's own row count (same shape as that
+        term's own deviation array); ``fold_std`` is the elementwise
+        standard deviation of that term's shrunk value across the
+        cross-fitting folds (``None`` when ``cross_fit_folds`` effectively
+        falls back to no cross-fitting for this round) -- see
+        :func:`_cross_fitted_contributions`'s ``return_fold_std``. Consumed
+        by :func:`zoneboost._reliability.explain_reliability`.
     """
     monotonic_constraints = monotonic_constraints or {}
     convexity_constraints = convexity_constraints or {}
@@ -1320,8 +1373,25 @@ def weak_learner_fit(
         {pair: interactions_full[pair] for pair in kept_pairs} if kept_pairs is not None else interactions_full
     )
 
+    fold_std = None
     if effective_folds < 2:
         oof_contributions = weak_learner_contributions(X, zone_info, main_effects, interactions, triples)
+    elif track_reliability:
+        oof_contributions, fold_std = _cross_fitted_contributions(
+            zones,
+            soft,
+            n_zones,
+            residual,
+            list(main_effects.keys()),
+            list(interactions.keys()),
+            list(triples.keys()),
+            fold_ids,
+            effective_folds,
+            shrinkage_m,
+            monotonic_constraints,
+            quantile=quantile,
+            return_fold_std=True,
+        )
     else:
         oof_contributions = _cross_fitted_contributions(
             zones,
@@ -1337,7 +1407,42 @@ def weak_learner_fit(
             monotonic_constraints,
             quantile=quantile,
         )
-    return zone_info, main_effects, interactions, triples, oof_contributions
+
+    diagnostics = None
+    if track_reliability:
+        term_counts = {}
+        for col in main_effects:
+            term_counts[col] = np.bincount(zones[col], minlength=n_zones[col]).astype(float)
+        for a, b in interactions:
+            combined = zones[a] * n_zones[b] + zones[b]
+            term_counts[(a, b)] = (
+                np.bincount(combined, minlength=n_zones[a] * n_zones[b])
+                .astype(float)
+                .reshape(n_zones[a], n_zones[b])
+            )
+        for a, b, c in triples:
+            combined = (zones[a] * n_zones[b] + zones[b]) * n_zones[c] + zones[c]
+            term_counts[(a, b, c)] = (
+                np.bincount(combined, minlength=n_zones[a] * n_zones[b] * n_zones[c])
+                .astype(float)
+                .reshape(n_zones[a], n_zones[b], n_zones[c])
+            )
+        diagnostics = {
+            "main_effects": {
+                col: {"counts": term_counts[col], "fold_std": fold_std[col] if fold_std else None}
+                for col in main_effects
+            },
+            "interactions": {
+                key: {"counts": term_counts[key], "fold_std": fold_std[key] if fold_std else None}
+                for key in interactions
+            },
+            "triples": {
+                key: {"counts": term_counts[key], "fold_std": fold_std[key] if fold_std else None}
+                for key in triples
+            },
+        }
+
+    return zone_info, main_effects, interactions, triples, oof_contributions, diagnostics
 
 
 def weak_learner_contributions(

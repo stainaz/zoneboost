@@ -21,6 +21,7 @@ from ._common import (
     resolve_monotonic_constraints,
 )
 from ._explain import explain_rounds
+from ._reliability import evidence_report, explain_reliability
 from ._weak_learner import _fit_lasso_weights, weak_learner_contributions, weak_learner_fit
 
 __all__ = ["ZoneBoostRegressor"]
@@ -269,6 +270,14 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         `fit` if an entry doesn't name exactly 2 distinct columns.
         **Opt-in**: the default (``None``) reproduces the exact same
         predictions as if this parameter didn't exist.
+    track_reliability : bool, default=False
+        If ``True``, each round additionally records, per term, its zone/
+        cell row counts and the standard deviation of its shrunk value
+        across the ``cross_fit_folds`` cross-fitting folds -- consumed by
+        ``explain(X, include_reliability=True)`` (see below) to report how
+        much to trust each contribution, not just its value. Real
+        per-round memory/compute cost, so opt-in; ``False`` (default) is
+        bit-identical to every prior release.
     calibration_fraction : float, default=0.0
         Fraction of training rows held out in a **third**, dedicated split
         purely for calibration (:attr:`conformal_scores_`) -- distinct from
@@ -350,6 +359,12 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         ``calibration_fraction`` split if set, otherwise the validation
         split (see ``calibration_fraction`` above). ``None`` if neither is
         available.
+    effect_overrides_ : list
+        Every edit made via :meth:`edit_effect`, in application order
+        (``[]`` until the first edit) -- ``{"feature": col, "lo": float,
+        "hi": float, "contribution": float}`` per entry. `predict`/
+        `explain` apply these automatically; :meth:`reset_overrides`
+        clears them.
 
     Examples
     --------
@@ -402,6 +417,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         convexity_constraints=None,
         bounded_effects=None,
         forbidden_interactions=None,
+        track_reliability: bool = False,
         calibration_fraction: float = 0.0,
         refit_on_full_data: bool = False,
         random_state: int = 42,
@@ -433,6 +449,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.convexity_constraints = convexity_constraints
         self.bounded_effects = bounded_effects
         self.forbidden_interactions = forbidden_interactions
+        self.track_reliability = track_reliability
         self.calibration_fraction = calibration_fraction
         self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
@@ -549,6 +566,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         else:
             self.conformal_scores_ = None
 
+        self.effect_overrides_ = []
+
         return self
 
     def _baseline_stat(self, y_train: np.ndarray) -> float:
@@ -604,7 +623,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             X_sub = X_train.iloc[row_idx][col_subset]
             residual_sub = residual[row_idx]
 
-            zone_info, main_effects, interactions, triples, oof_contributions = weak_learner_fit(
+            zone_info, main_effects, interactions, triples, oof_contributions, diagnostics = weak_learner_fit(
                 X_sub,
                 residual_sub,
                 col_subset,
@@ -625,6 +644,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 convexity_constraints=self.convexity_constraints_,
                 bounded_effects=self.bounded_effects_,
                 forbidden_interactions=self.forbidden_interactions_,
+                track_reliability=self.track_reliability,
             )
             contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
             # The round's own (sub)sampled rows would otherwise be scored by a
@@ -651,6 +671,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                     "triples": triples,
                     "intercept": intercept,
                     "weights": weights,
+                    "diagnostics": diagnostics,
                 }
             )
             train_rmse.append(self._score(y_train, current_pred))
@@ -682,6 +703,30 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             pred = pred + self.learning_rate * fitted_residual
         return pred
 
+    def _apply_overrides(self, X: pd.DataFrame, contributions: pd.DataFrame) -> pd.DataFrame:
+        """Replaces an overridden main effect's contribution with its
+        override's constant for every row whose raw value falls inside
+        that override's ``[lo, hi]`` -- see :meth:`edit_effect`. Overrides
+        are applied in insertion order, so the *last* override covering a
+        given row wins (supports incremental/corrective edits). Guarantees
+        ``explain(X)`` still sums exactly to ``predict(X)``: the same
+        replacement is applied to the one term's own column, nothing else
+        changes."""
+        if not self.effect_overrides_:
+            return contributions
+        contributions = contributions.copy()
+        touched_features = {ov["feature"] for ov in self.effect_overrides_}
+        for feature in touched_features:
+            raw = np.asarray(X[feature], dtype=float)
+            values = contributions[feature].to_numpy(dtype=float).copy()
+            for ov in self.effect_overrides_:
+                if ov["feature"] != feature:
+                    continue
+                in_range = (raw >= ov["lo"]) & (raw <= ov["hi"])
+                values[in_range] = ov["contribution"]
+            contributions[feature] = values
+        return contributions
+
     def predict(self, X, n_rounds: int = None) -> np.ndarray:
         """Predict target values.
 
@@ -701,6 +746,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         check_is_fitted(self, "rounds_")
         n_rounds = n_rounds if n_rounds is not None else self.best_n_rounds_
         X = self._ensure_dataframe(X)
+        if self.effect_overrides_:
+            return self.explain(X, n_rounds).sum(axis=1).to_numpy()
         return self._raw_predict(X, n_rounds)
 
     def predict_interval(self, X, alpha: float = 0.1) -> tuple:
@@ -758,7 +805,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         margin = self.conformal_scores_[k - 1]
         return point_pred - margin, point_pred + margin
 
-    def explain(self, X, n_rounds: int = None) -> pd.DataFrame:
+    def explain(self, X, n_rounds: int = None, include_reliability: bool = False):
         """Exact per-row, per-term prediction attribution -- not a SHAP/LIME
         -style approximation, but an algebraic decomposition of the same
         computation `predict` performs, so results sum exactly to the
@@ -768,6 +815,13 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         ----------
         X : DataFrame or array-like of shape (n_samples, n_features)
         n_rounds : int, default=None
+        include_reliability : bool, default=False
+            If ``True``, also returns a reliability report: how much to
+            trust each contribution, not just its value. Requires
+            ``track_reliability=True`` at `fit` time for the ``support``/
+            ``shrinkage_fraction``/``cross_fold_std`` columns (raises
+            ``ValueError`` otherwise) -- see :func:`zoneboost._reliability.
+            explain_reliability` for exactly what each column means.
 
         Returns
         -------
@@ -776,12 +830,27 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             own name for its main effect, ``"A x B"`` for an interaction
             pair, ``"A x B x C"`` for a 3-way interaction) plus
             ``"baseline"``. Row sums equal ``predict(X)`` exactly, up to
-            floating-point rounding.
+            floating-point rounding. If ``include_reliability=True``,
+            instead returns a tuple ``(contributions, reliability)`` where
+            ``reliability`` is a ``{term_name: DataFrame}`` dict, one row
+            per row of ``X``, columns ``support``, ``shrinkage_fraction``,
+            ``cross_fold_std``, ``n_rounds_present``, and (continuous main
+            effects only) ``boundary_weight``/``extrapolation_frac``.
         """
         check_is_fitted(self, "rounds_")
         n_rounds = n_rounds if n_rounds is not None else self.best_n_rounds_
         X = self._ensure_dataframe(X)
-        return explain_rounds(X, self.rounds_[:n_rounds], self.baseline_, self.learning_rate)
+        contributions = explain_rounds(X, self.rounds_[:n_rounds], self.baseline_, self.learning_rate)
+        contributions = self._apply_overrides(X, contributions)
+        if not include_reliability:
+            return contributions
+        if not self.track_reliability:
+            raise ValueError(
+                "include_reliability=True requires track_reliability=True at fit time "
+                "(support/shrinkage_fraction/cross_fold_std are only computed then)."
+            )
+        reliability = explain_reliability(X, self.rounds_[:n_rounds], self.shrinkage_m)
+        return contributions, reliability
 
     def feature_importance(self, X, n_rounds: int = None) -> pd.Series:
         """Global importance: each term's mean absolute contribution over
@@ -800,3 +869,193 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         """
         contributions = self.explain(X, n_rounds).drop(columns=["baseline"])
         return contributions.abs().mean().sort_values(ascending=False)
+
+    def evidence_report(self, X, n_rounds: int = None, sparse_threshold: float = None) -> pd.DataFrame:
+        """Per-prediction "evidence quality" summary: combines every term's
+        own reliability (:meth:`explain`'s ``include_reliability=True``)
+        into a single per-row signal for whether *this specific
+        prediction* should be trusted, rather than reporting each term's
+        own reliability separately.
+
+        Requires ``track_reliability=True`` at `fit` time (raises
+        ``ValueError`` otherwise, same precondition as ``explain(X,
+        include_reliability=True)``).
+
+        Parameters
+        ----------
+        X : DataFrame or array-like of shape (n_samples, n_features)
+        n_rounds : int, default=None
+        sparse_threshold : float, default=None
+            Average-``support`` cutoff below which a term's contribution
+            counts as coming from a "sparse" cell. Defaults to
+            ``shrinkage_m`` itself -- the empirical-Bayes half-trust
+            point, where a zone's ``shrinkage_fraction`` is exactly `0.5`.
+
+        Returns
+        -------
+        DataFrame indexed like ``X``, columns ``extrapolating`` (bool),
+        ``unobserved_cell`` (bool), ``pct_contribution_from_sparse_cells``
+        (float, 0-1), ``evidence_score`` (float, 0-1, an honestly
+        disclosed heuristic combination -- not a calibrated statistical
+        score), and ``evidence_quality`` (``"Low"``/``"Medium"``/
+        ``"High"``). See :func:`zoneboost._reliability.evidence_report`.
+        """
+        if not self.track_reliability:
+            raise ValueError(
+                "evidence_report requires track_reliability=True at fit time "
+                "(support/shrinkage_fraction/cross_fold_std are only computed then)."
+            )
+        contrib, reliability = self.explain(X, n_rounds, include_reliability=True)
+        return evidence_report(contrib, reliability, self.shrinkage_m, sparse_threshold)
+
+    def _continuous_main_effect_columns(self) -> set:
+        cols = set()
+        for round_ in self.rounds_:
+            for col in round_["main_effects"]:
+                if round_["zone_info"][col][0] == "continuous":
+                    cols.add(col)
+        return cols
+
+    def edit_effect(self, feature, value_range: tuple, contribution: float, X_eval=None, y_eval=None) -> dict:
+        """Override this column's main-effect contribution to a fixed
+        constant, for every row whose raw value falls in ``value_range``
+        -- "governed" human editing: the edit takes effect immediately
+        (``predict``/``explain`` reflect it from this call onward) and
+        this method returns a report on its consequences, rather than
+        editing silently.
+
+        zoneboost's zones are re-derived fresh every boosting round from
+        that round's own row/column subsample -- there is no single,
+        stable "zone" per column to name across the whole model the way
+        EBM's fixed bins allow. Editing is instead defined on the **raw
+        feature value range**, which is always well-defined regardless of
+        how any given round happened to bin it.
+
+        **Scope**: main effects only (not interactions/triples), and this
+        column must be continuous and have appeared as a main effect in at
+        least one round. Multiple overrides on overlapping ranges: the
+        *last* one applied wins for affected rows.
+
+        Parameters
+        ----------
+        feature : str
+            Must be a continuous column that appeared as a main effect in
+            at least one round (raises ``ValueError`` otherwise).
+        value_range : tuple of (lower, upper)
+            Inclusive on both ends. Raises ``ValueError`` if
+            ``lower > upper``.
+        contribution : float
+            The new, fixed contribution for every affected row.
+        X_eval, y_eval : optional
+            If given, the report includes affected-population and
+            predictive-performance diagnostics measured on this data
+            (never training data the model doesn't retain).
+
+        Returns
+        -------
+        dict with keys:
+            ``affected_rows``/``affected_fraction`` -- count/fraction of
+            ``X_eval`` in ``value_range`` (``None`` if ``X_eval`` not
+            given).
+            ``original_contribution_mean``/``original_contribution_range``
+            -- this term's own contribution stats for affected rows,
+            *before* this edit (``None`` if ``X_eval`` not given).
+            ``contribution_change`` -- ``contribution -
+            original_contribution_mean`` (``None`` if ``X_eval`` not
+            given).
+            ``exceeds_uncertainty`` -- ``True`` if the change exceeds
+            ``2 * mean(cross_fold_std)`` for affected rows -- a disclosed
+            heuristic threshold, not a calibrated test. Requires
+            ``track_reliability=True`` and ``X_eval`` (``None``
+            otherwise); see :class:`zoneboost.BootstrapStability`'s own
+            ``contribution_interval`` for a more rigorous, refit-based
+            check to compare this edit against manually.
+            ``constraint_violation`` -- ``True`` if ``bounded_effects_``
+            declares a bound for this column and ``contribution`` falls
+            outside it (``None`` if no bound is declared for this
+            column). Monotonic-constraint violations are not checked --
+            zoneboost's adaptive, per-round zones don't have a stable
+            enough "neighboring region" concept to check cheaply and
+            honestly.
+            ``rmse_before``/``rmse_after`` -- only if ``y_eval`` given.
+            ``prediction_mean_shift`` -- ``mean(predict_after) -
+            mean(predict_before)`` on ``X_eval`` -- a simple
+            distribution-shift proxy (``None`` if ``X_eval`` not given).
+
+        Deferred: fairness impact (needs a protected-attribute and
+        fairness-metric design of its own) and calibration change
+        (classifier-specific -- ``edit_effect`` is regressor-only for
+        now).
+        """
+        check_is_fitted(self, "rounds_")
+        lower, upper = value_range
+        if lower > upper:
+            raise ValueError(f"value_range's lower bound must be <= upper bound, got {value_range!r}")
+        if feature not in self._continuous_main_effect_columns():
+            raise ValueError(
+                f"{feature!r} must be a continuous column that appeared as a main effect in "
+                "at least one round -- edit_effect only supports continuous main effects."
+            )
+
+        report = {
+            "affected_rows": None,
+            "affected_fraction": None,
+            "original_contribution_mean": None,
+            "original_contribution_range": None,
+            "contribution_change": None,
+            "exceeds_uncertainty": None,
+            "constraint_violation": None,
+            "rmse_before": None,
+            "rmse_after": None,
+            "prediction_mean_shift": None,
+        }
+
+        lower_bound = self.bounded_effects_.get(feature)
+        if lower_bound is not None:
+            b_lower, b_upper = lower_bound
+            report["constraint_violation"] = bool(contribution < b_lower or contribution > b_upper)
+
+        if X_eval is not None:
+            X_eval = self._ensure_dataframe(X_eval)
+            raw = np.asarray(X_eval[feature], dtype=float)
+            mask = (raw >= lower) & (raw <= upper)
+            affected_rows = int(mask.sum())
+            report["affected_rows"] = affected_rows
+            report["affected_fraction"] = affected_rows / len(X_eval)
+
+            pred_before = self.predict(X_eval)
+            if affected_rows > 0:
+                contrib_before = self.explain(X_eval)[feature].to_numpy()[mask]
+                original_mean = float(contrib_before.mean())
+                report["original_contribution_mean"] = original_mean
+                report["original_contribution_range"] = (float(contrib_before.min()), float(contrib_before.max()))
+                report["contribution_change"] = contribution - original_mean
+
+                if self.track_reliability:
+                    _, reliability_before = self.explain(X_eval, include_reliability=True)
+                    fold_std = reliability_before[feature]["cross_fold_std"].to_numpy()[mask]
+                    if not np.all(np.isnan(fold_std)):
+                        threshold = 2 * float(np.nanmean(fold_std))
+                        report["exceeds_uncertainty"] = bool(abs(report["contribution_change"]) > threshold)
+
+        self.effect_overrides_.append(
+            {"feature": feature, "lo": float(lower), "hi": float(upper), "contribution": float(contribution)}
+        )
+
+        if X_eval is not None:
+            pred_after = self.predict(X_eval)
+            report["prediction_mean_shift"] = float(pred_after.mean() - pred_before.mean())
+            if y_eval is not None:
+                y_arr = np.asarray(y_eval, dtype=float).reshape(-1)
+                report["rmse_before"] = float(np.sqrt(np.mean((y_arr - pred_before) ** 2)))
+                report["rmse_after"] = float(np.sqrt(np.mean((y_arr - pred_after) ** 2)))
+
+        return report
+
+    def reset_overrides(self) -> None:
+        """Clears every edit made via :meth:`edit_effect` -- a cheap,
+        reversible safety net, since edits are meant to be governed, not
+        permanent by accident. ``predict``/``explain`` immediately
+        reflect the original, unedited model again."""
+        check_is_fitted(self, "rounds_")
+        self.effect_overrides_ = []

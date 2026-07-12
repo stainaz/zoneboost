@@ -7,6 +7,7 @@ from zoneboost._weak_learner import (
     _column_soft_zone_index,
     _column_zone_index,
     _column_zone_info,
+    _cross_fitted_contributions,
     _estimate_boundary_lambda,
     _fit_lasso_weights,
     _make_folds,
@@ -170,7 +171,7 @@ def test_backfitting_removes_redundant_main_effect_signal_from_pairs():
     X = pd.DataFrame({"x1": x1, "x2": x2})
     residual = y - y.mean()
     fit_rng = np.random.default_rng(1)
-    zone_info, _, interactions, _, _ = weak_learner_fit(X, residual, list(X.columns), set(), fit_rng)
+    zone_info, _, interactions, _, _, _ = weak_learner_fit(X, residual, list(X.columns), set(), fit_rng)
 
     za = _column_zone_index(X["x1"], zone_info["x1"])
     zb = _column_zone_index(X["x2"], zone_info["x2"])
@@ -192,7 +193,7 @@ def test_backfitting_preserves_genuine_interaction_signal():
     X = pd.DataFrame({"x1": x1, "x2": x2})
     residual = y - y.mean()
     fit_rng = np.random.default_rng(1)
-    _, _, interactions, _, _ = weak_learner_fit(X, residual, list(X.columns), set(), fit_rng)
+    _, _, interactions, _, _, _ = weak_learner_fit(X, residual, list(X.columns), set(), fit_rng)
 
     assert _term_importance(interactions[("x1", "x2")]) > 0.5
 
@@ -212,7 +213,7 @@ def test_accepted_triple_stored_value_does_not_leak_lower_order_signal():
     X = pd.DataFrame({"x1": x1, "x2": x2, "x3": x3})
     residual = y - y.mean()
     fit_rng = np.random.default_rng(1)
-    zone_info, _, _, triples, _ = weak_learner_fit(
+    zone_info, _, _, triples, _, _ = weak_learner_fit(
         X, residual, list(X.columns), set(), fit_rng, max_interaction_order=3, triple_min_gain=0.001
     )
     assert len(triples) == 1
@@ -232,7 +233,7 @@ def test_max_interaction_order_2_never_produces_triples():
     X, y = _three_way_data()
     residual = y - y.mean()
     rng = np.random.default_rng(0)
-    _, _, _, triples, _ = weak_learner_fit(X, residual, list(X.columns), set(), rng, max_interaction_order=2)
+    _, _, _, triples, _, _ = weak_learner_fit(X, residual, list(X.columns), set(), rng, max_interaction_order=2)
     assert triples == {}
 
 
@@ -240,7 +241,7 @@ def test_max_interaction_order_3_finds_the_genuine_triple():
     X, y = _three_way_data()
     residual = y - y.mean()
     rng = np.random.default_rng(0)
-    _, _, _, triples, _ = weak_learner_fit(
+    _, _, _, triples, _, _ = weak_learner_fit(
         X, residual, list(X.columns), set(), rng, max_interaction_order=3, triple_min_gain=0.01
     )
     assert len(triples) >= 1
@@ -255,7 +256,7 @@ def test_max_triple_interactions_caps_count_per_round():
     X["x4"] = rng.uniform(-3, 3, len(X))
     X["x5"] = rng.uniform(-3, 3, len(X))
     residual = y - y.mean()
-    _, _, _, triples, _ = weak_learner_fit(
+    _, _, _, triples, _, _ = weak_learner_fit(
         X,
         residual,
         list(X.columns),
@@ -272,7 +273,7 @@ def test_high_triple_min_gain_rejects_weak_candidates():
     X, y = _three_way_data()
     residual = y - y.mean()
     rng = np.random.default_rng(0)
-    _, _, _, triples, _ = weak_learner_fit(
+    _, _, _, triples, _, _ = weak_learner_fit(
         X, residual, list(X.columns), set(), rng, max_interaction_order=3, triple_min_gain=1e6
     )
     assert triples == {}
@@ -326,7 +327,7 @@ def test_weak_learner_fit_max_pair_interactions_keeps_only_the_strongest_pair():
     residual = y - y.mean()
 
     fit_rng = np.random.default_rng(1)
-    _, _, interactions, _, _ = weak_learner_fit(
+    _, _, interactions, _, _, _ = weak_learner_fit(
         X, residual, list(X.columns), set(), fit_rng, max_pair_interactions=1
     )
     assert len(interactions) == 1
@@ -346,7 +347,7 @@ def test_max_pair_interactions_does_not_affect_triple_selection():
     X, y = _three_way_data()
     residual = y - y.mean()
     rng = np.random.default_rng(0)
-    _, _, interactions, triples, _ = weak_learner_fit(
+    _, _, interactions, triples, _, _ = weak_learner_fit(
         X,
         residual,
         list(X.columns),
@@ -386,7 +387,7 @@ def test_oof_contributions_cannot_see_a_rows_own_value_when_every_zone_is_a_sing
     residual = rng.normal(size=n)
 
     fit_rng = np.random.default_rng(1)
-    zone_info, main_effects, interactions, triples, oof_contributions = weak_learner_fit(
+    zone_info, main_effects, interactions, triples, oof_contributions, _ = weak_learner_fit(
         X, residual, ["id"], {"id"}, fit_rng, cross_fit_folds=5, shrinkage_m=m
     )
     in_sample_contributions = weak_learner_contributions(X, zone_info, main_effects, interactions, triples)
@@ -403,7 +404,7 @@ def test_weak_learner_fit_falls_back_without_crashing_when_rows_fewer_than_folds
     X = pd.DataFrame({"x1": rng.uniform(-1, 1, 3)})
     residual = rng.normal(size=3)
     fit_rng = np.random.default_rng(1)
-    zone_info, main_effects, interactions, triples, oof_contributions = weak_learner_fit(
+    zone_info, main_effects, interactions, triples, oof_contributions, _ = weak_learner_fit(
         X, residual, ["x1"], set(), fit_rng, cross_fit_folds=5
     )
     assert oof_contributions.shape == (3, 1)
@@ -568,7 +569,7 @@ def test_weak_learner_fit_adaptive_boundary_smoothing_sharpens_a_genuine_step():
     residual = y - y.mean()
     fit_rng = np.random.default_rng(1)
 
-    zone_info, main_effects, interactions, triples, _ = weak_learner_fit(
+    zone_info, main_effects, interactions, triples, _, _ = weak_learner_fit(
         X, residual, ["x"], set(), fit_rng, max_zones=2, adaptive_boundary_smoothing=True
     )
     assert len(zone_info["x"]) == 4
@@ -586,10 +587,10 @@ def test_weak_learner_fit_adaptive_boundary_smoothing_default_off_reproduces_ful
     X = pd.DataFrame({"x": x})
     residual = y - y.mean()
 
-    zone_info_off, main_off, inter_off, triples_off, _ = weak_learner_fit(
+    zone_info_off, main_off, inter_off, triples_off, _, _ = weak_learner_fit(
         X, residual, ["x"], set(), np.random.default_rng(1), max_zones=2
     )
-    zone_info_on, main_on, inter_on, triples_on, _ = weak_learner_fit(
+    zone_info_on, main_on, inter_on, triples_on, _, _ = weak_learner_fit(
         X, residual, ["x"], set(), np.random.default_rng(1), max_zones=2, adaptive_boundary_smoothing=False
     )
     assert len(zone_info_off["x"]) == 3
@@ -651,7 +652,7 @@ def test_weak_learner_fit_quantile_mode_approximates_target_quantile():
     X = pd.DataFrame({"x": x})
     baseline = float(np.quantile(y, 0.9))
     residual = y - baseline
-    zone_info, main_effects, interactions, triples, _ = weak_learner_fit(
+    zone_info, main_effects, interactions, triples, _, _ = weak_learner_fit(
         X, residual, ["x"], set(), np.random.default_rng(1), quantile=0.9
     )
     contrib = weak_learner_contributions(X, zone_info, main_effects, interactions, triples)
@@ -664,10 +665,10 @@ def test_weak_learner_fit_quantile_none_bit_identical_to_mean_mode():
     x, y = _heteroscedastic_data()
     X = pd.DataFrame({"x": x})
     residual = y - y.mean()
-    zone_info_a, main_a, inter_a, triples_a, oof_a = weak_learner_fit(
+    zone_info_a, main_a, inter_a, triples_a, oof_a, _ = weak_learner_fit(
         X, residual, ["x"], set(), np.random.default_rng(1)
     )
-    zone_info_b, main_b, inter_b, triples_b, oof_b = weak_learner_fit(
+    zone_info_b, main_b, inter_b, triples_b, oof_b, _ = weak_learner_fit(
         X, residual, ["x"], set(), np.random.default_rng(1), quantile=None
     )
     np.testing.assert_array_equal(main_a["x"], main_b["x"])
@@ -834,7 +835,7 @@ def _forbidden_interaction_data(n=3000, seed=0):
 def test_weak_learner_fit_forbidden_interactions_excludes_pair_unscreened():
     X, y = _forbidden_interaction_data()
     forbidden = frozenset({frozenset({"a", "b"})})
-    _, _, interactions, _, _ = weak_learner_fit(
+    _, _, interactions, _, _, _ = weak_learner_fit(
         X, y, ["a", "b", "c"], set(), np.random.default_rng(1), forbidden_interactions=forbidden
     )
     assert ("a", "b") not in interactions and ("b", "a") not in interactions
@@ -844,7 +845,7 @@ def test_weak_learner_fit_forbidden_interactions_excludes_pair_unscreened():
 def test_weak_learner_fit_forbidden_interactions_excludes_pair_screened():
     X, y = _forbidden_interaction_data()
     forbidden = frozenset({frozenset({"a", "b"})})
-    _, _, interactions, _, _ = weak_learner_fit(
+    _, _, interactions, _, _, _ = weak_learner_fit(
         X, y, ["a", "b", "c"], set(), np.random.default_rng(1),
         max_pair_interactions=2, forbidden_interactions=forbidden,
     )
@@ -864,7 +865,7 @@ def test_weak_learner_fit_forbidden_interactions_excludes_triples_containing_pai
     )
     y = (X["a"] * X["b"] * X["c"] + rng.normal(0, 0.3, n)).to_numpy()
     forbidden = frozenset({frozenset({"a", "b"})})
-    _, _, _, triples, _ = weak_learner_fit(
+    _, _, _, triples, _, _ = weak_learner_fit(
         X, y, ["a", "b", "c", "d"], set(), np.random.default_rng(1),
         max_interaction_order=3, forbidden_interactions=forbidden,
     )
@@ -883,3 +884,87 @@ def test_weak_learner_fit_new_shape_constraint_defaults_are_bit_identical():
         np.testing.assert_array_equal(a[1][key], b[1][key])
     for key in a[2]:
         np.testing.assert_array_equal(a[2][key], b[2][key])
+
+
+def _reliability_data(n=2000, seed=0):
+    rng = np.random.default_rng(seed)
+    x1 = rng.uniform(-3, 3, n)
+    x2 = rng.uniform(-3, 3, n)
+    y = x1**2 + x1 * x2 + rng.normal(0, 0.3, n)
+    X = pd.DataFrame({"x1": x1, "x2": x2})
+    return X, y
+
+
+def test_cross_fitted_contributions_return_fold_std_matches_manual_recomputation():
+    X, y = _reliability_data()
+    zone_info = {c: _column_zone_info(X[c], y, False, 7, 0.02) for c in ["x1", "x2"]}
+    n_zones = {c: _column_n_zones(zone_info[c]) for c in ["x1", "x2"]}
+    zones = {c: _column_zone_index(X[c], zone_info[c]) for c in ["x1", "x2"]}
+    soft = {c: _column_soft_zone_index(X[c], zone_info[c]) for c in ["x1", "x2"]}
+    fold_ids = _make_folds(np.random.default_rng(2), len(y), 5)
+
+    contrib, fold_std = _cross_fitted_contributions(
+        zones, soft, n_zones, y, ["x1", "x2"], [("x1", "x2")], [], fold_ids, 5, 10.0, return_fold_std=True
+    )
+    contrib_only = _cross_fitted_contributions(
+        zones, soft, n_zones, y, ["x1", "x2"], [("x1", "x2")], [], fold_ids, 5, 10.0
+    )
+    np.testing.assert_array_equal(contrib, contrib_only)  # return_fold_std doesn't change contributions
+    assert fold_std["x1"].shape == (n_zones["x1"],)
+    assert fold_std[("x1", "x2")].shape == (n_zones["x1"], n_zones["x2"])
+
+    # manual recomputation for the main effect "x1"
+    manual_devs = []
+    for k in range(5):
+        out_mask = fold_ids != k
+        overall = float(y[out_mask].mean())
+        dev = _zone_shrunk_deviation(zones["x1"][out_mask], y[out_mask], overall, n_zones["x1"], 10.0)
+        manual_devs.append(dev)
+    manual_std = np.std(np.stack(manual_devs), axis=0)
+    np.testing.assert_allclose(fold_std["x1"], manual_std)
+
+
+def test_cross_fitted_contributions_return_fold_std_false_returns_single_value():
+    X, y = _reliability_data()
+    zone_info = {c: _column_zone_info(X[c], y, False, 7, 0.02) for c in ["x1"]}
+    n_zones = {c: _column_n_zones(zone_info[c]) for c in ["x1"]}
+    zones = {c: _column_zone_index(X[c], zone_info[c]) for c in ["x1"]}
+    soft = {c: _column_soft_zone_index(X[c], zone_info[c]) for c in ["x1"]}
+    fold_ids = _make_folds(np.random.default_rng(2), len(y), 5)
+    result = _cross_fitted_contributions(zones, soft, n_zones, y, ["x1"], [], [], fold_ids, 5, 10.0)
+    assert isinstance(result, np.ndarray)
+
+
+def test_weak_learner_fit_track_reliability_returns_diagnostics():
+    X, y = _reliability_data()
+    zone_info, main_effects, interactions, triples, oof, diagnostics = weak_learner_fit(
+        X, y, ["x1", "x2"], set(), np.random.default_rng(1), track_reliability=True
+    )
+    assert diagnostics is not None
+    assert set(diagnostics["main_effects"].keys()) == set(main_effects.keys())
+    assert set(diagnostics["interactions"].keys()) == set(interactions.keys())
+    for col in main_effects:
+        assert diagnostics["main_effects"][col]["counts"].shape == main_effects[col].shape
+        assert diagnostics["main_effects"][col]["fold_std"].shape == main_effects[col].shape
+    for key in interactions:
+        assert diagnostics["interactions"][key]["counts"].shape == interactions[key].shape
+    total_support = sum(diagnostics["main_effects"]["x1"]["counts"])
+    assert total_support == pytest.approx(len(y))
+
+
+def test_weak_learner_fit_track_reliability_false_returns_none_diagnostics():
+    X, y = _reliability_data()
+    *_, diagnostics = weak_learner_fit(X, y, ["x1", "x2"], set(), np.random.default_rng(1))
+    assert diagnostics is None
+
+
+def test_weak_learner_fit_track_reliability_default_bit_identical():
+    X, y = _reliability_data()
+    a = weak_learner_fit(X, y, ["x1", "x2"], set(), np.random.default_rng(1))
+    b = weak_learner_fit(X, y, ["x1", "x2"], set(), np.random.default_rng(1), track_reliability=False)
+    for key in a[1]:
+        np.testing.assert_array_equal(a[1][key], b[1][key])
+    for key in a[2]:
+        np.testing.assert_array_equal(a[2][key], b[2][key])
+    np.testing.assert_array_equal(a[4], b[4])
+    assert a[5] is None and b[5] is None

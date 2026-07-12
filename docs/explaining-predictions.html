@@ -79,6 +79,202 @@ contrib.sum(axis=1)                    # == model.predict(X), exactly</code></pr
     additionally applies each class's fitted isotonic calibrator and renormalizes. See
     <a href="how-it-works.html#probability-calibration">Probability Calibration</a>.</p>
 
+    <h2 id="explanation-reliability">Explanation Reliability</h2>
+    <p>A contribution's exact value doesn't say how much to trust it. Fit with
+    <code>track_reliability=True</code> (opt-in — real per-round memory/compute cost,
+    storing an extra counts array and a cross-fold standard-deviation array per term) and
+    <code>explain(X, include_reliability=True)</code> returns a second value alongside the
+    usual contributions:</p>
+    <pre><code>contrib, reliability = model.explain(X, include_reliability=True)
+reliability["shell_weight"]
+#    support  shrinkage_fraction  cross_fold_std  n_rounds_present
+# 0    581.5               0.028           0.004                80</code></pre>
+    <p>Per term, per row (averaged over whichever rounds actually included that term — row/
+    column subsampling and pair screening mean not every round fits every term):</p>
+    <ul>
+      <li><strong><code>support</code></strong> — the row's own zone/cell row count,
+      backing the shrunk value that produced its contribution.</li>
+      <li><strong><code>shrinkage_fraction</code></strong> — the weight the empirical-Bayes
+      prior carried in that shrunk value (<code>shrinkage_m / (count + shrinkage_m)</code>)
+      — near <code>0</code> when a zone has plenty of its own data, near <code>1</code>
+      when it was mostly pulled toward its prior.</li>
+      <li><strong><code>cross_fold_std</code></strong> — how much that zone's shrunk value
+      varied across the <code>cross_fit_folds</code> cross-fitting folds; reuses the same
+      fold loop already built for honest training, rather than adding a new one.</li>
+      <li><strong><code>n_rounds_present</code></strong> — how many of the model's rounds
+      actually fit this term at all.</li>
+      <li><strong><code>boundary_weight</code></strong>/<strong><code>extrapolation_frac</code></strong>
+      (continuous main effects only, no <code>track_reliability</code> required) — how
+      close the row sits to a zone boundary, and what fraction of contributing rounds saw
+      this row's raw value fall outside the zones that round actually fitted.</li>
+    </ul>
+    <p><strong>Measured, honestly</strong>, on synthetic data with a genuine interaction
+    term (so its cells are naturally sparser than either column's own main effect): the
+    main effect <code>shell_weight</code> averaged support 581.5 and shrinkage fraction
+    0.028 (barely shrunk — plenty of its own data); the interaction <code>shell_weight x
+    shucked_weight</code> averaged support 210.8 and shrinkage fraction 0.123 (visibly more
+    shrunk toward its prior) — exactly the pattern a genuine interaction with fewer
+    supporting rows per cell should show. On engineered dense-vs-sparse regions of a single
+    column, <code>extrapolation_frac</code> was <code>1.0</code> for a row far outside the
+    training range and <code>0.0</code> for a typical one.</p>
+    <p>Requires <code>track_reliability=True</code> at <code>fit</code> time for
+    <code>support</code>/<code>shrinkage_fraction</code>/<code>cross_fold_std</code>
+    (raises <code>ValueError</code> otherwise); <code>include_reliability=False</code>
+    (the default) reproduces <code>explain(X)</code>'s exact prior output — verified
+    bit-for-bit. Multiclass: <code>reliability</code> is nested per class the same way
+    contributions already are (<code>{class_label: {term: DataFrame}}</code>), since each
+    class's own softmax booster fits its own zones per round.</p>
+
+    <h2 id="bootstrap-stability">Bootstrap Stability</h2>
+    <p><code>explain(include_reliability=True)</code> reports how much to trust a
+    <strong>single</strong> fit's own contribution. <code>BootstrapStability</code> answers a
+    different question: if you refit on another sample from the same population, how much
+    would this contribution, this term's overall importance, whether a term shows up at
+    all, or a prediction itself actually change?</p>
+    <pre><code>from zoneboost import BootstrapStability, ZoneBoostRegressor
+
+model = BootstrapStability(ZoneBoostRegressor(n_rounds=100), n_bootstrap=30, random_state=0)
+model.fit(X, y)
+
+model.inclusion_frequency()                 # Series: how often each term appears at all
+model.feature_importance_interval(X)        # per-term interval on global importance
+contrib_interval = model.contribution_interval(X)  # {term: DataFrame(lower, upper)}, per row
+lower, upper = model.predict_confidence_interval(X)
+lower, upper = model.predict_diff_interval(X_a, X_b)  # is this pair's difference real?</code></pre>
+    <p>Same meta-estimator pattern as <code>ConformalizedQuantileRegressor</code>: wraps an
+    unfit <code>estimator</code> template, refits it <code>n_bootstrap</code> times on
+    independent bootstrap resamples (rows drawn <strong>with replacement</strong>, the
+    standard nonparametric bootstrap — deliberately different from
+    <code>ConformalizedQuantileRegressor</code>'s without-replacement calibration split), and
+    reports how much each of the above varies across those refits. Real, disclosed cost:
+    <code>n_bootstrap</code> full model refits (default <code>30</code>, not
+    <code>100</code>+, to keep the default reasonable) — a separate wrapper you opt into, not
+    an estimator parameter.</p>
+    <p>Unlike <code>ConformalizedQuantileRegressor</code> (regressor-only, because quantile
+    mode is), <code>BootstrapStability</code> works for both <code>ZoneBoostRegressor</code>
+    and <code>ZoneBoostClassifier</code> — bootstrapping the whole fit procedure has no such
+    restriction. <code>predict_confidence_interval</code>/<code>predict_diff_interval</code>
+    support regressors and <em>binary</em> classifiers (via
+    <code>predict_proba(X)[:, 1]</code>) — a multiclass model has no single scalar per row to
+    bootstrap there, so those two raise <code>ValueError</code>;
+    <code>contribution_interval</code>/<code>feature_importance_interval</code>/
+    <code>inclusion_frequency</code> fully support multiclass (nested per class the same way
+    <code>explain_reliability</code> already nests reliability).</p>
+    <p><code>predict_confidence_interval</code> is named distinctly from
+    <code>predict_interval</code> (already used by <code>ZoneBoostRegressor</code>/
+    <code>ConformalizedQuantileRegressor</code> for <em>conformal</em>, coverage-guaranteed
+    intervals) because it's a genuinely different statement: model/estimation uncertainty
+    from resampling, not a distribution-free coverage guarantee for a future observation of
+    <code>y</code>.</p>
+    <div class="note">
+      <strong>Deferred:</strong> boundary-position uncertainty (how much zone cut points
+      themselves move across bootstrap fits) — different bootstrap fits can produce a
+      different <em>number</em> of zones for the same column, so there's no clean 1:1
+      alignment to summarize without real additional machinery.
+    </div>
+    <p><strong>Measured, honestly</strong>: on synthetic data with one genuine-signal column
+    and several pure-noise columns, <code>feature_importance_interval</code> gave the signal
+    column an interval of <code>[2.19, 2.69]</code>, with every noise column's interval
+    sitting entirely below <code>0.075</code> — no overlap. On data with a genuine
+    <code>a × b</code> interaction (no real main effects) among 15 noise columns, under
+    <code>max_pair_interactions</code> screening, <code>inclusion_frequency</code> gave the
+    genuine interaction <code>0.96</code> (selected in 24 of 25 bootstrap refits) versus a
+    mean of <code>0.32</code> (max <code>0.76</code>) across every spurious pair — a real,
+    honest separation, not a guaranteed one for every dataset.</p>
+
+    <h2 id="evidence-report">Evidence Report</h2>
+    <p><code>explain(include_reliability=True)</code> reports reliability <strong>per
+    term</strong>. <code>evidence_report(X)</code> (requires <code>track_reliability=True</code>
+    at <code>fit</code> time) combines every term behind a specific prediction into one
+    per-row summary — "should <em>this</em> prediction be trusted," not "how reliable is
+    each term separately":</p>
+    <pre><code>model.evidence_report(X)
+#    extrapolating  unobserved_cell  pct_contribution_from_sparse_cells  evidence_score evidence_quality
+# 0          False            False                                0.0             1.0             High
+# 1           True            False                                0.0             0.5              Low</code></pre>
+    <ul>
+      <li><strong><code>extrapolating</code></strong> — <code>True</code> if any continuous
+      main effect's raw value fell outside the zones some contributing round actually
+      fitted (reuses <code>explain_reliability</code>'s own <code>extrapolation_frac</code>
+      directly).</li>
+      <li><strong><code>unobserved_cell</code></strong> — <code>True</code> if any term's
+      average <code>support</code> is below <code>1.0</code> — essentially no training rows
+      ever backed that zone/cell.</li>
+      <li><strong><code>pct_contribution_from_sparse_cells</code></strong> — of this row's
+      total <code>sum(|contribution|)</code>, the fraction contributed by terms whose
+      average <code>support</code> is below <code>sparse_threshold</code> (default:
+      <code>shrinkage_m</code> itself, the empirical-Bayes half-trust point) — directly the
+      "43% of the contribution comes from..." style statistic.</li>
+      <li><strong><code>evidence_score</code></strong>/<strong><code>evidence_quality</code></strong>
+      — <code>1 - pct_contribution_from_sparse_cells</code>, halved again if extrapolating,
+      binned into <code>Low</code>/<code>Medium</code>/<code>High</code> — an honestly
+      disclosed heuristic combination into one number, not a calibrated statistical
+      score.</li>
+    </ul>
+    <p><strong>Measured, honestly</strong>, on synthetic data with a dense region and a
+    small secondary cluster elsewhere in the range: a typical row (<code>x=-2.0</code>,
+    support <code>667.4</code>) scored <code>evidence_score=1.0</code> ("High"); a row in
+    the small secondary cluster (<code>x=5.5</code>, support <code>32.1</code>) scored
+    <code>0.5</code> ("Low"), flagged <code>extrapolating=True</code>. On data with a
+    genuine interaction, a typical row's joint-cell support was <code>232.8</code> ("High"
+    evidence) versus <code>28.0</code> for a sparser joint corner ("Low" evidence) — a real,
+    if imperfect, contrast: which specific signal (extrapolation vs. low cell support)
+    drives a "Low" verdict varies by dataset, exactly as its per-term ingredients would
+    suggest.</p>
+    <p>Multiclass: nested per class (<code>{class_label: DataFrame}</code>), matching
+    <code>explain_reliability</code>'s own nesting — unlike <code>feature_importance</code>
+    (which averages across classes), per-prediction evidence genuinely differs class to
+    class.</p>
+
+    <h2 id="audited-human-editing">Audited Human Editing</h2>
+    <p><code>ZoneBoostRegressor.edit_effect(feature, value_range, contribution,
+    X_eval=None, y_eval=None)</code> lets a domain expert directly override a column's
+    main-effect contribution for a specific input region — but, unlike silent editing,
+    always returns a report on the edit's consequences:</p>
+    <pre><code>report = model.edit_effect("affordability", (0.10, 0.20), contribution=0.25, X_eval=X, y_eval=y)
+# {'affected_rows': 411, 'affected_fraction': 0.103,
+#  'original_contribution_mean': 0.318, 'contribution_change': -0.068,
+#  'exceeds_uncertainty': True, 'constraint_violation': False,
+#  'rmse_before': 0.148, 'rmse_after': 0.150, 'prediction_mean_shift': -0.007}</code></pre>
+    <p><strong>Why "effect", not "zone"</strong>: the roadmap's own sketch
+    (<code>edit_zone(feature=, zone=, contribution=)</code>) assumes EBM-style fixed,
+    stable bins shared across the whole model. zoneboost's zones are <strong>adaptively
+    re-derived every boosting round</strong> from that round's own row/column subsample —
+    there's no single, stable "zone" per column to name across the whole model. Editing is
+    instead defined on the <strong>raw feature value range</strong>, always well-defined
+    regardless of how any given round happened to bin it.</p>
+    <p>The edit takes effect immediately — <code>predict</code>/<code>explain</code>
+    reflect it from that call onward, and <code>explain(X)</code> still sums exactly to
+    <code>predict(X)</code> afterward (the same replacement is applied to the one term's
+    own column, nothing else changes). Multiple overlapping edits: the <em>last</em> one
+    applied wins for affected rows. <code>reset_overrides()</code> clears every edit — a
+    cheap, reversible safety net.</p>
+    <div class="note">
+      <strong>Scope:</strong> regressor only, main effects only (not interactions/
+      triples), continuous columns only. The report covers affected population,
+      contribution change, whether the change exceeds the region's own cross-fold
+      uncertainty (requires <code>track_reliability=True</code>), whether it violates a
+      declared <code>bounded_effects</code> bound, and (with <code>X_eval</code>/
+      <code>y_eval</code>) predictive-performance change and a simple prediction-
+      distribution-shift proxy. <strong>Deferred:</strong> classifier support (multiclass
+      raises the question of <em>which</em> class's log-odds an edit should target — its
+      own design fork), fairness impact (needs a protected-attribute and fairness-metric
+      design of its own), calibration change (classifier-specific), and monotonic-
+      constraint-violation detection (would need a "neighboring un-edited region"
+      comparison zoneboost's adaptive zones don't have a stable enough concept of to
+      check cheaply and honestly).
+    </div>
+    <p><strong>Measured, honestly</strong>: on synthetic data, overriding
+    <code>affordability</code>'s contribution to <code>0.25</code> for values in
+    <code>[0.10, 0.20]</code> (411 affected rows, originally averaging <code>0.318</code>)
+    nudged held-out RMSE from <code>0.148</code> to <code>0.150</code> — a small,
+    plausible cost for a business-rule correction — and was flagged
+    <code>exceeds_uncertainty=True</code>: even this modest a change exceeded twice the
+    region's own cross-fold standard deviation, since ~400 supporting rows produce a
+    fairly tight cross-fold estimate. The mechanism errs toward flagging edits rather than
+    missing genuine ones, by design — a false "exceeds uncertainty" costs a second look; a
+    missed one costs trust in a "governed" editing feature.</p>
+
     <h2 id="vs-shap-lime">How This Differs from SHAP/LIME</h2>
     <ul>
       <li><strong>No sampling.</strong> SHAP and LIME approximate a black-box model by

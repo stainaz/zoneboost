@@ -41,6 +41,7 @@ from ._common import (
     resolve_monotonic_constraints,
 )
 from ._explain import explain_rounds
+from ._reliability import evidence_report, explain_reliability
 from ._weak_learner import _fit_lasso_weights, weak_learner_contributions, weak_learner_fit
 
 __all__ = ["ZoneBoostClassifier"]
@@ -83,7 +84,7 @@ class _LogOddsBooster:
                  cross_fit_folds, shrinkage_m, stacking_alpha, monotonic_constraints,
                  max_pair_interactions, adaptive_boundary_smoothing, boundary_shrinkage_m,
                  convexity_constraints, bounded_effects, forbidden_interactions,
-                 calibrate, refit_on_full_data, random_state):
+                 track_reliability, calibrate, refit_on_full_data, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
         self.row_subsample = row_subsample
@@ -105,6 +106,7 @@ class _LogOddsBooster:
         self.convexity_constraints = convexity_constraints
         self.bounded_effects = bounded_effects
         self.forbidden_interactions = forbidden_interactions
+        self.track_reliability = track_reliability
         self.calibrate = calibrate
         self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
@@ -190,7 +192,7 @@ class _LogOddsBooster:
             X_sub = X_train.iloc[row_idx][col_subset]
             residual_sub = residual[row_idx]
 
-            zone_info, main_effects, interactions, triples, oof_contributions = weak_learner_fit(
+            zone_info, main_effects, interactions, triples, oof_contributions, diagnostics = weak_learner_fit(
                 X_sub, residual_sub, col_subset, self.categorical_features, rng,
                 max_zones=self.max_zones, min_zone_frac=self.min_zone_frac,
                 max_interaction_order=self.max_interaction_order,
@@ -205,6 +207,7 @@ class _LogOddsBooster:
                 convexity_constraints=self.convexity_constraints,
                 bounded_effects=self.bounded_effects,
                 forbidden_interactions=self.forbidden_interactions,
+                track_reliability=self.track_reliability,
             )
             contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
             contributions[row_idx, :] = oof_contributions
@@ -220,6 +223,7 @@ class _LogOddsBooster:
                     "triples": triples,
                     "intercept": intercept,
                     "weights": weights,
+                    "diagnostics": diagnostics,
                 }
             )
 
@@ -275,7 +279,7 @@ class _SoftmaxBooster:
                  cross_fit_folds, shrinkage_m, stacking_alpha, monotonic_constraints,
                  max_pair_interactions, adaptive_boundary_smoothing, boundary_shrinkage_m,
                  convexity_constraints, bounded_effects, forbidden_interactions,
-                 calibrate, refit_on_full_data, random_state):
+                 track_reliability, calibrate, refit_on_full_data, random_state):
         self.n_rounds = n_rounds
         self.learning_rate = learning_rate
         self.row_subsample = row_subsample
@@ -297,6 +301,7 @@ class _SoftmaxBooster:
         self.convexity_constraints = convexity_constraints
         self.bounded_effects = bounded_effects
         self.forbidden_interactions = forbidden_interactions
+        self.track_reliability = track_reliability
         self.calibrate = calibrate
         self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
@@ -397,7 +402,7 @@ class _SoftmaxBooster:
             fitted_residual = np.zeros((n, K))
             for k_idx in range(K):
                 residual_sub_k = residual[row_idx, k_idx]
-                zone_info, main_effects, interactions, triples, oof_contributions = weak_learner_fit(
+                zone_info, main_effects, interactions, triples, oof_contributions, diagnostics = weak_learner_fit(
                     X_sub, residual_sub_k, col_subset, self.categorical_features, rng,
                     max_zones=self.max_zones, min_zone_frac=self.min_zone_frac,
                     max_interaction_order=self.max_interaction_order,
@@ -412,6 +417,7 @@ class _SoftmaxBooster:
                     convexity_constraints=self.convexity_constraints,
                     bounded_effects=self.bounded_effects,
                     forbidden_interactions=self.forbidden_interactions,
+                    track_reliability=self.track_reliability,
                 )
                 contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
                 contributions[row_idx, :] = oof_contributions
@@ -424,6 +430,7 @@ class _SoftmaxBooster:
                     "triples": triples,
                     "intercept": intercept,
                     "weights": weights,
+                    "diagnostics": diagnostics,
                 }
 
             # Identifiability: center this round's K raw outputs to sum to
@@ -601,6 +608,11 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         A list of 2-column name/index pairs that must never be fit as
         pairwise (or 3-way) interactions. Opt-in -- see
         :class:`~zoneboost.ZoneBoostRegressor` for the full description.
+    track_reliability : bool, default=False
+        If ``True``, each round additionally records per-term support
+        counts and cross-fold variability, consumed by ``explain(X,
+        include_reliability=True)``. Opt-in -- see
+        :class:`~zoneboost.ZoneBoostRegressor` for the full description.
     calibrate : bool, default=False
         If ``True``, recalibrate each booster's raw probability with an
         isotonic regression fit on a held-out split, so predicted
@@ -697,6 +709,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         convexity_constraints=None,
         bounded_effects=None,
         forbidden_interactions=None,
+        track_reliability: bool = False,
         calibrate: bool = False,
         calibration_fraction: float = 0.0,
         refit_on_full_data: bool = False,
@@ -724,6 +737,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.convexity_constraints = convexity_constraints
         self.bounded_effects = bounded_effects
         self.forbidden_interactions = forbidden_interactions
+        self.track_reliability = track_reliability
         self.calibrate = calibrate
         self.calibration_fraction = calibration_fraction
         self.refit_on_full_data = refit_on_full_data
@@ -755,6 +769,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             convexity_constraints=self.convexity_constraints_,
             bounded_effects=self.bounded_effects_,
             forbidden_interactions=self.forbidden_interactions_,
+            track_reliability=self.track_reliability,
             calibrate=self.calibrate,
             refit_on_full_data=self.refit_on_full_data,
             random_state=self.random_state,
@@ -783,6 +798,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             convexity_constraints=self.convexity_constraints_,
             bounded_effects=self.bounded_effects_,
             forbidden_interactions=self.forbidden_interactions_,
+            track_reliability=self.track_reliability,
             calibrate=self.calibrate,
             refit_on_full_data=self.refit_on_full_data,
             random_state=self.random_state,
@@ -944,7 +960,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             cumulative += self.learning_rate * round_raw.mean(axis=1)
         return -cumulative
 
-    def explain(self, X, n_rounds: int = None):
+    def explain(self, X, n_rounds: int = None, include_reliability: bool = False):
         """Exact per-row, per-term attribution of each booster's log-odds
         score -- not a SHAP/LIME-style approximation, but an algebraic
         decomposition of the same computation `predict_proba` performs
@@ -970,6 +986,13 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         ----------
         X : DataFrame or array-like of shape (n_samples, n_features)
         n_rounds : int, default=None
+        include_reliability : bool, default=False
+            If ``True``, also returns a reliability report (see
+            :func:`zoneboost._reliability.explain_reliability`). Requires
+            ``track_reliability=True`` at `fit` time (raises `ValueError`
+            otherwise). Multiclass: one reliability dict per class (same
+            nesting as the contributions themselves), since each class's
+            own softmax booster fits its own zones per round.
 
         Returns
         -------
@@ -978,11 +1001,23 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             ``"_softmax_centering"``). Binary: a single DataFrame for the
             positive class's (``classes_[-1]``) log-odds score. Multiclass:
             one DataFrame per class, from the shared joint softmax booster.
+            If ``include_reliability=True``, instead returns a tuple
+            ``(contributions, reliability)``.
         """
         check_is_fitted(self, "classes_")
         X = self._ensure_dataframe(X)
         if not self.multiclass_:
-            return self._explain_one(self.booster_, X, n_rounds)
+            contributions = self._explain_one(self.booster_, X, n_rounds)
+            if not include_reliability:
+                return contributions
+            if not self.track_reliability:
+                raise ValueError(
+                    "include_reliability=True requires track_reliability=True at fit time "
+                    "(support/shrinkage_fraction/cross_fold_std are only computed then)."
+                )
+            nr = n_rounds if n_rounds is not None else self.booster_.best_n_rounds_
+            reliability = explain_reliability(X, self.booster_.rounds_[:nr], self.shrinkage_m)
+            return contributions, reliability
 
         booster = self.softmax_booster_
         n_rounds = n_rounds if n_rounds is not None else booster.best_n_rounds_
@@ -995,7 +1030,19 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             df = explain_rounds(X, per_class_rounds, float(booster.baseline_[k_idx]), self.learning_rate)
             df["_softmax_centering"] = centering
             result[k] = df
-        return result
+        if not include_reliability:
+            return result
+
+        if not self.track_reliability:
+            raise ValueError(
+                "include_reliability=True requires track_reliability=True at fit time "
+                "(support/shrinkage_fraction/cross_fold_std are only computed then)."
+            )
+        reliability = {}
+        for k_idx, k in enumerate(self.classes_):
+            per_class_rounds = [round_tables[k_idx] for round_tables in rounds]
+            reliability[k] = explain_reliability(X, per_class_rounds, self.shrinkage_m)
+        return result, reliability
 
     def feature_importance(self, X, n_rounds: int = None) -> pd.Series:
         """Global importance: each term's mean absolute log-odds
@@ -1021,3 +1068,49 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
             df.drop(columns=["baseline", "_softmax_centering"]).abs().mean() for df in explanation.values()
         ]
         return pd.concat(per_class, axis=1).mean(axis=1).sort_values(ascending=False)
+
+    def evidence_report(self, X, n_rounds: int = None, sparse_threshold: float = None):
+        """Per-prediction "evidence quality" summary: combines every term's
+        own reliability (:meth:`explain`'s ``include_reliability=True``)
+        into a single per-row signal for whether *this specific
+        prediction* should be trusted, rather than reporting each term's
+        own reliability separately.
+
+        Requires ``track_reliability=True`` at `fit` time (raises
+        ``ValueError`` otherwise, same precondition as ``explain(X,
+        include_reliability=True)``).
+
+        Parameters
+        ----------
+        X : DataFrame or array-like of shape (n_samples, n_features)
+        n_rounds : int, default=None
+        sparse_threshold : float, default=None
+            Average-``support`` cutoff below which a term's contribution
+            counts as coming from a "sparse" cell. Defaults to
+            ``shrinkage_m`` itself -- the empirical-Bayes half-trust
+            point, where a zone's ``shrinkage_fraction`` is exactly `0.5`.
+
+        Returns
+        -------
+        DataFrame, or dict of {class_label: DataFrame} if 3+ classes
+            Columns ``extrapolating`` (bool), ``unobserved_cell`` (bool),
+            ``pct_contribution_from_sparse_cells`` (float, 0-1),
+            ``evidence_score`` (float, 0-1, an honestly disclosed
+            heuristic combination -- not a calibrated statistical score),
+            and ``evidence_quality`` (``"Low"``/``"Medium"``/``"High"``).
+            Multiclass: nested per class, since each class has its own
+            softmax booster and its own zones per round -- unlike
+            ``feature_importance``, which averages across classes.
+            See :func:`zoneboost._reliability.evidence_report`.
+        """
+        if not self.track_reliability:
+            raise ValueError(
+                "evidence_report requires track_reliability=True at fit time "
+                "(support/shrinkage_fraction/cross_fold_std are only computed then)."
+            )
+        contrib, reliability = self.explain(X, n_rounds, include_reliability=True)
+        if not self.multiclass_:
+            return evidence_report(contrib, reliability, self.shrinkage_m, sparse_threshold)
+        return {
+            k: evidence_report(contrib[k], reliability[k], self.shrinkage_m, sparse_threshold) for k in contrib
+        }

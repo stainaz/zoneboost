@@ -656,3 +656,261 @@ def test_forbidden_interactions_invalid_pair_raises():
     X, y = _forbidden_interaction_regressor_data()
     with pytest.raises(ValueError):
         ZoneBoostRegressor(n_rounds=10, forbidden_interactions=[("a", "a")]).fit(X, y)
+
+
+def _dense_and_sparse_data(n=4000, seed=0):
+    rng = np.random.default_rng(seed)
+    x_dense = rng.uniform(0, 5, int(n * 0.97))
+    x_sparse = rng.uniform(20, 25, int(n * 0.03))
+    x = np.concatenate([x_dense, x_sparse])
+    y = x + rng.normal(0, 0.5, len(x))
+    X = pd.DataFrame({"x": x})
+    return X, y
+
+
+def test_explain_include_reliability_requires_track_reliability_at_fit_time():
+    X, y = _dense_and_sparse_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0).fit(X, y)
+    with pytest.raises(ValueError):
+        model.explain(X, include_reliability=True)
+
+
+def test_explain_include_reliability_default_false_bit_identical():
+    X, y = _dense_and_sparse_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0, track_reliability=True).fit(X, y)
+    contrib_default = model.explain(X)
+    contrib_explicit = model.explain(X, include_reliability=False)
+    np.testing.assert_array_equal(contrib_default.to_numpy(), contrib_explicit.to_numpy())
+
+
+def test_reliability_well_supported_zone_vs_sparse_zone():
+    X, y = _dense_and_sparse_data()
+    model = ZoneBoostRegressor(n_rounds=40, random_state=0, track_reliability=True, max_zones=5).fit(X, y)
+    _, reliability = model.explain(X, include_reliability=True)
+    rel = reliability["x"]
+    dense_mask = (X["x"] < 5).to_numpy()
+    sparse_mask = (X["x"] > 20).to_numpy()
+
+    assert rel.loc[dense_mask, "support"].mean() > rel.loc[sparse_mask, "support"].mean()
+    # shrinkage_fraction = weight on the prior -- high for sparse (heavily
+    # shrunk), low for well-supported (barely shrunk, trusted from data).
+    assert rel.loc[dense_mask, "shrinkage_fraction"].mean() < rel.loc[sparse_mask, "shrinkage_fraction"].mean()
+    assert rel.loc[dense_mask, "cross_fold_std"].mean() < rel.loc[sparse_mask, "cross_fold_std"].mean()
+    assert (rel["n_rounds_present"] > 0).all()
+
+
+def test_reliability_extrapolation_frac_flags_far_out_of_range_rows():
+    X, y = _dense_and_sparse_data()
+    model = ZoneBoostRegressor(n_rounds=40, random_state=0, track_reliability=True, max_zones=5).fit(X, y)
+    far_row = pd.DataFrame({"x": [1000.0]})
+    typical_row = pd.DataFrame({"x": [2.5]})
+    _, rel_far = model.explain(far_row, include_reliability=True)
+    _, rel_typical = model.explain(typical_row, include_reliability=True)
+    assert rel_far["x"]["extrapolation_frac"].iloc[0] == 1.0
+    assert rel_typical["x"]["extrapolation_frac"].iloc[0] == 0.0
+
+
+def test_reliability_boundary_weight_higher_near_boundary_than_at_centroid():
+    rng = np.random.default_rng(0)
+    n = 3000
+    x = rng.uniform(0, 10, n)
+    y = x + rng.normal(0, 0.3, n)
+    X = pd.DataFrame({"x": x})
+    model = ZoneBoostRegressor(n_rounds=30, random_state=0, track_reliability=True, max_zones=4).fit(X, y)
+
+    # find a zone's centroid via the last round's zone_info, then compare a
+    # row placed exactly there against one placed far toward a neighbor.
+    zone_info = model.rounds_[-1]["zone_info"]["x"]
+    centers = zone_info[2]
+    at_centroid = pd.DataFrame({"x": [float(centers[0])]})
+    boundaries = zone_info[1]
+    near_boundary = pd.DataFrame({"x": [float(boundaries[0]) - 1e-6]})
+
+    _, rel_centroid = model.explain(at_centroid, include_reliability=True)
+    _, rel_boundary = model.explain(near_boundary, include_reliability=True)
+    assert rel_centroid["x"]["boundary_weight"].iloc[0] < rel_boundary["x"]["boundary_weight"].iloc[0]
+
+
+def test_reliability_pair_term_present():
+    rng = np.random.default_rng(0)
+    n = 2000
+    x1 = rng.uniform(-3, 3, n)
+    x2 = rng.uniform(-3, 3, n)
+    y = x1 * x2 + rng.normal(0, 0.3, n)
+    X = pd.DataFrame({"x1": x1, "x2": x2})
+    model = ZoneBoostRegressor(n_rounds=30, random_state=0, track_reliability=True).fit(X, y)
+    _, reliability = model.explain(X, include_reliability=True)
+    assert "x1 x x2" in reliability
+    assert (reliability["x1 x x2"]["support"] > 0).all()
+
+
+def test_evidence_report_requires_track_reliability():
+    X, y = _dense_and_sparse_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0).fit(X, y)
+    with pytest.raises(ValueError):
+        model.evidence_report(X)
+
+
+def test_evidence_report_columns_present():
+    X, y = _dense_and_sparse_data()
+    model = ZoneBoostRegressor(n_rounds=30, random_state=0, track_reliability=True, max_zones=5).fit(X, y)
+    report = model.evidence_report(X.iloc[:5])
+    for col in ["extrapolating", "unobserved_cell", "pct_contribution_from_sparse_cells", "evidence_score", "evidence_quality"]:
+        assert col in report.columns
+
+
+def test_evidence_report_typical_row_scores_higher_than_out_of_range_row():
+    rng = np.random.default_rng(0)
+    n_dense = 2900
+    n_gap = 20
+    x_dense = rng.uniform(-5, 0, n_dense)
+    x_gap = rng.uniform(5, 6, n_gap)
+    x = np.concatenate([x_dense, x_gap])
+    y = x + rng.normal(0, 0.3, len(x))
+    X = pd.DataFrame({"x": x})
+    model = ZoneBoostRegressor(n_rounds=50, random_state=0, track_reliability=True, max_zones=6).fit(X, y)
+
+    typical_row = pd.DataFrame({"x": [-2.0]})
+    gap_row = pd.DataFrame({"x": [5.5]})
+
+    typical_report = model.evidence_report(typical_row)
+    gap_report = model.evidence_report(gap_row)
+    assert typical_report["evidence_score"].iloc[0] > gap_report["evidence_score"].iloc[0]
+    assert gap_report["extrapolating"].iloc[0]
+    assert typical_report["evidence_quality"].iloc[0] == "High"
+    assert gap_report["evidence_quality"].iloc[0] == "Low"
+
+
+def _linear_data(n=3000, seed=0):
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(-5, 5, n)
+    y = x + rng.normal(0, 0.5, n)
+    X = pd.DataFrame({"x": x})
+    return X, y
+
+
+def test_edit_effect_overrides_only_affected_rows():
+    X, y = _linear_data()
+    model = ZoneBoostRegressor(n_rounds=40, random_state=0, validation_fraction=0).fit(X, y)
+    contrib_before = model.explain(X)
+
+    model.edit_effect("x", (2.0, 3.0), contribution=10.0)
+    contrib_after = model.explain(X)
+
+    mask = ((X["x"] >= 2.0) & (X["x"] <= 3.0)).to_numpy()
+    assert (contrib_after.loc[mask, "x"] == 10.0).all()
+    np.testing.assert_array_equal(contrib_after.loc[~mask, "x"].to_numpy(), contrib_before.loc[~mask, "x"].to_numpy())
+
+
+def test_edit_effect_explain_still_sums_exactly_to_predict():
+    X, y = _linear_data()
+    model = ZoneBoostRegressor(n_rounds=40, random_state=0, validation_fraction=0).fit(X, y)
+    model.edit_effect("x", (2.0, 3.0), contribution=10.0)
+    contrib = model.explain(X)
+    pred = model.predict(X)
+    np.testing.assert_allclose(contrib.sum(axis=1).to_numpy(), pred, atol=1e-9)
+
+
+def test_edit_effect_last_applied_wins_for_overlapping_ranges():
+    X, y = _linear_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0, validation_fraction=0).fit(X, y)
+    model.edit_effect("x", (0.0, 5.0), contribution=100.0)
+    model.edit_effect("x", (2.0, 3.0), contribution=50.0)
+    contrib = model.explain(X)
+
+    overlap_mask = ((X["x"] >= 2.0) & (X["x"] <= 3.0)).to_numpy()
+    first_only_mask = ((X["x"] >= 0.0) & (X["x"] < 2.0)).to_numpy()
+    assert (contrib.loc[overlap_mask, "x"] == 50.0).all()
+    assert (contrib.loc[first_only_mask, "x"] == 100.0).all()
+
+
+def test_reset_overrides_restores_original_predictions():
+    X, y = _linear_data()
+    model = ZoneBoostRegressor(n_rounds=40, random_state=0, validation_fraction=0).fit(X, y)
+    pred_before = model.predict(X)
+    model.edit_effect("x", (2.0, 3.0), contribution=10.0)
+    assert not np.allclose(pred_before, model.predict(X))
+    model.reset_overrides()
+    np.testing.assert_array_equal(pred_before, model.predict(X))
+
+
+def test_edit_effect_invalid_feature_raises():
+    X, y = _linear_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0, validation_fraction=0).fit(X, y)
+    with pytest.raises(ValueError):
+        model.edit_effect("nonexistent", (0.0, 1.0), contribution=5.0)
+
+
+def test_edit_effect_invalid_range_raises():
+    X, y = _linear_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0, validation_fraction=0).fit(X, y)
+    with pytest.raises(ValueError):
+        model.edit_effect("x", (5.0, 1.0), contribution=5.0)
+
+
+def test_edit_effect_categorical_feature_raises():
+    X, y = _synthetic_regression()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0, categorical_features=["cat"]).fit(X, y)
+    with pytest.raises(ValueError):
+        model.edit_effect("cat", (0.0, 1.0), contribution=5.0)
+
+
+def test_edit_effect_report_fields_with_eval_data():
+    X, y = _linear_data()
+    model = ZoneBoostRegressor(n_rounds=40, random_state=0, track_reliability=True, validation_fraction=0).fit(X, y)
+    report = model.edit_effect("x", (2.0, 3.0), contribution=10.0, X_eval=X, y_eval=y)
+
+    mask = ((X["x"] >= 2.0) & (X["x"] <= 3.0)).to_numpy()
+    assert report["affected_rows"] == int(mask.sum())
+    assert report["affected_fraction"] == pytest.approx(mask.sum() / len(X))
+    assert report["contribution_change"] == pytest.approx(10.0 - report["original_contribution_mean"])
+    assert report["rmse_before"] is not None and report["rmse_after"] is not None
+    assert report["rmse_after"] > report["rmse_before"]  # a deliberately bad edit should hurt RMSE
+    assert report["prediction_mean_shift"] is not None
+    assert report["exceeds_uncertainty"] is True  # a huge, deliberate edit
+
+
+def test_edit_effect_report_fields_none_without_eval_data():
+    X, y = _linear_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0, validation_fraction=0).fit(X, y)
+    report = model.edit_effect("x", (2.0, 3.0), contribution=10.0)
+    assert report["affected_rows"] is None
+    assert report["rmse_before"] is None
+    assert report["prediction_mean_shift"] is None
+
+
+def test_edit_effect_exceeds_uncertainty_none_without_track_reliability():
+    X, y = _linear_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0, validation_fraction=0).fit(X, y)
+    report = model.edit_effect("x", (2.0, 3.0), contribution=10.0, X_eval=X)
+    assert report["exceeds_uncertainty"] is None
+
+
+def test_edit_effect_constraint_violation_checks_bounded_effects():
+    X, y = _linear_data()
+    model = ZoneBoostRegressor(
+        n_rounds=20, random_state=0, validation_fraction=0, bounded_effects={"x": (-3.0, 3.0)}
+    ).fit(X, y)
+    violating = model.edit_effect("x", (1.0, 2.0), contribution=10.0)
+    assert violating["constraint_violation"] is True
+
+    model2 = ZoneBoostRegressor(
+        n_rounds=20, random_state=0, validation_fraction=0, bounded_effects={"x": (-3.0, 3.0)}
+    ).fit(X, y)
+    compliant = model2.edit_effect("x", (1.0, 2.0), contribution=2.5)
+    assert compliant["constraint_violation"] is False
+
+
+def test_edit_effect_constraint_violation_none_without_bounded_effects():
+    X, y = _linear_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0, validation_fraction=0).fit(X, y)
+    report = model.edit_effect("x", (1.0, 2.0), contribution=10.0)
+    assert report["constraint_violation"] is None
+
+
+def test_no_edits_reproduces_bit_identical_predictions():
+    X, y = _linear_data()
+    model_a = ZoneBoostRegressor(n_rounds=40, random_state=0, validation_fraction=0).fit(X, y)
+    model_b = ZoneBoostRegressor(n_rounds=40, random_state=0, validation_fraction=0).fit(X, y)
+    np.testing.assert_array_equal(model_a.predict(X), model_b.predict(X))
+    assert model_a.effect_overrides_ == []

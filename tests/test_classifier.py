@@ -405,3 +405,78 @@ def test_shape_constraint_defaults_reproduce_bit_identical_predictions_multiclas
         convexity_constraints=None, bounded_effects=None, forbidden_interactions=None,
     ).fit(X, y)
     np.testing.assert_array_equal(model_default.predict_proba(X), model_explicit.predict_proba(X))
+
+
+def test_binary_explain_include_reliability_requires_track_reliability():
+    X, y = _binary_data()
+    model = ZoneBoostClassifier(n_rounds=20, random_state=0).fit(X, y)
+    with pytest.raises(ValueError):
+        model.explain(X, include_reliability=True)
+
+
+def test_binary_explain_include_reliability_returns_tuple_with_expected_columns():
+    X, y = _binary_data()
+    model = ZoneBoostClassifier(n_rounds=20, random_state=0, track_reliability=True).fit(X, y)
+    contrib, reliability = model.explain(X, include_reliability=True)
+    assert isinstance(contrib, pd.DataFrame)
+    for col in ["x1", "x2"]:
+        assert col in reliability
+        for metric in ["support", "shrinkage_fraction", "cross_fold_std", "n_rounds_present"]:
+            assert metric in reliability[col].columns
+
+
+def test_binary_explain_include_reliability_default_false_bit_identical():
+    X, y = _binary_data()
+    model = ZoneBoostClassifier(n_rounds=20, random_state=0, track_reliability=True).fit(X, y)
+    contrib_default = model.explain(X)
+    contrib_explicit = model.explain(X, include_reliability=False)
+    np.testing.assert_array_equal(contrib_default.to_numpy(), contrib_explicit.to_numpy())
+
+
+def test_multiclass_explain_include_reliability_requires_track_reliability():
+    X, y = _multiclass_data()
+    model = ZoneBoostClassifier(n_rounds=15, random_state=0).fit(X, y)
+    with pytest.raises(ValueError):
+        model.explain(X, include_reliability=True)
+
+
+def test_multiclass_explain_include_reliability_returns_per_class_dicts():
+    X, y = _multiclass_data()
+    model = ZoneBoostClassifier(n_rounds=15, random_state=0, track_reliability=True).fit(X, y)
+    contrib, reliability = model.explain(X, include_reliability=True)
+    assert set(reliability.keys()) == set(model.classes_)
+    for k in model.classes_:
+        assert isinstance(contrib[k], pd.DataFrame)
+        assert "x1" in reliability[k]
+        assert (reliability[k]["x1"]["support"] > 0).all()
+
+
+def test_binary_evidence_report_requires_track_reliability():
+    X, y = _binary_data()
+    model = ZoneBoostClassifier(n_rounds=15, random_state=0).fit(X, y)
+    with pytest.raises(ValueError):
+        model.evidence_report(X)
+
+
+def test_binary_evidence_report_columns_present():
+    X, y = _binary_data()
+    model = ZoneBoostClassifier(n_rounds=20, random_state=0, track_reliability=True).fit(X, y)
+    report = model.evidence_report(X.iloc[:5])
+    for col in ["extrapolating", "unobserved_cell", "pct_contribution_from_sparse_cells", "evidence_score", "evidence_quality"]:
+        assert col in report.columns
+
+
+def test_multiclass_evidence_report_requires_track_reliability():
+    X, y = _multiclass_data()
+    model = ZoneBoostClassifier(n_rounds=12, random_state=0).fit(X, y)
+    with pytest.raises(ValueError):
+        model.evidence_report(X)
+
+
+def test_multiclass_evidence_report_nested_per_class():
+    X, y = _multiclass_data()
+    model = ZoneBoostClassifier(n_rounds=12, random_state=0, track_reliability=True).fit(X, y)
+    report = model.evidence_report(X.iloc[:5])
+    assert set(report.keys()) == set(model.classes_)
+    for k in model.classes_:
+        assert "evidence_score" in report[k].columns

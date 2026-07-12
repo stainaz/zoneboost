@@ -117,12 +117,17 @@
     { title: "ZoneBoostRegressor Fitted Attributes", crumb: "API Reference", url: "api-reference.html#regressor-attributes" },
     { title: "ZoneBoostClassifier Fitted Attributes", crumb: "API Reference", url: "api-reference.html#classifier-attributes" },
     { title: "ConformalizedQuantileRegressor Parameters", crumb: "API Reference", url: "api-reference.html#cqr-parameters" },
+    { title: "BootstrapStability Parameters", crumb: "API Reference", url: "api-reference.html#bootstrap-parameters" },
     { title: "Scope & Compatibility", crumb: "API Reference", url: "api-reference.html#scope" },
 
     { title: "Explaining Predictions", crumb: "Docs", url: "explaining-predictions.html" },
     { title: "explain(X)", crumb: "Explaining Predictions", url: "explaining-predictions.html#explain" },
     { title: "feature_importance(X)", crumb: "Explaining Predictions", url: "explaining-predictions.html#feature-importance" },
     { title: "Classification Semantics", crumb: "Explaining Predictions", url: "explaining-predictions.html#classification-semantics" },
+    { title: "Explanation Reliability", crumb: "Explaining Predictions", url: "explaining-predictions.html#explanation-reliability" },
+    { title: "Bootstrap Stability", crumb: "Explaining Predictions", url: "explaining-predictions.html#bootstrap-stability" },
+    { title: "Evidence Report", crumb: "Explaining Predictions", url: "explaining-predictions.html#evidence-report" },
+    { title: "Audited Human Editing", crumb: "Explaining Predictions", url: "explaining-predictions.html#audited-human-editing" },
     { title: "How This Differs from SHAP/LIME", crumb: "Explaining Predictions", url: "explaining-predictions.html#vs-shap-lime" },
 
     { title: "Benchmarks", crumb: "Docs", url: "benchmarks.html" },
