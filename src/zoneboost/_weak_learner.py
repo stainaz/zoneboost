@@ -1075,6 +1075,7 @@ def weak_learner_fit(
     bounded_effects: dict = None,
     forbidden_interactions: frozenset = frozenset(),
     track_reliability: bool = False,
+    group_col: str = None,
 ):
     """Fit one boosting round's weak learner: zone info (adaptive-continuous
     or exact-categorical per column), main effects, interactions, and
@@ -1205,6 +1206,20 @@ def weak_learner_fit(
         deviations instead of discarding them), so opt-in like
         ``adaptive_boundary_smoothing``/``max_pair_interactions``. ``False``
         (default) is bit-identical to every prior release.
+    group_col : str, default=None
+        Designates a column as a hierarchical grouping key (e.g. hospital,
+        region): every ``(feature, group_col)`` pair present in
+        ``predictor_subset`` is forced into ``interactions`` regardless of
+        ``max_pair_interactions`` screening, reusing
+        :func:`_pair_shrunk_deviation`'s existing hierarchical-prior
+        shrinkage unchanged -- a (zone, group) cell already shrinks toward
+        "what the zone alone predicts + what the group alone predicts,"
+        i.e. local <- regional <- global partial pooling, with no new
+        math. ``None`` (default) is a no-op, bit-identical to every prior
+        release. See ``ZoneBoostRegressor``'s own ``group_col`` parameter
+        for the column-subsampling half of this guarantee (this function
+        alone can't prevent the group column from being subsampled out of
+        ``predictor_subset`` in the first place).
 
     Returns
     -------
@@ -1243,6 +1258,21 @@ def weak_learner_fit(
     n_zones = {c: _column_n_zones(zone_info[c]) for c in predictor_subset}
     zones = {c: _column_zone_index(X[c], zone_info[c]) for c in predictor_subset}
     overall_stat = _overall_stat(residual, quantile)
+
+    # Hierarchical/multilevel zones: (feature, group_col) pairs are forced
+    # to survive pair screening below, guaranteeing every feature gets a
+    # local (zone x group) <- regional (zone marginal) <- global (overall
+    # mean) partial-pooling estimate via _pair_shrunk_deviation's existing
+    # hierarchical prior -- no new shrinkage math needed. Same iteration
+    # order as the exhaustive/screened pair loops below so tuple keys line
+    # up with interactions_full exactly.
+    forced_group_pairs = set()
+    if group_col is not None and group_col in predictor_subset:
+        forced_group_pairs = {
+            (a, b)
+            for a, b in itertools.combinations(predictor_subset, 2)
+            if group_col in (a, b) and frozenset((a, b)) not in forbidden_interactions
+        }
 
     main_effects = {}
     for col in predictor_subset:
@@ -1320,6 +1350,7 @@ def weak_learner_fit(
             if frozenset((a, b)) not in forbidden_interactions
         }
         kept_pairs = set(sorted(pair_scores, key=pair_scores.get, reverse=True)[:max_pair_interactions])
+        kept_pairs |= forced_group_pairs
 
         candidate_cols = (
             _seed_candidate_columns(pair_scores, max_triple_interactions) if max_interaction_order >= 3 else []
@@ -1368,6 +1399,7 @@ def weak_learner_fit(
         # importance, same as every pre-0.14 release did unconditionally.
         ranked = sorted(interactions_full, key=lambda p: _term_importance(interactions_full[p]), reverse=True)
         kept_pairs = set(ranked[:max_pair_interactions])
+        kept_pairs |= forced_group_pairs
 
     interactions = (
         {pair: interactions_full[pair] for pair in kept_pairs} if kept_pairs is not None else interactions_full

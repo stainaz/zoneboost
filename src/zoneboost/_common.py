@@ -113,3 +113,20 @@ def resolve_forbidden_interactions(X: pd.DataFrame, declared) -> set:
             raise ValueError(f"forbidden_interactions entries must name exactly 2 distinct columns, got {pair!r}")
         resolved.add(frozenset(names))
     return resolved
+
+
+def resolve_group_col(X: pd.DataFrame, declared):
+    """Normalize a user-declared column name/index (or ``None``) to a
+    column name, the same name/index convention ``resolve_categorical_
+    features`` uses.
+
+    Unlike a stray categorical key on ``monotonic_constraints``, a
+    ``group_col`` that doesn't name a real column is simply a usage
+    mistake -- there's no sensible silent interpretation, so this raises.
+    """
+    if declared is None:
+        return None
+    name = X.columns[declared] if isinstance(declared, (int, np.integer)) else declared
+    if name not in X.columns:
+        raise ValueError(f"group_col={declared!r} is not a column of X.")
+    return name

@@ -441,6 +441,61 @@ noted as a possible future improvement rather than shipped speculatively.
 Leaving `max_pair_interactions=None` (the default) keeps every pair — the
 exact same behavior as before this change, verified bit-for-bit.
 
+### Hierarchical zones (grouped data)
+
+Grouped data — patients within hospitals, customers within regions —
+wants partial pooling: a group with few rows of its own should lean on
+the overall pattern, a group with many rows should be trusted on its own
+terms. This already happens automatically whenever two columns are
+fit as a pairwise interaction: the joint (zone A, zone B) cell shrinks
+toward `overall + column A's own marginal deviation + column B's own
+marginal deviation` (see "Empirical Bayes shrinkage" above) — local
+(joint cell) &larr; regional (each column's own marginal effect) &larr;
+global (overall mean), with no new math required.
+
+`group_col="hospital"` (a column name or index) turns that into a
+*guarantee* rather than a coincidence: the group column is never dropped
+by `col_subsample`, and every `(feature, group_col)` pair is never
+dropped by `max_pair_interactions` screening (an explicit
+`forbidden_interactions` entry still wins). Nothing else changes —
+`explain(X)` already reports both halves of the decomposition directly:
+the `income` column is the pooled, regional/global effect; `"income x
+hospital"` is the *local* deviation one specific hospital adds on top of
+it.
+
+```python
+model = ZoneBoostRegressor(group_col="hospital").fit(X, y)
+contrib = model.explain(X)
+contrib["income"]              # regional/global-pooled income effect
+contrib["income x hospital"]   # this row's own hospital's local deviation
+```
+
+Every existing reliability/evidence mechanism extends to `group_col` for
+free, since it's an ordinary pairwise interaction under the hood:
+`track_reliability=True` + `explain(X, include_reliability=True)` reports
+`support`/`shrinkage_fraction` for the `"income x hospital"` term exactly
+like any other, and `evidence_report(X)` folds it into its per-row
+`evidence_score`.
+
+**Measured, honestly**: on synthetic data with two 900-row hospitals and
+one 12-row hospital, all sharing the same income effect, the tiny
+hospital's `"income x hospital"` cell came back with `support≈2.9` and
+`shrinkage_fraction≈0.79` (79% weight on the hierarchical prior) versus
+`support≈188` and `shrinkage_fraction≈0.075` (~7.5%) for the two large
+hospitals — and `evidence_report`'s `evidence_score` for the tiny
+hospital's rows was `0.13` (`pct_contribution_from_sparse_cells≈0.73`)
+versus `0.5` for the large hospitals', all read directly off existing,
+unmodified reporting — no new methods were needed for any of this.
+
+**Scope**: a single grouping column (nested/multi-level grouping — e.g.
+hospital *within* region — isn't supported); pairs only, not triples (a
+forced pair still competes for 3-way candidate seeding on its own cheap
+score, like any other pair, but is never forced into a triple); reuses
+`shrinkage_m` rather than a dedicated group-level shrinkage constant.
+`ZoneBoostRegressor` only. All deferred, disclosed. Leaving
+`group_col=None` (the default) reproduces the exact same predictions as
+if this parameter didn't exist.
+
 ### Native multinomial boosting
 
 3+ class problems previously used one-vs-rest: `K` completely independent
@@ -713,6 +768,7 @@ Identical parameter set on both estimators, except `calibrate`
 | `bounded_effects` | None | `{column: (lower, upper)}` — clips a continuous column's main effect to this range, per boosting round (not cumulatively); main effects only, opt-in, see "Global shape constraints" above |
 | `forbidden_interactions` | None | List of 2-column name/index pairs that must never be fit as pairwise (or 3-way) interactions; opt-in, see "Global shape constraints" above |
 | `track_reliability` | False | Record per-term support counts and cross-fold variability each round, consumed by `explain(X, include_reliability=True)`; opt-in, see "Explanation reliability" above |
+| `group_col` | None | **Regressor only.** Column name/index to treat as a hierarchical grouping key: guarantees a `(feature, group_col)` pairwise interaction every round for every feature, for partial-pooling reporting; opt-in, see "Hierarchical zones" above |
 | `calibrate` | False | **Classifier only.** Isotonic-recalibrate `predict_proba`; opt-in, see "Probability calibration" above |
 | `calibration_fraction` | 0.0 | Fraction held out in a dedicated calibration split, separate from `validation_fraction`; opt-in, see "Honest data splits" above |
 | `refit_on_full_data` | False | Refit the deployed model on fit+validation data once `best_n_rounds_` is chosen; requires `calibration_fraction > 0`, see "Honest data splits" above |
@@ -1143,6 +1199,8 @@ After `fit`, `ZoneBoostRegressor` exposes (among others):
   actually in effect (categorical columns dropped).
 - `forbidden_interactions_` — the resolved `set` of 2-element column-name
   `frozenset`s actually excluded from interaction discovery.
+- `group_col_` — the resolved column name for `group_col` (`None` if not
+  set); see "Hierarchical zones" above.
 - `conformal_scores_` — sorted absolute residuals on the held-out
   validation split at `best_n_rounds_`, the nonconformity scores
   `predict_interval` draws its margin from (`None` if

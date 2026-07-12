@@ -18,6 +18,7 @@ from ._common import (
     resolve_bounded_effects,
     resolve_categorical_features,
     resolve_forbidden_interactions,
+    resolve_group_col,
     resolve_monotonic_constraints,
 )
 from ._drift import _observed_range as _drift_observed_range
@@ -279,6 +280,35 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         much to trust each contribution, not just its value. Real
         per-round memory/compute cost, so opt-in; ``False`` (default) is
         bit-identical to every prior release.
+    group_col : str or int, default=None
+        Designates a column (name or index, same convention as
+        ``categorical_features``) as a hierarchical grouping key for
+        partial pooling across grouped data (patients within hospitals,
+        customers within regions): every ``(feature, group_col)`` pair is
+        guaranteed to be fit as a pairwise interaction every round -- the
+        column is never dropped by ``col_subsample``, and the pair is
+        never dropped by ``max_pair_interactions`` screening (an explicit
+        ``forbidden_interactions`` entry still wins). The joint (zone,
+        group) cell then already shrinks toward "what the zone alone
+        predicts + what the group alone predicts" via
+        :func:`_pair_shrunk_deviation`'s existing hierarchical-prior
+        shrinkage -- local (zone x group) <- regional (zone's own
+        marginal deviation) <- global (overall mean) partial pooling,
+        reusing the identical empirical-Bayes machinery every other term
+        uses, not new math. Read the decomposition directly off
+        ``explain(X)``: the ``feature`` column is the regional/global
+        pooled effect, ``"feature x group_col"`` is the local deviation a
+        specific group adds on top of it.
+
+        **Scope**: a single grouping column (nested/multi-level grouping,
+        e.g. hospital within region, is not supported); pairs, not
+        triples (a forced pair still only participates in
+        ``max_interaction_order=3``'s triple-candidate seeding on the
+        same footing as any other pair, never force-included in a
+        triple); reuses ``shrinkage_m`` rather than a dedicated
+        group-level shrinkage constant. All deferred, disclosed.
+        **Opt-in**: the default (``None``) reproduces the exact same
+        predictions as if this parameter didn't exist.
     calibration_fraction : float, default=0.0
         Fraction of training rows held out in a **third**, dedicated split
         purely for calibration (:attr:`conformal_scores_`) -- distinct from
@@ -327,6 +357,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
     forbidden_interactions_ : set
         Resolved ``set`` of 2-element column-name ``frozenset``s actually
         excluded from pairwise/triple interaction discovery.
+    group_col_ : str or None
+        Resolved column name for ``group_col`` (``None`` if not set).
     baseline_ : float
         The target's mean on the training split -- the starting prediction
         before any boosting round is applied.
@@ -419,6 +451,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         bounded_effects=None,
         forbidden_interactions=None,
         track_reliability: bool = False,
+        group_col=None,
         calibration_fraction: float = 0.0,
         refit_on_full_data: bool = False,
         random_state: int = 42,
@@ -451,6 +484,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.bounded_effects = bounded_effects
         self.forbidden_interactions = forbidden_interactions
         self.track_reliability = track_reliability
+        self.group_col = group_col
         self.calibration_fraction = calibration_fraction
         self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
@@ -498,6 +532,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         )
         self.bounded_effects_ = resolve_bounded_effects(X, self.bounded_effects, self.categorical_features_)
         self.forbidden_interactions_ = resolve_forbidden_interactions(X, self.forbidden_interactions)
+        self.group_col_ = resolve_group_col(X, self.group_col)
 
         has_val = self.validation_fraction and self.validation_fraction > 0
         has_cal = self.calibration_fraction and self.calibration_fraction > 0
@@ -620,7 +655,17 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             residual = y_train - current_pred
 
             row_idx = rng.choice(n, size=n_row_sample, replace=False)
-            col_subset = list(rng.choice(self.predictor_names_, size=n_col_sample, replace=False))
+            if self.group_col_ is not None:
+                # Guarantees group_col is never subsampled away, so every
+                # feature that IS sampled this round reliably gets a chance
+                # to pair with it -- see the group_col docstring above.
+                # n_col_sample <= n_predictors always (line above), so
+                # n_col_sample - 1 <= len(other_cols) always holds.
+                other_cols = [c for c in self.predictor_names_ if c != self.group_col_]
+                sampled = rng.choice(other_cols, size=n_col_sample - 1, replace=False)
+                col_subset = list(sampled) + [self.group_col_]
+            else:
+                col_subset = list(rng.choice(self.predictor_names_, size=n_col_sample, replace=False))
             X_sub = X_train.iloc[row_idx][col_subset]
             residual_sub = residual[row_idx]
 
@@ -646,6 +691,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 bounded_effects=self.bounded_effects_,
                 forbidden_interactions=self.forbidden_interactions_,
                 track_reliability=self.track_reliability,
+                group_col=self.group_col_,
             )
             contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
             # The round's own (sub)sampled rows would otherwise be scored by a
