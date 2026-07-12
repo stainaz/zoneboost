@@ -381,6 +381,62 @@ result["feature_importance_change"]
     periods draw income from the same overall range), which is the expected, disclosed
     limitation above: the <em>threshold</em> moved, not the column's observed range.</p>
 
+    <h2 id="model-evidence-cards">Model Evidence Cards</h2>
+    <p><code>model.evidence_card(X=None)</code> assembles a compact, JSON-serializable
+    snapshot of a fitted model — zones/boundaries, per-term support/shrinkage,
+    constraint declarations, calibration/conformal coverage, unsupported regions, and
+    reproducibility info — entirely from attributes already exposed after
+    <code>fit</code>. Pure aggregation, no new modeling math: every number in it is read
+    off <code>rounds_</code>, <code>get_params()</code>, or an existing method
+    (<code>feature_importance</code>, <code>_observed_range</code>).</p>
+    <pre><code>import json
+
+card = model.evidence_card(X)  # X optional -- see below
+print(json.dumps(card, indent=2))</code></pre>
+    <p><code>X</code> is optional and only needed for two pieces that genuinely require
+    scored data: each term's <code>mean_abs_contribution</code> (via
+    <code>feature_importance</code>) and <code>dataset_fingerprint</code> (a row-hash of
+    <code>X</code> via <code>pandas.util.hash_pandas_object</code>) — every other section
+    is available with no arguments. Returned keys:</p>
+    <ul>
+      <li><code>zoneboost_version</code>, <code>model_class</code></li>
+      <li><code>reproducibility</code> — <code>get_params()</code> plus
+      <code>random_state</code></li>
+      <li><code>dataset_fingerprint</code> — <code>None</code> without <code>X</code>;
+      otherwise row/column counts, dtypes, and a hash</li>
+      <li><code>fit_summary</code> — round counts, baseline, final train/validation
+      RMSE</li>
+      <li><code>zones</code> — per predictor column: kind, observed range (continuous)
+      or categories seen (categorical), read from that column's own <strong>last</strong>
+      round as a main effect — a representative snapshot, not a full per-round boundary
+      history (same disclosed precedent as Time-Based Drift Comparison and Hierarchical
+      Zones)</li>
+      <li><code>terms</code> — per term across every round:
+      <code>mean_abs_contribution</code> (<code>None</code> without <code>X</code>),
+      <code>mean_support_per_zone</code>/<code>mean_shrinkage_fraction</code> aggregated
+      directly from stored per-round diagnostics (<code>None</code> unless
+      <code>track_reliability=True</code> at fit time)</li>
+      <li><code>shrinkage</code>, <code>constraints</code>, <code>calibration</code> —
+      the resolved fitted attributes already documented in the API Reference</li>
+      <li><code>unsupported_regions</code> — each continuous main-effect column's
+      observed range, the same range <code>evidence_report</code>'s own
+      <code>extrapolating</code> flag is built on</li>
+    </ul>
+    <div class="note">
+      <strong>Scope:</strong> regressor only. A term's "stability/uncertainty" is
+      whatever <code>track_reliability</code> already provides — full bootstrap
+      stability (<code>BootstrapStability</code>) lives on a separate wrapped estimator
+      instance and isn't reachable from a plain model's <code>evidence_card()</code>, so
+      it isn't included. Only the <em>last</em> round's own zone boundaries are reported
+      per column, not a full per-round history.
+    </div>
+    <p><strong>Measured, honestly</strong>: on a model fit with
+    <code>monotonic_constraints</code>, <code>track_reliability=True</code>, and
+    <code>loss="quantile"</code>, <code>evidence_card(X)</code> produced a ~3KB JSON
+    document covering all 3 predictor columns and every main-effect/interaction term,
+    round-tripping cleanly through <code>json.dumps</code>/<code>json.loads</code> with
+    no manual type coercion needed.</p>
+
     <h2 id="vs-shap-lime">How This Differs from SHAP/LIME</h2>
     <ul>
       <li><strong>No sampling.</strong> SHAP and LIME approximate a black-box model by

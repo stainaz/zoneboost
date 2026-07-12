@@ -22,6 +22,7 @@ from ._common import (
     resolve_monotonic_constraints,
 )
 from ._drift import _observed_range as _drift_observed_range
+from ._evidence_card import evidence_card as _evidence_card
 from ._explain import explain_rounds
 from ._reliability import evidence_report, explain_reliability
 from ._weak_learner import _column_zone_index, _fit_lasso_weights, weak_learner_contributions, weak_learner_fit
@@ -954,6 +955,43 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             )
         contrib, reliability = self.explain(X, n_rounds, include_reliability=True)
         return evidence_report(contrib, reliability, self.shrinkage_m, sparse_threshold)
+
+    def evidence_card(self, X: pd.DataFrame = None) -> dict:
+        """A compact, JSON-serializable snapshot of this fitted model:
+        zones/boundaries, per-term support/shrinkage, constraint
+        declarations, calibration/conformal coverage, unsupported
+        regions, and reproducibility info -- assembled entirely from
+        attributes already exposed after `fit`, not new modeling math.
+
+        `X` is optional and only needed for the two pieces that genuinely
+        require scored data: each term's ``mean_abs_contribution`` (via
+        :meth:`feature_importance`) and ``dataset_fingerprint`` (a
+        row-hash of `X` via ``pandas.util.hash_pandas_object``). Every
+        other section is available with no arguments at all.
+
+        Returns
+        -------
+        dict with keys ``zoneboost_version``, ``model_class``,
+        ``reproducibility`` (``get_params()`` + ``random_state``),
+        ``dataset_fingerprint`` (``None`` without `X`), ``fit_summary``,
+        ``zones`` (per predictor column: kind, observed range or
+        categories seen, from that column's own *last* round as a main
+        effect -- a representative snapshot, not a full per-round
+        boundary history), ``terms`` (per term across every round:
+        support/shrinkage-fraction aggregated directly from stored
+        per-round diagnostics, ``None`` unless ``track_reliability=True``
+        at fit time), ``shrinkage``, ``constraints``, ``calibration``,
+        and ``unsupported_regions`` (each continuous main-effect column's
+        observed range -- the same range :meth:`evidence_report`'s own
+        ``extrapolating`` flag is built on).
+
+        **Scope**: regressor only; a term's "stability/uncertainty" is
+        whatever ``track_reliability`` already provides -- full bootstrap
+        stability (:class:`zoneboost.BootstrapStability`) lives on a
+        separate wrapped estimator instance and isn't reachable from
+        here, so it's not included.
+        """
+        return _evidence_card(self, X)
 
     def _continuous_main_effect_columns(self) -> set:
         cols = set()

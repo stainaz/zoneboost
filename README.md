@@ -1174,6 +1174,62 @@ stayed small (both periods draw income from the same overall range), which
 is the expected, disclosed limitation above: the *threshold* moved, not
 the column's observed range.
 
+### Model evidence cards
+
+`model.evidence_card(X=None)` assembles a compact, JSON-serializable
+snapshot of a fitted model — zones/boundaries, per-term support/
+shrinkage, constraint declarations, calibration/conformal coverage,
+unsupported regions, and reproducibility info — entirely from attributes
+already exposed after `fit`. Pure aggregation, no new modeling math:
+every number in it is read off `rounds_`, `get_params()`, or a method
+(`feature_importance`, `_observed_range`) already documented above.
+
+```python
+import json
+
+card = model.evidence_card(X)  # X optional -- see below
+print(json.dumps(card, indent=2))
+```
+
+`X` is optional and only needed for two pieces that genuinely require
+scored data: each term's `mean_abs_contribution` (via
+`feature_importance`) and `dataset_fingerprint` (a row-hash of `X` via
+`pandas.util.hash_pandas_object`) — every other section is available
+with no arguments. Returned keys:
+
+- `zoneboost_version`, `model_class`
+- `reproducibility` — `get_params()` plus `random_state`
+- `dataset_fingerprint` — `None` without `X`; otherwise row/column
+  counts, dtypes, and a hash
+- `fit_summary` — round counts, baseline, final train/validation RMSE
+- `zones` — per predictor column: kind, observed range (continuous) or
+  categories seen (categorical), read from that column's own **last**
+  round as a main effect — a representative snapshot, not a full
+  per-round boundary history (same disclosed precedent as "Time-based
+  drift comparison" and "Hierarchical zones" above)
+- `terms` — per term across every round: `mean_abs_contribution` (`None`
+  without `X`), `mean_support_per_zone`/`mean_shrinkage_fraction`
+  aggregated directly from stored per-round diagnostics (`None` unless
+  `track_reliability=True` at fit time)
+- `shrinkage`, `constraints`, `calibration` — the resolved fitted
+  attributes already documented under "Parameters"/"Fitted attributes"
+- `unsupported_regions` — each continuous main-effect column's observed
+  range, the same range `evidence_report`'s own `extrapolating` flag is
+  built on
+
+**Scope**: regressor only. A term's "stability/uncertainty" is whatever
+`track_reliability` already provides — full bootstrap stability
+(`BootstrapStability`) lives on a separate wrapped estimator instance and
+isn't reachable from a plain model's `evidence_card()`, so it isn't
+included. Only the *last* round's own zone boundaries are reported per
+column, not a full per-round history.
+
+**Measured, honestly**: on a model fit with `monotonic_constraints`,
+`track_reliability=True`, and `loss="quantile"`, `evidence_card(X)`
+produced a ~3KB JSON document covering all 3 predictor columns and every
+main-effect/interaction term, round-tripping cleanly through
+`json.dumps`/`json.loads` with no manual type coercion needed.
+
 ## Fitted attributes
 
 After `fit`, `ZoneBoostRegressor` exposes (among others):

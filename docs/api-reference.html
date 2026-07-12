@@ -103,6 +103,18 @@
       </tbody>
     </table>
 
+    <h2 id="evidence-card-signature">evidence_card Signature</h2>
+    <p><code>model.evidence_card(X=None)</code> — a method on a fitted
+    <code>ZoneBoostRegressor</code>, returning a compact, JSON-serializable dict. See
+    <a href="explaining-predictions.html#model-evidence-cards">Model Evidence Cards</a>
+    for the full return-value reference.</p>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>X</code></td><td><code>None</code></td><td>Optional; only needed for <code>dataset_fingerprint</code> and each term's <code>mean_abs_contribution</code> — every other section is available with no arguments</td></tr>
+      </tbody>
+    </table>
+
     <h2 id="classifier-attributes">ZoneBoostClassifier Fitted Attributes</h2>
     <p><code>ZoneBoostClassifier</code> exposes the same <code>categorical_features_</code> and <code>monotonic_constraints_</code>, plus:</p>
     <table>
