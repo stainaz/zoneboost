@@ -29,6 +29,7 @@ from ._common import (
 from ._drift import _observed_range as _drift_observed_range
 from ._evidence_card import evidence_card as _evidence_card
 from ._explain import explain_rounds
+from ._purify import purify_contributions
 from ._reliability import evidence_report, explain_reliability
 from ._weak_learner import _column_zone_index, _fit_lasso_weights, weak_learner_contributions, weak_learner_fit
 
@@ -997,7 +998,10 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         margin = self.conformal_scores_[k - 1]
         return point_pred - margin, point_pred + margin
 
-    def explain(self, X, n_rounds: int = None, include_reliability: bool = False):
+    def explain(
+        self, X, n_rounds: int = None, include_reliability: bool = False,
+        purify: bool = False, purify_n_bins: int = 10,
+    ):
         """Exact per-row, per-term prediction attribution -- not a SHAP/LIME
         -style approximation, but an algebraic decomposition of the same
         computation `predict` performs, so results sum exactly to the
@@ -1024,6 +1028,25 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             ``shrinkage_fraction``/``cross_fold_std`` columns (raises
             ``ValueError`` otherwise) -- see :func:`zoneboost._reliability.
             explain_reliability` for exactly what each column means.
+        purify : bool, default=False
+            If ``True``, applies functional-ANOVA purification (see
+            :func:`zoneboost._purify.purify_contributions`): any signal
+            in a pairwise-interaction column that's really just a
+            function of one of its two constituent columns alone is
+            moved into that column's own main effect. Row sums are
+            unaffected (verified bit-for-bit) -- only the *split*
+            between a main effect and its interaction changes, becoming
+            canonical relative to this specific `X`'s own empirical
+            distribution (a different `X` can give a different split;
+            pass a representative dataset, e.g. the training data, for
+            a stable result). Triples are not purified. Real extra
+            compute (an iterative marginalization per pair), so opt-in;
+            ``False`` (default) is bit-identical to every prior release.
+        purify_n_bins : int, default=10
+            Quantile bins used to marginalize each pair's two
+            constituent continuous columns when ``purify=True``
+            (categorical columns always use their exact categories).
+            Ignored otherwise.
 
         Returns
         -------
@@ -1038,13 +1061,18 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             ``reliability`` is a ``{term_name: DataFrame}`` dict, one row
             per row of ``X``, columns ``support``, ``shrinkage_fraction``,
             ``cross_fold_std``, ``n_rounds_present``, and (continuous main
-            effects only) ``boundary_weight``/``extrapolation_frac``.
+            effects only) ``boundary_weight``/``extrapolation_frac``
+            (computed from the *unpurified* tables regardless of
+            ``purify``, since reliability describes zone support, not
+            attribution).
         """
         check_is_fitted(self, "rounds_")
         n_rounds = n_rounds if n_rounds is not None else self.best_n_rounds_
         X = self._ensure_dataframe(X)
         contributions = explain_rounds(X, self.rounds_[:n_rounds], self.baseline_, self.learning_rate)
         contributions = self._apply_overrides(X, contributions)
+        if purify:
+            contributions = purify_contributions(contributions, X, self.categorical_features_, n_bins=purify_n_bins)
         if not include_reliability:
             return contributions
         if not self.track_reliability:
@@ -1055,7 +1083,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         reliability = explain_reliability(X, self.rounds_[:n_rounds], self.shrinkage_m)
         return contributions, reliability
 
-    def feature_importance(self, X, n_rounds: int = None) -> pd.Series:
+    def feature_importance(self, X, n_rounds: int = None, purify: bool = False) -> pd.Series:
         """Global importance: each term's mean absolute contribution over
         the rows in `X`, derived directly from :meth:`explain` (not a
         split-count or permutation proxy).
@@ -1064,13 +1092,18 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         ----------
         X : DataFrame or array-like of shape (n_samples, n_features)
         n_rounds : int, default=None
+        purify : bool, default=False
+            Passed through to :meth:`explain` -- see its own ``purify``
+            parameter. This is where purification's effect is most
+            visible: a main effect's importance rises, its interaction's
+            falls, without changing `predict`.
 
         Returns
         -------
         Series
             Indexed by term name, sorted descending.
         """
-        contributions = self.explain(X, n_rounds).drop(columns=["baseline"])
+        contributions = self.explain(X, n_rounds, purify=purify).drop(columns=["baseline"])
         return contributions.abs().mean().sort_values(ascending=False)
 
     def evidence_report(self, X, n_rounds: int = None, sparse_threshold: float = None) -> pd.DataFrame:

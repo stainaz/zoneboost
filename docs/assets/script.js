@@ -122,6 +122,7 @@
     { title: "BootstrapStability Parameters", crumb: "API Reference", url: "api-reference.html#bootstrap-parameters" },
     { title: "compare_models Signature", crumb: "API Reference", url: "api-reference.html#compare-models-signature" },
     { title: "evidence_card Signature", crumb: "API Reference", url: "api-reference.html#evidence-card-signature" },
+    { title: "explain / feature_importance purify Parameters", crumb: "API Reference", url: "api-reference.html#purify-parameters" },
     { title: "Scope & Compatibility", crumb: "API Reference", url: "api-reference.html#scope" },
 
     { title: "Explaining Predictions", crumb: "Docs", url: "explaining-predictions.html" },
@@ -129,6 +130,7 @@
     { title: "feature_importance(X)", crumb: "Explaining Predictions", url: "explaining-predictions.html#feature-importance" },
     { title: "Classification Semantics", crumb: "Explaining Predictions", url: "explaining-predictions.html#classification-semantics" },
     { title: "Explanation Reliability", crumb: "Explaining Predictions", url: "explaining-predictions.html#explanation-reliability" },
+    { title: "Functional-ANOVA Purification", crumb: "Explaining Predictions", url: "explaining-predictions.html#functional-anova-purification" },
     { title: "Bootstrap Stability", crumb: "Explaining Predictions", url: "explaining-predictions.html#bootstrap-stability" },
     { title: "Evidence Report", crumb: "Explaining Predictions", url: "explaining-predictions.html#evidence-report" },
     { title: "Audited Human Editing", crumb: "Explaining Predictions", url: "explaining-predictions.html#audited-human-editing" },

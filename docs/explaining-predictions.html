@@ -125,6 +125,56 @@ reliability["shell_weight"]
     contributions already are (<code>{class_label: {term: DataFrame}}</code>), since each
     class's own softmax booster fits its own zones per round.</p>
 
+    <h2 id="functional-anova-purification">Functional-ANOVA Purification</h2>
+    <p>Cyclic backfitting (see <a href="how-it-works.html#cyclic-backfitting">How It
+    Works</a>) fits each round's tables in a single ordered pass, so a pair's stored
+    deviation can retain a component that's really just a function of one of its two
+    constituent columns alone — two independently-trained models can predict
+    identically while splitting credit between a main effect and its interaction
+    differently. <code>explain(X, purify=True)</code> applies functional-ANOVA
+    purification (Lengerich et al.): any such leftover single-column signal inside an
+    interaction's contribution is moved into that column's own main effect, for every
+    pairwise-interaction term that has both constituent main effects present.</p>
+    <pre><code>model.feature_importance(X)                  # x1: 1.20, x2: 0.96, "x1 x x2": 0.90
+model.feature_importance(X, purify=True)      # x1: 0.84, x2: 0.65, "x1 x x2": 0.25
+model.predict(X)                              # completely unaffected either way</code></pre>
+    <p>zoneboost's own per-round tables aren't a stable, shared 2D array the way EBM's
+    are — zones are re-derived every round, and each round's own Lasso gives every
+    term a different weight — so purification can't safely move mass between raw
+    round-level tables before that weighting is applied (only equal weights would
+    preserve the summed prediction). Instead it operates on <code>explain(X)</code>'s
+    own already-weighted, already-summed-across-every-round contribution table: "main
+    effect A", "main effect B", and "A x B" are just three ordinary columns of the
+    same row there, so moving mass between them trivially leaves that row's own sum
+    unchanged — <code>predict(X)</code> is never touched, only the <em>split</em>
+    <code>explain</code>/<code>feature_importance</code> report.</p>
+    <p>The purified split is canonical <strong>relative to the specific <code>X</code>
+    passed in</strong> — the empirical measure it marginalizes against
+    (quantile-binning continuous columns, exact groups for categorical ones). Calling
+    it on a different dataset can give a different split; pass a representative
+    dataset (e.g. the training data) for a stable result.</p>
+    <div class="note">
+      <strong>Measured, honestly:</strong> on synthetic data with genuinely correlated
+      <code>x1</code>/<code>x2</code> and a real <code>0.4 * x1 * x2</code>
+      interaction (the classic setting where main-effect/interaction attribution
+      becomes ambiguous), <code>"x1 x x2"</code>'s feature importance dropped from
+      <code>0.895</code> to <code>0.253</code> after purification — a
+      <strong>71.7%</strong> reduction — while <code>predict(X)</code> stayed
+      identical to machine precision. Across three different <code>random_state</code>
+      refits of the same relationship, the interaction's importance had standard
+      deviation <code>0.025</code> unpurified versus <code>0.012</code> purified — a
+      real, if modest, reduction in refit-to-refit attribution variance.
+    </div>
+    <div class="note">
+      <strong>Scope:</strong> pairs only, not triples (a more complex recursive
+      extension, deferred); main effects aren't re-centered into <code>baseline</code>
+      (a separate part of the full functional-ANOVA convention, not attempted here);
+      regressor only. <code>include_reliability</code>'s own values are unaffected by
+      <code>purify</code> (reliability describes zone support, not attribution). Real
+      extra compute (an iterative marginalization per pair), so opt-in;
+      <code>purify=False</code> (the default) is bit-identical to every prior release.
+    </div>
+
     <h2 id="bootstrap-stability">Bootstrap Stability</h2>
     <p><code>explain(include_reliability=True)</code> reports how much to trust a
     <strong>single</strong> fit's own contribution. <code>BootstrapStability</code> answers a

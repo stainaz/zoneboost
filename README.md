@@ -956,6 +956,60 @@ per class the same way contributions already are (`{class_label: {term:
 DataFrame}}`), since each class's own softmax booster fits its own zones
 per round.
 
+### Functional-ANOVA purification
+
+Cyclic backfitting (see "How it works" above) fits each round's tables in
+a single ordered pass, so a pair's stored deviation can retain a
+component that's really just a function of one of its two constituent
+columns alone — two independently-trained models can predict identically
+while splitting credit between a main effect and its interaction
+differently. `explain(X, purify=True)` applies functional-ANOVA
+purification (Lengerich et al.): any such leftover single-column signal
+inside an interaction's contribution is moved into that column's own
+main effect, for every pairwise-interaction term that has both
+constituent main effects present.
+
+```python
+model.feature_importance(X)                  # x1: 1.20, x2: 0.96, "x1 x x2": 0.90
+model.feature_importance(X, purify=True)      # x1: 0.84, x2: 0.65, "x1 x x2": 0.25
+model.predict(X)                              # completely unaffected either way
+```
+
+zoneboost's own per-round tables aren't a stable, shared 2D array the way
+EBM's are — zones are re-derived every round, and each round's own Lasso
+gives every term a different weight — so purification can't safely move
+mass between raw round-level tables before that weighting is applied
+(only equal weights would preserve the summed prediction). Instead it
+operates on `explain(X)`'s own already-weighted, already-summed-across-
+every-round contribution table: "main effect A", "main effect B", and
+"A x B" are just three ordinary columns of the same row there, so moving
+mass between them trivially leaves that row's own sum unchanged — `predict(X)`
+is never touched, only the *split* `explain`/`feature_importance` report.
+
+The purified split is canonical **relative to the specific `X` passed
+in** — the empirical measure it marginalizes against (quantile-binning
+continuous columns, exact groups for categorical ones). Calling it on a
+different dataset can give a different split; pass a representative
+dataset (e.g. the training data) for a stable result.
+
+**Measured, honestly**: on synthetic data with genuinely correlated `x1`/
+`x2` and a real `0.4 * x1 * x2` interaction (the classic setting where
+main-effect/interaction attribution becomes ambiguous), `"x1 x x2"`'s
+feature importance dropped from `0.895` to `0.253` after purification —
+a **71.7%** reduction — while `predict(X)` stayed identical to machine
+precision. Across three different `random_state` refits of the same
+relationship, the interaction's importance had standard deviation `0.025`
+unpurified versus `0.012` purified — a real, if modest, reduction in
+refit-to-refit attribution variance.
+
+**Scope**: pairs only, not triples (a more complex recursive extension,
+deferred); main effects aren't re-centered into `baseline` (a separate
+part of the full functional-ANOVA convention, not attempted here);
+regressor only. `include_reliability`'s own values are unaffected by
+`purify` (reliability describes zone support, not attribution). Real
+extra compute (an iterative marginalization per pair), so opt-in;
+`purify=False` (the default) is bit-identical to every prior release.
+
 ### Bootstrap stability
 
 `explain(include_reliability=True)` reports how much to trust a **single

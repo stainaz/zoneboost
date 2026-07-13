@@ -174,6 +174,19 @@
       </tbody>
     </table>
 
+    <h2 id="purify-parameters">explain / feature_importance purify Parameters</h2>
+    <p><code>purify</code>/<code>purify_n_bins</code> are parameters of the existing
+    <code>explain</code>/<code>feature_importance</code> methods, not a new function.
+    See <a href="explaining-predictions.html#functional-anova-purification">Functional-ANOVA
+    Purification</a> for the full explanation.</p>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>purify</code></td><td><code>False</code></td><td>Moves any signal in a pairwise-interaction column that's really just a function of one constituent column alone into that column's own main effect; row sums (and <code>predict</code>) are unaffected — opt-in, real extra compute</td></tr>
+        <tr><td><code>purify_n_bins</code></td><td><code>10</code></td><td>Quantile bins used to marginalize each pair's continuous constituent columns when <code>purify=True</code> (categorical columns always use exact categories); ignored otherwise</td></tr>
+      </tbody>
+    </table>
+
     <h2 id="scope">Scope &amp; Compatibility</h2>
     <p>This estimator targets practical scikit-learn compatibility —
     <code>get_params</code>/<code>set_params</code>/<code>clone</code>, use inside a
