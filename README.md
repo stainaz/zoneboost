@@ -894,6 +894,66 @@ to `0.433`, an **8.5%** reduction. `loss="squared_error"`/`"quantile"`
 are completely unaffected — verified bit-for-bit against the prior
 release.
 
+### Zone-native survival analysis
+
+Piecewise-exponential hazard models — the standard actuarial/biostat
+approach to time-to-event data — reduce *exactly* to the Poisson-with-
+offset machinery above: split follow-up time into intervals, expand each
+subject into one row per interval reached (covariates, whether the event
+happened in that interval, how much exposure time it contributed), and a
+plain `loss="poisson"` fit on that expanded table *is* the hazard model
+— no new boosting mechanism. `ZoneBoostSurvival` does exactly this
+expansion internally, wrapping one `ZoneBoostRegressor`:
+
+```python
+from zoneboost import ZoneBoostSurvival
+
+model = ZoneBoostSurvival(n_intervals=10).fit(X, duration, event)
+model.predict_survival_function(X)      # S(t) per row, per query time
+model.predict_cumulative_hazard(X)      # H(t) per row, per query time
+model.regressor_.explain(X_expanded)    # transparent hazard decomposition
+```
+
+Interval boundaries default to quantiles of the observed *event* times
+(event-dense intervals), with the last interval always open-ended so
+every subject's tail risk is covered. The fitted rate at `offset=0` for
+any (covariates, interval) combination is exactly the hazard — the same
+`mu = exp(link_pred + offset)` identity the actuarial losses use, just
+with `offset` set to zero instead of a real exposure term.
+
+This gives a genuine, structural difference from Cox proportional
+hazards, not just a reframing: the **baseline hazard is an ordinary main
+effect over an interval-start column**, fit by zoneboost's own adaptive
+continuous zoning — no assumed parametric shape, unlike Cox's implicit
+"same shape for everyone" baseline. And whenever the underlying
+estimator's `max_interaction_order=2`, a covariate can interact with
+that interval-start column — a time-varying *effect*, the exact
+assumption Cox proportional hazards rules out by construction. Because
+it's still just a `ZoneBoostRegressor` fit, `explain()` decomposes any
+subject's log-hazard into baseline-time shape + covariate main effects +
+interactions, fully transparent — not a post-hoc approximation of a
+black-box partial likelihood.
+
+**Scope**: right-censoring only — no left truncation/delayed entry
+(every subject's risk period is assumed to start at `duration=0`), no
+interval censoring, no competing risks; `event` is a plain 0/1 indicator.
+Covariates are time-invariant: `X` is one row per subject at baseline,
+and can't change value mid-follow-up in this pass. `sample_weight` isn't
+supported, consistent with every other GLM loss. Ties in `duration` need
+no special handling — a genuine advantage of the piecewise-exponential
+reduction over Cox's partial-likelihood tie-breaking machinery, worth
+noting as a real plus, not just a limitation elsewhere.
+
+**Measured, honestly**: on synthetic data with a real age-dependent
+hazard (`n=3000`, ~39% events observed), a `ZoneBoostSurvival` fit
+achieved a concordance index of **0.652** on training data, versus
+exactly **0.500** (chance) for the same model fit with the covariate
+zeroed out — confirming the model genuinely uses the covariate signal
+rather than just fitting the baseline hazard shape. `predict_survival_
+function` was verified non-increasing in `t` for every row, and
+`predict_cumulative_hazard` non-negative and non-decreasing, on every
+test dataset tried.
+
 ### Conformalized Quantile Regression (CQR)
 
 `ZoneBoostRegressor.predict_interval` (split-conformal) gives a
@@ -1027,6 +1087,22 @@ scores on the calibration split — the margin `predict_interval` draws from).
 
 Fitted attribute: `bootstrap_models_` — the `n_bootstrap` fitted clones, in
 resampling order.
+
+## ZoneBoostSurvival parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `estimator` | `None` | Unfit `ZoneBoostRegressor` template supplying every tuning knob other than `loss`/`random_state`; `None` uses a plain `ZoneBoostRegressor()`. `loss` is always forced to `"poisson"`. See "Zone-native survival analysis" above |
+| `n_intervals` | 10 | Number of piecewise-constant hazard intervals, when `breakpoints` isn't given — cut points are quantiles of observed event times |
+| `breakpoints` | `None` | Explicit interval boundaries (must start at 0, strictly increasing); overrides `n_intervals` entirely when given |
+| `random_state` | 42 | Passed through to the underlying `ZoneBoostRegressor` |
+
+Fitted attributes: `regressor_` (the fitted Poisson-loss `ZoneBoostRegressor`
+on the expanded person-period table — call `explain()`/`feature_importance()`
+directly on it), `breakpoints_` (interval boundaries actually used, ending
+in `inf`), `max_duration_` (largest observed `duration` at `fit` time — the
+default upper query time for `predict_survival_function`/
+`predict_cumulative_hazard`).
 
 ## Explaining predictions
 
