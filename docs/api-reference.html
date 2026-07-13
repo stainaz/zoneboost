@@ -199,6 +199,25 @@
       </tbody>
     </table>
 
+    <h2 id="compile-to-sql-signature">compile_to_sql Signature</h2>
+    <p><code>compile_to_sql(model, table_name="input_table", score_alias="score",
+    offset_expr="0", include_evidence_card=False, dialect="sqlite")</code> — a
+    top-level function, not a method, compiling an already-fitted
+    <code>ZoneBoostRegressor</code> to a single SQL <code>SELECT</code> statement. See
+    <a href="how-it-works.html#compile-to-sql-scorecard">Compile to SQL Scorecard</a> for
+    the full design, scope, and measured accuracy.</p>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>model</code></td><td>—</td><td>An already-fitted <code>ZoneBoostRegressor</code> (classifier not supported)</td></tr>
+        <tr><td><code>table_name</code></td><td><code>"input_table"</code></td><td>Source table name the generated <code>SELECT</code> reads from — must have one column per predictor, matching name and type</td></tr>
+        <tr><td><code>score_alias</code></td><td><code>"score"</code></td><td>Output column alias for the computed prediction</td></tr>
+        <tr><td><code>offset_expr</code></td><td><code>"0"</code></td><td>Raw SQL expression for the per-row <code>offset</code> term (only meaningful for <code>loss in ("poisson","gamma","tweedie")</code>) — e.g. <code>"LN(exposure)"</code>; <code>offset</code> is never a fitted attribute so this can't be inferred</td></tr>
+        <tr><td><code>include_evidence_card</code></td><td><code>False</code></td><td>Prepend <code>model.evidence_card()</code>'s JSON as a leading SQL comment block</td></tr>
+        <tr><td><code>dialect</code></td><td><code>"sqlite"</code></td><td>The only value currently accepted — clipping uses SQLite's scalar <code>MIN</code>/<code>MAX</code> idiom (also valid in DuckDB, MySQL 8+)</td></tr>
+      </tbody>
+    </table>
+
     <h2 id="purify-parameters">explain / feature_importance purify Parameters</h2>
     <p><code>purify</code>/<code>purify_n_bins</code> are parameters of the existing
     <code>explain</code>/<code>feature_importance</code> methods, not a new function.

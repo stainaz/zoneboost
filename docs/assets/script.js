@@ -115,6 +115,7 @@
     { title: "Conformalized Quantile Regression (CQR)", crumb: "How It Works", url: "how-it-works.html#conformalized-quantile-regression" },
     { title: "Global Shape Constraints", crumb: "How It Works", url: "how-it-works.html#global-shape-constraints" },
     { title: "Ensemble-Level Guarantees", crumb: "How It Works › Global Shape Constraints", url: "how-it-works.html#ensemble-level-guarantees" },
+    { title: "Compile to SQL Scorecard", crumb: "How It Works", url: "how-it-works.html#compile-to-sql-scorecard" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },
@@ -125,6 +126,7 @@
     { title: "BootstrapStability Parameters", crumb: "API Reference", url: "api-reference.html#bootstrap-parameters" },
     { title: "ZoneBoostSurvival Parameters", crumb: "API Reference", url: "api-reference.html#survival-parameters" },
     { title: "compare_models Signature", crumb: "API Reference", url: "api-reference.html#compare-models-signature" },
+    { title: "compile_to_sql Signature", crumb: "API Reference", url: "api-reference.html#compile-to-sql-signature" },
     { title: "evidence_card Signature", crumb: "API Reference", url: "api-reference.html#evidence-card-signature" },
     { title: "explain / feature_importance purify Parameters", crumb: "API Reference", url: "api-reference.html#purify-parameters" },
     { title: "Scope & Compatibility", crumb: "API Reference", url: "api-reference.html#scope" },
