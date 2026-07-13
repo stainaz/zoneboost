@@ -565,6 +565,39 @@ output is unaffected. Requires `validation_fraction > 0` or
 `ValueError` otherwise. On a synthetic noisy quadratic, `alpha=0.1` achieved
 ~90.2% empirical coverage on held-out data.
 
+**Mondrian (group-conditional) coverage**: a single global margin gives
+distribution-free *marginal* coverage — but if a minority segment behaves
+systematically differently (different residual variance, a different
+regime), its own coverage can sit well below the target even while the
+marginal number looks fine. `mondrian_col="region"` at `fit` time
+stratifies the calibration-split nonconformity scores by that column's
+own values, so `predict_interval` gives each row its own group's margin
+instead of one global margin for everyone — reusing the exact same
+calibration split already computed, no new held-out data needed.
+Independent of `group_col` (different purpose: calibration stratification
+vs. hierarchical partial pooling in the boosting model itself) — set one,
+both, or neither.
+
+```python
+model = ZoneBoostRegressor(mondrian_col="region").fit(X, y)
+model.predict_interval(X)  # each row's margin comes from its own region
+```
+
+A group with fewer than `mondrian_min_group_size` (default `20`)
+calibration rows falls back to the global margin (a per-group quantile
+from too few scores is unstable) — so does an unseen group value at
+`predict_interval` time.
+
+**Measured, honestly**: on synthetic data with a 10%-share minority
+region whose residual noise is 4x the majority region's, the *marginal*
+margin gave that minority segment only **39.2%** empirical coverage at a
+90% target — while the overall (all-rows) coverage looked fine at 90.6%.
+With `mondrian_col` set, the minority segment's own coverage rose to
+**87.7%**, with overall and majority coverage still close to the 90%
+target (89.6%/89.8%) — reproducing exactly the "marginal 90% can hide
+70% on a minority segment" problem this fixes. `mondrian_col=None` (the
+default) is bit-identical to every prior release.
+
 ### Probability calibration (classifier)
 
 `ZoneBoostClassifier(calibrate=True)` recalibrates each booster's raw
@@ -798,6 +831,16 @@ itself) — the same meta-estimator pattern sklearn itself uses (e.g.
 `ZoneBoostRegressor` parameters onto this class. Not a `RegressorMixin` —
 there is no meaningful single-point `predict`, only `predict_interval`.
 
+**Non-crossing rearrangement**: `lo_`/`hi_` are two **independently**-fit
+models, so nothing guarantees `lo_.predict(x) <= hi_.predict(x)` for every
+row ("crossing"). Both are rearranged (Chernozhukov, Fernandez-Val &
+Galichon, 2010) — for exactly two quantile levels, an elementwise
+`min`/`max` swap — before computing calibration scores and before
+returning an interval, unconditionally rather than behind a parameter:
+rearrangement never increases estimation risk, and is a no-op wherever a
+row was already ordered, so this never changes output on data where
+crossing didn't occur (verified directly, not just argued).
+
 ## Parameters
 
 Identical parameter set on both estimators, except `calibrate`
@@ -828,6 +871,8 @@ Identical parameter set on both estimators, except `calibrate`
 | `forbidden_interactions` | None | List of 2-column name/index pairs that must never be fit as pairwise (or 3-way) interactions; opt-in, see "Global shape constraints" above |
 | `track_reliability` | False | Record per-term support counts and cross-fold variability each round, consumed by `explain(X, include_reliability=True)`; opt-in, see "Explanation reliability" above |
 | `group_col` | None | **Regressor only.** Column name/index to treat as a hierarchical grouping key: guarantees a `(feature, group_col)` pairwise interaction every round for every feature, for partial-pooling reporting; opt-in, see "Hierarchical zones" above |
+| `mondrian_col` | None | **Regressor only.** Column name/index to stratify `predict_interval`'s conformal margin by (Mondrian conformal), instead of one global margin for every row; independent of `group_col`; opt-in, see "Prediction intervals" above |
+| `mondrian_min_group_size` | 20 | A `mondrian_col` group with fewer calibration rows than this falls back to the global margin; ignored unless `mondrian_col` is set |
 | `calibrate` | False | **Classifier only.** Isotonic-recalibrate `predict_proba`; opt-in, see "Probability calibration" above |
 | `calibration_fraction` | 0.0 | Fraction held out in a dedicated calibration split, separate from `validation_fraction`; opt-in, see "Honest data splits" above |
 | `refit_on_full_data` | False | Refit the deployed model on fit+validation data once `best_n_rounds_` is chosen; requires `calibration_fraction > 0`, see "Honest data splits" above |
@@ -1375,6 +1420,11 @@ After `fit`, `ZoneBoostRegressor` exposes (among others):
   validation split at `best_n_rounds_`, the nonconformity scores
   `predict_interval` draws its margin from (`None` if
   `validation_fraction=0`); see "Prediction intervals" above.
+- `mondrian_col_` — the resolved column name for `mondrian_col` (`None`
+  if not set); `conformal_scores_by_group_` — `{group_value:
+  sorted_scores_array}` for every `mondrian_col` group with at least
+  `mondrian_min_group_size` calibration rows (`None` unless
+  `mondrian_col` was set); see "Prediction intervals" above.
 - `effect_overrides_` — every edit made via `edit_effect`, in application
   order (`[]` until the first edit); see "Audited human editing" above.
 

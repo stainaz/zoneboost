@@ -17,6 +17,18 @@ from .regressor import ZoneBoostRegressor
 __all__ = ["ConformalizedQuantileRegressor"]
 
 
+def _rearrange(lo: np.ndarray, hi: np.ndarray) -> tuple:
+    """Chernozhukov, Fernandez-Val & Galichon (2010) rearrangement for
+    exactly two quantile levels: sorting two numbers per row is just an
+    elementwise ``min``/``max`` swap. Fixes "crossing"
+    (``lo[i] > hi[i]``) -- possible whenever ``lo``/``hi`` come from two
+    independently-fit models with no shared constraint between them --
+    without changing anything already ordered (``min``/``max`` of an
+    already-sorted pair is a no-op), so this never changes output on
+    data where crossing didn't occur."""
+    return np.minimum(lo, hi), np.maximum(lo, hi)
+
+
 class ConformalizedQuantileRegressor(BaseEstimator):
     """Locally-adaptive prediction intervals via Conformalized Quantile
     Regression (Romano, Patterson & Candes, 2019).
@@ -33,6 +45,16 @@ class ConformalizedQuantileRegressor(BaseEstimator):
     because the *quantile* predictions themselves already vary with ``X``,
     the total interval width does too, unlike a plain split-conformal band's
     single constant-width margin.
+
+    ``lo_``/``hi_`` are two **independently**-fit models, so nothing
+    guarantees ``lo_.predict(x) <= hi_.predict(x)`` for every row
+    ("crossing"). Both are rearranged (Chernozhukov, Fernandez-Val &
+    Galichon, 2010) -- for exactly two levels, an elementwise ``min``/``max``
+    swap -- before computing calibration scores and before returning an
+    interval, unconditionally (not behind a parameter): rearrangement never
+    increases estimation risk and is a no-op wherever a row was already
+    ordered, so this never changes output on data where crossing didn't
+    occur.
 
     Not a general-purpose point regressor (there is no meaningful single
     ``predict``): use :meth:`predict_interval` for the band, or fit
@@ -149,6 +171,7 @@ class ConformalizedQuantileRegressor(BaseEstimator):
 
         lo_cal_pred = self.lo_.predict(X_cal)
         hi_cal_pred = self.hi_.predict(X_cal)
+        lo_cal_pred, hi_cal_pred = _rearrange(lo_cal_pred, hi_cal_pred)
         scores = np.maximum(lo_cal_pred - y_cal, y_cal - hi_cal_pred)
         self.cqr_scores_ = np.sort(scores)
         return self
@@ -168,6 +191,7 @@ class ConformalizedQuantileRegressor(BaseEstimator):
         X = ensure_dataframe(X, self.feature_names_in_)
         q_lo = self.lo_.predict(X)
         q_hi = self.hi_.predict(X)
+        q_lo, q_hi = _rearrange(q_lo, q_hi)
         n = len(self.cqr_scores_)
         k = min(int(np.ceil((n + 1) * (1 - self.alpha))), n)
         margin = self.cqr_scores_[k - 1]

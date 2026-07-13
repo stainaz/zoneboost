@@ -357,6 +357,29 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         group-level shrinkage constant. All deferred, disclosed.
         **Opt-in**: the default (``None``) reproduces the exact same
         predictions as if this parameter didn't exist.
+    mondrian_col : str or int, default=None
+        Designates a column (name or index, same convention/resolution
+        as ``group_col`` -- fully independent of it; set one, both, or
+        neither) to stratify :meth:`predict_interval`'s split-conformal
+        margin by, instead of one single global margin for every row
+        (Mondrian conformal prediction). A minority segment can have
+        systematically different residual behavior than the rest of the
+        data -- its own coverage can sit well below the target even
+        though the *marginal* number looks fine. When set, the
+        calibration split's nonconformity scores are grouped by this
+        column's own values (see ``mondrian_min_group_size``), and
+        `predict_interval` gives each row its own group's margin instead
+        of the single global one -- reusing the exact same calibration
+        split already computed for :attr:`conformal_scores_`, no new
+        held-out data needed. **Opt-in**: the default (``None``)
+        reproduces the exact same `predict_interval` output as if this
+        parameter didn't exist.
+    mondrian_min_group_size : int, default=20
+        A calibration-split group with fewer rows than this falls back
+        to the global margin at `predict_interval` time (a per-group
+        quantile from too few nonconformity scores is unstable) -- so is
+        an unseen group value at `predict_interval` time. Ignored unless
+        ``mondrian_col`` is set.
     calibration_fraction : float, default=0.0
         Fraction of training rows held out in a **third**, dedicated split
         purely for calibration (:attr:`conformal_scores_`) -- distinct from
@@ -440,6 +463,12 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         ``calibration_fraction`` split if set, otherwise the validation
         split (see ``calibration_fraction`` above). ``None`` if neither is
         available.
+    conformal_scores_by_group_ : dict or None
+        ``{group_value: sorted_scores_array}`` for every ``mondrian_col``
+        group with at least ``mondrian_min_group_size`` calibration rows
+        -- the per-group nonconformity scores :meth:`predict_interval`
+        draws a Mondrian margin from. ``None`` unless ``mondrian_col`` was
+        set at `fit` time.
     effect_overrides_ : list
         Every edit made via :meth:`edit_effect`, in application order
         (``[]`` until the first edit) -- ``{"feature": col, "lo": float,
@@ -501,6 +530,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         forbidden_interactions=None,
         track_reliability: bool = False,
         group_col=None,
+        mondrian_col=None,
+        mondrian_min_group_size: int = 20,
         calibration_fraction: float = 0.0,
         refit_on_full_data: bool = False,
         random_state: int = 42,
@@ -535,6 +566,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.forbidden_interactions = forbidden_interactions
         self.track_reliability = track_reliability
         self.group_col = group_col
+        self.mondrian_col = mondrian_col
+        self.mondrian_min_group_size = mondrian_min_group_size
         self.calibration_fraction = calibration_fraction
         self.refit_on_full_data = refit_on_full_data
         self.random_state = random_state
@@ -596,6 +629,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.bounded_effects_ = resolve_bounded_effects(X, self.bounded_effects, self.categorical_features_)
         self.forbidden_interactions_ = resolve_forbidden_interactions(X, self.forbidden_interactions)
         self.group_col_ = resolve_group_col(X, self.group_col)
+        self.mondrian_col_ = resolve_group_col(X, self.mondrian_col)
 
         has_val = self.validation_fraction and self.validation_fraction > 0
         has_cal = self.calibration_fraction and self.calibration_fraction > 0
@@ -668,9 +702,20 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         cal_X, cal_y, cal_offset = (X_cal, y_cal, offset_cal) if has_cal else (X_val, y_val, offset_val)
         if cal_X is not None:
             cal_pred = self._raw_predict(cal_X, self.best_n_rounds_, offset=cal_offset)
-            self.conformal_scores_ = np.sort(np.abs(cal_y - cal_pred))
+            cal_scores = np.abs(cal_y - cal_pred)
+            self.conformal_scores_ = np.sort(cal_scores)
+            if self.mondrian_col_ is not None:
+                group_values = cal_X[self.mondrian_col_].to_numpy()
+                self.conformal_scores_by_group_ = {
+                    group: np.sort(cal_scores[group_values == group])
+                    for group in pd.unique(group_values)
+                    if np.sum(group_values == group) >= self.mondrian_min_group_size
+                }
+            else:
+                self.conformal_scores_by_group_ = None
         else:
             self.conformal_scores_ = None
+            self.conformal_scores_by_group_ = None
 
         self.effect_overrides_ = []
 
@@ -962,6 +1007,13 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         well-defined meaning here. Not designed in this pass -- a
         distribution-appropriate interval for these losses is future work.
 
+        If ``mondrian_col`` was set at `fit` time, the margin is
+        **Mondrian**: each row gets its own group's margin (from
+        :attr:`conformal_scores_by_group_`) instead of one global margin
+        for every row -- see the ``mondrian_col`` parameter for why this
+        matters (a minority segment's own coverage can undershoot the
+        target even when the marginal number looks fine).
+
         Parameters
         ----------
         X : DataFrame or array-like of shape (n_samples, n_features)
@@ -992,11 +1044,30 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         if not 0 < alpha < 1:
             raise ValueError(f"alpha must be in (0, 1), got {alpha!r}")
 
+        X = self._ensure_dataframe(X)
         point_pred = self.predict(X)
-        n = len(self.conformal_scores_)
-        k = min(int(np.ceil((n + 1) * (1 - alpha))), n)
-        margin = self.conformal_scores_[k - 1]
-        return point_pred - margin, point_pred + margin
+
+        def _margin(scores: np.ndarray) -> float:
+            n = len(scores)
+            k = min(int(np.ceil((n + 1) * (1 - alpha))), n)
+            return scores[k - 1]
+
+        if self.mondrian_col_ is None:
+            margin = _margin(self.conformal_scores_)
+            return point_pred - margin, point_pred + margin
+
+        # Mondrian conformal: each row's own margin comes from its own
+        # group's calibration scores (falling back to the global,
+        # marginal scores for a group that was too small at fit time or
+        # is unseen here) -- see the `mondrian_col` docstring above.
+        global_margin = _margin(self.conformal_scores_)
+        group_values = X[self.mondrian_col_].to_numpy()
+        margins = np.full(len(X), global_margin)
+        for group in pd.unique(group_values):
+            group_scores = self.conformal_scores_by_group_.get(group)
+            if group_scores is not None:
+                margins[group_values == group] = _margin(group_scores)
+        return point_pred - margins, point_pred + margins
 
     def explain(
         self, X, n_rounds: int = None, include_reliability: bool = False,

@@ -4,6 +4,7 @@ import pytest
 from sklearn.base import clone
 
 from zoneboost import ConformalizedQuantileRegressor, ZoneBoostRegressor
+from zoneboost._conformal import _rearrange
 
 
 def _heteroscedastic(n=3000, seed=0):
@@ -101,3 +102,33 @@ def test_predict_interval_before_fit_raises():
     model = ConformalizedQuantileRegressor()
     with pytest.raises(Exception):
         model.predict_interval(pd.DataFrame({"x": [1.0, 2.0]}))
+
+
+def test_rearrange_fixes_crossed_rows():
+    lo = np.array([1.0, 5.0, 3.0, -2.0])
+    hi = np.array([2.0, 4.0, 3.0, -5.0])  # rows 1 and 3 crossed
+    lo2, hi2 = _rearrange(lo, hi)
+    assert np.all(lo2 <= hi2)
+    np.testing.assert_array_equal(lo2, [1.0, 4.0, 3.0, -5.0])
+    np.testing.assert_array_equal(hi2, [2.0, 5.0, 3.0, -2.0])
+
+
+def test_rearrange_is_a_no_op_when_already_ordered():
+    lo = np.array([1.0, 2.0, 3.0])
+    hi = np.array([4.0, 5.0, 6.0])
+    lo2, hi2 = _rearrange(lo, hi)
+    np.testing.assert_array_equal(lo, lo2)
+    np.testing.assert_array_equal(hi, hi2)
+
+
+def test_predict_interval_never_crossed_even_with_sparse_extreme_regions():
+    # very few calibration rows and a tight alpha (close quantile levels)
+    # is the classic setting where two independently-fit quantile models
+    # are most likely to cross.
+    rng = np.random.default_rng(0)
+    n = 120
+    X = pd.DataFrame({"x": rng.uniform(-5, 5, n)})
+    y = X["x"].to_numpy() * 2 + rng.normal(0, 3.0, n)
+    model = ConformalizedQuantileRegressor(alpha=0.02, random_state=0, calibration_fraction=0.3).fit(X, y)
+    lower, upper = model.predict_interval(X)
+    assert np.all(lower <= upper)
