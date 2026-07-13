@@ -20,7 +20,7 @@
     <nav class="main-nav">
       <a href="getting-started.html" aria-current="page">Docs</a>
       <a href="https://github.com/stainaz/zoneboost">GitHub</a>
-      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+      <a href="https://test.pypi.org/project/zoneboost/">PyPI</a>
     </nav>
   </div>
 </header>
@@ -79,8 +79,9 @@
         <tr><td><code>refit_on_full_data</code></td><td><code>False</code></td><td>Refit the deployed model on fit+validation data once <code>best_n_rounds_</code> is chosen; requires <code>calibration_fraction &gt; 0</code> — see <a href="how-it-works.html#honest-data-splits">Honest Data Splits</a></td></tr>
         <tr><td><code>adaptive_boundary_smoothing</code></td><td><code>False</code></td><td>Learn a per-column, per-round hard-vs-smooth zone-lookup blend instead of always fully smooth; opt-in — see <a href="how-it-works.html#adaptive-boundary-continuity">Adaptive Boundary Continuity</a></td></tr>
         <tr><td><code>boundary_shrinkage_m</code></td><td><code>10.0</code></td><td>Empirical-Bayes shrinkage strength toward full smoothness for <code>adaptive_boundary_smoothing</code> — see <a href="how-it-works.html#adaptive-boundary-continuity">Adaptive Boundary Continuity</a></td></tr>
-        <tr><td><code>loss</code></td><td><code>"squared_error"</code></td><td><strong>Regressor only.</strong> Set to <code>"quantile"</code> to target a conditional quantile instead of the mean — see <a href="how-it-works.html#quantile-regression">Quantile Regression</a></td></tr>
+        <tr><td><code>loss</code></td><td><code>"squared_error"</code></td><td><strong>Regressor only.</strong> <code>"quantile"</code> targets a conditional quantile — see <a href="how-it-works.html#quantile-regression">Quantile Regression</a>; <code>"poisson"</code>/<code>"gamma"</code>/<code>"tweedie"</code> target a log-link mean for right-skewed, non-negative targets, with an <code>offset</code> on <code>fit</code>/<code>predict</code> for exposure adjustment — see <a href="how-it-works.html#actuarial-losses">Actuarial Losses</a></td></tr>
         <tr><td><code>quantile</code></td><td><code>0.5</code></td><td><strong>Regressor only.</strong> Target quantile level when <code>loss="quantile"</code> (ignored otherwise) — see <a href="how-it-works.html#quantile-regression">Quantile Regression</a></td></tr>
+        <tr><td><code>tweedie_power</code></td><td><code>1.5</code></td><td><strong>Regressor only.</strong> Tweedie variance power when <code>loss="tweedie"</code> (ignored otherwise) — see <a href="how-it-works.html#actuarial-losses">Actuarial Losses</a></td></tr>
         <tr><td><code>random_state</code></td><td><code>42</code></td><td>Seed for the validation split and subsampling</td></tr>
       </tbody>
     </table>
@@ -91,7 +92,7 @@
       <tbody>
         <tr><td><code>rounds_</code></td><td>One entry per boosting round, each a plain dict with keys <code>"zone_info"</code>, <code>"main_effects"</code>, <code>"interactions"</code>, <code>"triples"</code> (empty unless <code>max_interaction_order=3</code>), <code>"intercept"</code>/<code>"weights"</code> (the round's fitted Lasso intercept and one weight per term — <code>fitted_residual = intercept + contributions @ weights</code>, in the same order <code>main_effects</code>/<code>interactions</code>/<code>triples</code> are themselves iterated), and <code>"diagnostics"</code> (<code>None</code> unless <code>track_reliability=True</code>; otherwise each term's own row/cell counts and cross-fold standard deviation — see <a href="explaining-predictions.html#explanation-reliability">Explanation Reliability</a>). Nothing hidden in an opaque object.</td></tr>
         <tr><td><code>best_n_rounds_</code></td><td>The round count actually used by <code>predict</code>.</td></tr>
-        <tr><td><code>val_rmse_</code> / <code>train_rmse_</code></td><td>RMSE after each round for <code>loss="squared_error"</code> (the default); mean pinball loss at <code>quantile</code> for <code>loss="quantile"</code> — whichever loss is actually being minimized.</td></tr>
+        <tr><td><code>val_rmse_</code> / <code>train_rmse_</code></td><td>RMSE after each round for <code>loss="squared_error"</code> (the default); mean pinball loss at <code>quantile</code> for <code>loss="quantile"</code>; mean deviance (<code>sklearn.metrics.mean_poisson_deviance</code>/<code>mean_gamma_deviance</code>/<code>mean_tweedie_deviance</code>) for <code>"poisson"</code>/<code>"gamma"</code>/<code>"tweedie"</code> — whichever loss is actually being minimized.</td></tr>
         <tr><td><code>categorical_features_</code></td><td>The resolved set of categorical columns (declared ∪ auto-detected).</td></tr>
         <tr><td><code>monotonic_constraints_</code></td><td>The resolved <code>{column: +1 or -1}</code> dict actually in effect (categorical columns dropped).</td></tr>
         <tr><td><code>convexity_constraints_</code></td><td>The resolved <code>{column: +1 or -1}</code> convexity dict actually in effect (same resolution as <code>monotonic_constraints_</code>).</td></tr>
@@ -188,7 +189,7 @@
     <div class="footer-links">
       <a href="https://github.com/stainaz/zoneboost">GitHub</a>
       <a href="https://github.com/stainaz/zoneboost/issues">Issues</a>
-      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+      <a href="https://test.pypi.org/project/zoneboost/">PyPI</a>
       <a href="https://github.com/stainaz/zoneboost/blob/main/LICENSE">License</a>
     </div>
   </div>

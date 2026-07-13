@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import mean_gamma_deviance, mean_poisson_deviance, mean_tweedie_deviance
 from sklearn.utils.validation import check_array
 
 __all__ = [
@@ -14,7 +15,14 @@ __all__ = [
     "resolve_monotonic_constraints",
     "resolve_bounded_effects",
     "resolve_forbidden_interactions",
+    "resolve_group_col",
+    "_glm_residual",
+    "_glm_inverse_link",
+    "_glm_baseline",
+    "_glm_deviance_score",
 ]
+
+_GLM_POWERS = {"poisson": 1.0, "gamma": 2.0}
 
 
 def ensure_dataframe(X, feature_names=None) -> pd.DataFrame:
@@ -130,3 +138,58 @@ def resolve_group_col(X: pd.DataFrame, declared):
     if name not in X.columns:
         raise ValueError(f"group_col={declared!r} is not a column of X.")
     return name
+
+
+def _glm_power(loss: str, tweedie_power: float) -> float:
+    """The Tweedie variance power unifying the three GLM losses --
+    Poisson (``p=1``) and Gamma (``p=2``) are fixed special cases of the
+    same family, ``loss="tweedie"`` exposes ``p`` directly (default
+    ``1.5``, the usual insurance pure-premium setting)."""
+    return _GLM_POWERS.get(loss, tweedie_power)
+
+
+def _glm_inverse_link(eta: np.ndarray) -> np.ndarray:
+    """Log link's inverse: ``mu = exp(eta)``. Clipped before
+    exponentiating (a plain numerical-stability guard, not a modeling
+    choice) so a large intermediate boosting score can't overflow
+    ``np.exp`` into ``inf``."""
+    return np.exp(np.clip(eta, -30.0, 30.0))
+
+
+def _glm_residual(y: np.ndarray, mu: np.ndarray, power: float) -> np.ndarray:
+    """Negative deviance gradient w.r.t. the link-scale linear predictor
+    ``eta = log(mu)``, for the Tweedie family at variance power ``power``
+    -- what gets boosted, exactly the role ``y - current_pred`` plays for
+    ``loss="squared_error"`` and ``y - sigmoid(current_score)`` plays for
+    :class:`zoneboost.ZoneBoostClassifier`'s log-odds booster.
+
+    ``residual = mu**(1 - power) * (y - mu)`` -- reduces to ``y - mu`` at
+    ``power=1`` (Poisson) and ``(y - mu) / mu`` at ``power=2`` (Gamma),
+    the standard boosting residuals for each family; verified directly
+    against both in tests.
+    """
+    return mu ** (1.0 - power) * (y - mu)
+
+
+def _glm_baseline(y: np.ndarray, offset: np.ndarray, power: float) -> float:
+    """Best constant link-scale predictor given a (possibly nonzero,
+    per-row) fixed ``offset``: ``log(sum(y) / sum(exp(offset)))`` -- the
+    exact intercept-only MLE for Poisson with a fixed offset (the score
+    equation ``sum(y) = sum(exp(beta0 + offset))`` solved in closed
+    form). Reused as-is for Gamma/Tweedie: not their exact MLE, but the
+    same mean-matching, disclosed approximation quantile-mode's
+    machinery already relies on elsewhere in this codebase."""
+    return float(np.log(np.sum(y) / np.sum(np.exp(offset))))
+
+
+def _glm_deviance_score(y: np.ndarray, mu: np.ndarray, loss: str, tweedie_power: float) -> float:
+    """Mean deviance for whichever GLM loss is active -- the ``_score``
+    role RMSE/pinball loss play for ``squared_error``/``quantile``.
+    Dispatches directly to scikit-learn's own, already-tested
+    ``mean_poisson_deviance``/``mean_gamma_deviance``/
+    ``mean_tweedie_deviance``, not a hand-derived formula."""
+    if loss == "poisson":
+        return float(mean_poisson_deviance(y, mu))
+    if loss == "gamma":
+        return float(mean_gamma_deviance(y, mu))
+    return float(mean_tweedie_deviance(y, mu, power=tweedie_power))

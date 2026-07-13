@@ -20,7 +20,7 @@
     <nav class="main-nav">
       <a href="getting-started.html" aria-current="page">Docs</a>
       <a href="https://github.com/stainaz/zoneboost">GitHub</a>
-      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+      <a href="https://test.pypi.org/project/zoneboost/">PyPI</a>
     </nav>
   </div>
 </header>
@@ -637,6 +637,62 @@ contrib["income x hospital"]   # this row's own hospital's local deviation</code
     isn't a meaningful coverage interval the same way it is around a mean — see
     Conformalized Quantile Regression below instead.</p>
 
+    <h2 id="actuarial-losses">Actuarial Losses (Poisson, Gamma, Tweedie)</h2>
+    <p><code>loss="poisson"</code>/<code>"gamma"</code>/<code>"tweedie"</code> target the
+    conditional mean of a right-skewed, non-negative target under a <strong>log
+    link</strong> — the frequency/severity/pure-premium pattern actuarial GLM stacks
+    use — boosted in <strong>link space</strong> exactly the way
+    <code>ZoneBoostClassifier</code> already boosts in log-odds space: a running
+    link-scale score accumulates round to round, each round's residual is the
+    negative deviance gradient (<code>mu**(1 - power) * (y - mu)</code>, unifying all
+    three losses via the Tweedie variance power — <code>power=1</code> for Poisson,
+    <code>power=2</code> for Gamma, <code>power=tweedie_power</code> — default
+    <code>1.5</code> — otherwise), stacked with the same ordinary Lasso every other
+    loss uses (the residual is still just a plain number to regress, no new
+    combination step needed), and the log link (<code>mu = exp(score)</code>) is
+    applied only once, at <code>predict</code> time. <code>explain(X)</code>
+    therefore sums to the <strong>link-scale</strong> score, not the final mean —
+    the identical convention already documented for the classifier's log-odds.</p>
+    <pre><code>model = ZoneBoostRegressor(loss="poisson").fit(X, claims, offset=np.log(exposure))
+model.predict(X, offset=np.log(exposure))          # claims per policy, exposure-adjusted
+model.explain(X).sum(axis=1) + np.log(exposure)    # == log(predict(X)), exactly</code></pre>
+    <p><code>offset</code> (only meaningful for these three losses) is a per-row,
+    already-<strong>link-scale</strong> term — e.g. <code>np.log(exposure)</code>, not
+    <code>exposure</code> itself — added to the model's own score before the inverse
+    link, the same <code>base_margin</code>/<code>init_score</code> convention
+    XGBoost/LightGBM use. It must be supplied again at
+    <code>predict</code>/<code>predict_interval</code> time for new data (the model
+    never learns it); omitting it defaults to <code>0</code> everywhere.
+    <code>train_rmse_</code>/<code>val_rmse_</code> store the corresponding mean
+    deviance (<code>sklearn.metrics.mean_poisson_deviance</code>/
+    <code>mean_gamma_deviance</code>/<code>mean_tweedie_deviance</code>) rather than
+    RMSE for these three losses. Zone construction, cross-fitting, and pair
+    screening's cheap proxy stay squared-error-flavored on the link-scale residual
+    regardless — the same disclosed approximation <code>loss="quantile"</code>
+    already uses. Requires <code>y &gt;= 0</code> for
+    <code>"poisson"</code>/<code>"tweedie"</code>, <code>y &gt; 0</code> for
+    <code>"gamma"</code> — raises <code>ValueError</code> at <code>fit</code>
+    otherwise. <code>predict_interval</code> is not available for these three losses
+    (a constant-width additive margin isn't a sensible interval for a skewed,
+    non-negative target).</p>
+    <div class="note">
+      <strong>Scope:</strong> regressor only; <code>sample_weight</code> is not yet
+      supported for any loss (a separate, larger change to the empirical-Bayes
+      shrinkage machinery itself — <code>_zone_raw_stat</code> and everything built
+      on it currently compute unweighted row counts). <code>tweedie_power</code> is a
+      fixed, user-set constant, not auto-tuned.
+    </div>
+    <p><strong>Measured, honestly</strong>: on synthetic insurance-style frequency
+    data (age + region effects, exposure ranging 0.1-1.0 policy-years), a Poisson
+    model with <code>offset=log(exposure)</code> achieved a mean deviance of
+    <code>0.626</code> versus <code>0.695</code> for a naive constant-rate baseline
+    (same total claims, no covariates) — a real <strong>9.9%</strong> reduction. On
+    synthetic severity data, a Gamma model reduced mean deviance from
+    <code>0.473</code> (constant-mean baseline) to <code>0.433</code>, an
+    <strong>8.5%</strong> reduction. <code>loss="squared_error"</code>/
+    <code>"quantile"</code> are completely unaffected — verified bit-for-bit against
+    the prior release.</p>
+
     <h2 id="conformalized-quantile-regression">Conformalized Quantile Regression (CQR)</h2>
     <p><a href="#prediction-intervals">Split-conformal prediction intervals</a> give a
     distribution-free coverage guarantee, but the margin is a single fixed width
@@ -779,7 +835,7 @@ lower, upper = cqr.predict_interval(X)</code></pre>
     <div class="footer-links">
       <a href="https://github.com/stainaz/zoneboost">GitHub</a>
       <a href="https://github.com/stainaz/zoneboost/issues">Issues</a>
-      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+      <a href="https://test.pypi.org/project/zoneboost/">PyPI</a>
       <a href="https://github.com/stainaz/zoneboost/blob/main/LICENSE">License</a>
     </div>
   </div>

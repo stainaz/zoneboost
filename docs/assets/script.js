@@ -109,6 +109,7 @@
     { title: "Honest Data Splits (Calibration & Final Refit)", crumb: "How It Works", url: "how-it-works.html#honest-data-splits" },
     { title: "Adaptive Boundary Continuity", crumb: "How It Works", url: "how-it-works.html#adaptive-boundary-continuity" },
     { title: "Quantile Regression", crumb: "How It Works", url: "how-it-works.html#quantile-regression" },
+    { title: "Actuarial Losses (Poisson, Gamma, Tweedie)", crumb: "How It Works", url: "how-it-works.html#actuarial-losses" },
     { title: "Conformalized Quantile Regression (CQR)", crumb: "How It Works", url: "how-it-works.html#conformalized-quantile-regression" },
     { title: "Global Shape Constraints", crumb: "How It Works", url: "how-it-works.html#global-shape-constraints" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },

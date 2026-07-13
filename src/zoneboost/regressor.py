@@ -14,6 +14,11 @@ from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_is_fitted
 
 from ._common import (
+    _glm_baseline,
+    _glm_deviance_score,
+    _glm_inverse_link,
+    _glm_power,
+    _glm_residual,
     ensure_dataframe,
     resolve_bounded_effects,
     resolve_categorical_features,
@@ -226,8 +231,43 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         regardless of loss). ``QuantileRegressor``'s linear-programming
         solver is substantially more expensive per round than ``Lasso`` --
         measured roughly 30x slower end-to-end in one benchmark -- a real,
-        disclosed cost of ``loss="quantile"``, not a free option. Raises
-        ``ValueError`` at `fit` if not one of these two strings.
+        disclosed cost of ``loss="quantile"``, not a free option.
+
+        ``"poisson"``/``"gamma"``/``"tweedie"`` target the conditional mean
+        of a right-skewed, non-negative target under a **log link** --
+        the actuarial frequency/severity/pure-premium pattern -- boosted in
+        **link space** exactly the way :class:`zoneboost.ZoneBoostClassifier`
+        already boosts in log-odds space: a running link-scale score is
+        accumulated round to round, each round's residual is the negative
+        deviance gradient (``mu**(1 - power) * (y - mu)``, unifying all
+        three losses via the Tweedie variance power -- ``power=1`` for
+        Poisson, ``power=2`` for Gamma, ``power=tweedie_power`` otherwise;
+        see ``tweedie_power`` below), stacked with the same ordinary Lasso
+        every other loss uses (no new combination step needed, since the
+        residual is still just a plain number to regress), and the log
+        link (``mu = exp(score)``) is applied only once, at `predict`
+        time -- so ``explain(X)`` sums to the **link-scale** score, not
+        the final mean, the identical convention already documented for
+        the classifier's log-odds. ``train_rmse_``/``val_rmse_`` store the
+        corresponding mean deviance (via ``sklearn.metrics.mean_poisson_
+        deviance``/``mean_gamma_deviance``/``mean_tweedie_deviance``), not
+        RMSE, for these three losses. Requires ``y >= 0`` for
+        ``"poisson"``/``"tweedie"``, ``y > 0`` for ``"gamma"`` -- raises
+        ``ValueError`` at `fit` otherwise. See ``offset`` on `fit`/
+        `predict`/`explain`/`feature_importance` for the exposure term
+        (e.g. ``offset=np.log(exposure)``) these three losses are meant to
+        be combined with.
+
+        Zone construction, pair screening's cheap proxy, and cross-fitting
+        stay squared-error-flavored on the link-scale residual for these
+        three losses too -- the same disclosed approximation
+        ``loss="quantile"`` already uses, not a new exception.
+
+        **Scope**: regressor only; ``sample_weight`` is not yet supported
+        for any loss (a separate, larger change to the empirical-Bayes
+        shrinkage machinery itself, not shipped here).
+
+        Raises ``ValueError`` at `fit` if not one of these five strings.
     quantile : float, default=0.5
         The target quantile level when ``loss="quantile"`` (ignored
         otherwise). Must be in ``(0, 1)``; raises ``ValueError`` at `fit`
@@ -236,6 +276,12 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         :class:`zoneboost.ConformalizedQuantileRegressor` for a
         distribution-free, locally-adaptive prediction interval built from
         exactly two such quantile fits.
+    tweedie_power : float, default=1.5
+        The Tweedie variance power when ``loss="tweedie"`` (ignored
+        otherwise) -- ``1 < tweedie_power < 2`` is the usual insurance
+        pure-premium setting (a compound Poisson-Gamma distribution: mass
+        at exactly 0, continuous and positive otherwise). Not auto-tuned;
+        a fixed, user-set constant.
     convexity_constraints : dict, default=None
         ``{column: +1 convex, -1 concave}`` -- forces a continuous column's
         *main effect* onto a convex/concave sequence across its zones:
@@ -448,6 +494,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         boundary_shrinkage_m: float = 10.0,
         loss: str = "squared_error",
         quantile: float = 0.5,
+        tweedie_power: float = 1.5,
         convexity_constraints=None,
         bounded_effects=None,
         forbidden_interactions=None,
@@ -481,6 +528,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.boundary_shrinkage_m = boundary_shrinkage_m
         self.loss = loss
         self.quantile = quantile
+        self.tweedie_power = tweedie_power
         self.convexity_constraints = convexity_constraints
         self.bounded_effects = bounded_effects
         self.forbidden_interactions = forbidden_interactions
@@ -493,7 +541,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
     def _ensure_dataframe(self, X) -> pd.DataFrame:
         return ensure_dataframe(X, getattr(self, "feature_names_in_", None))
 
-    def fit(self, X, y):
+    def fit(self, X, y, offset=None):
         """Fit the boosted zone-grid ensemble.
 
         Parameters
@@ -502,7 +550,12 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             Training predictors. Passing a DataFrame is recommended when
             using ``categorical_features`` by name.
         y : array-like of shape (n_samples,)
-            Training target.
+            Training target. ``loss="poisson"``/``"tweedie"`` require
+            ``y >= 0``; ``loss="gamma"`` requires ``y > 0``.
+        offset : array-like of shape (n_samples,), default=None
+            Only meaningful for ``loss in ("poisson", "gamma", "tweedie")``
+            -- see :meth:`predict`. Raises ``ValueError`` if given together
+            with ``loss in ("squared_error", "quantile")``.
 
         Returns
         -------
@@ -516,10 +569,18 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         y_arr = np.asarray(y, dtype=float).reshape(-1)
         if len(X) != len(y_arr):
             raise ValueError(f"X and y have inconsistent lengths: {len(X)} vs {len(y_arr)}")
-        if self.loss not in ("squared_error", "quantile"):
-            raise ValueError(f"loss must be 'squared_error' or 'quantile', got {self.loss!r}")
+        valid_losses = ("squared_error", "quantile", "poisson", "gamma", "tweedie")
+        if self.loss not in valid_losses:
+            raise ValueError(f"loss must be one of {valid_losses}, got {self.loss!r}")
         if self.loss == "quantile" and not 0 < self.quantile < 1:
             raise ValueError(f"quantile must be in (0, 1), got {self.quantile!r}")
+        if offset is not None and self.loss not in ("poisson", "gamma", "tweedie"):
+            raise ValueError(f"offset is only supported for loss in ('poisson', 'gamma', 'tweedie'), got {self.loss!r}")
+        if self.loss in ("poisson", "tweedie") and np.any(y_arr < 0):
+            raise ValueError(f"loss={self.loss!r} requires y >= 0.")
+        if self.loss == "gamma" and np.any(y_arr <= 0):
+            raise ValueError("loss='gamma' requires y > 0.")
+        offset_arr = self._resolve_offset(offset, len(X))
 
         self.n_features_in_ = X.shape[1]
         self.feature_names_in_ = np.array(X.columns)
@@ -556,18 +617,22 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             cal_idx, val_idx, fit_idx = perm[:n_cal], perm[n_cal : n_cal + n_val], perm[n_cal + n_val :]
             X_fit = X.iloc[fit_idx].reset_index(drop=True)
             y_fit = y_arr[fit_idx]
+            offset_fit = offset_arr[fit_idx]
             X_val = X.iloc[val_idx].reset_index(drop=True) if has_val else None
             y_val = y_arr[val_idx] if has_val else None
+            offset_val = offset_arr[val_idx] if has_val else None
             X_cal = X.iloc[cal_idx].reset_index(drop=True) if has_cal else None
             y_cal = y_arr[cal_idx] if has_cal else None
+            offset_cal = offset_arr[cal_idx] if has_cal else None
         else:
-            X_fit, y_fit = X, y_arr
-            X_val = y_val = X_cal = y_cal = None
+            X_fit, y_fit, offset_fit = X, y_arr, offset_arr
+            X_val = y_val = X_cal = y_cal = offset_val = offset_cal = None
 
         # Phase 1 (selection): fit on X_fit, track val_rmse_ on X_val (if
         # any) with early stopping, to decide best_n_rounds_.
         rounds, baseline, train_rmse, val_rmse = self._boost_rounds(
-            X_fit, y_fit, rng, self.n_rounds, X_val, y_val, early_stopping=True
+            X_fit, y_fit, rng, self.n_rounds, X_val, y_val, early_stopping=True,
+            offset_train=offset_fit, offset_val=offset_val,
         )
         self.train_rmse_ = train_rmse
         self.val_rmse_ = val_rmse
@@ -582,8 +647,11 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             # phase-1 selection diagnostics; they aren't recomputed here.
             X_refit = pd.concat([X_fit, X_val], ignore_index=True)
             y_refit = np.concatenate([y_fit, y_val])
+            offset_refit = np.concatenate([offset_fit, offset_val])
             refit_rng = np.random.default_rng(self.random_state)
-            rounds, baseline, _, _ = self._boost_rounds(X_refit, y_refit, refit_rng, self.best_n_rounds_)
+            rounds, baseline, _, _ = self._boost_rounds(
+                X_refit, y_refit, refit_rng, self.best_n_rounds_, offset_train=offset_refit
+            )
 
         self.rounds_ = rounds
         self.baseline_ = baseline
@@ -596,9 +664,9 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         # trained on: the ValueError above guarantees calibration_fraction >
         # 0 whenever refit_on_full_data folds the validation split into
         # training.
-        cal_X, cal_y = (X_cal, y_cal) if has_cal else (X_val, y_val)
+        cal_X, cal_y, cal_offset = (X_cal, y_cal, offset_cal) if has_cal else (X_val, y_val, offset_val)
         if cal_X is not None:
-            cal_pred = self._raw_predict(cal_X, self.best_n_rounds_)
+            cal_pred = self._raw_predict(cal_X, self.best_n_rounds_, offset=cal_offset)
             self.conformal_scores_ = np.sort(np.abs(cal_y - cal_pred))
         else:
             self.conformal_scores_ = None
@@ -607,27 +675,79 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
 
         return self
 
-    def _baseline_stat(self, y_train: np.ndarray) -> float:
+    def _baseline_stat(self, y_train: np.ndarray, offset: np.ndarray) -> float:
         """The starting prediction before any boosting round -- the best
         constant predictor for whichever loss is active: the mean for
         ``loss="squared_error"``, the target quantile for
-        ``loss="quantile"``."""
+        ``loss="quantile"``, or (for ``"poisson"``/``"gamma"``/
+        ``"tweedie"``) the link-scale intercept matching ``offset`` via
+        :func:`zoneboost._common._glm_baseline` -- ``offset`` is always an
+        all-zeros array for the first three losses (enforced at `fit`), so
+        this reduces to the plain mean/quantile exactly as before for
+        them."""
         if self.loss == "quantile":
             return float(np.quantile(y_train, self.quantile))
+        if self.loss in ("poisson", "gamma", "tweedie"):
+            return _glm_baseline(y_train, offset, _glm_power(self.loss, self.tweedie_power))
         return float(y_train.mean())
 
+    def _to_mean(self, link_pred: np.ndarray, offset: np.ndarray) -> np.ndarray:
+        """Converts a running link-scale score to the mean-scale
+        prediction: identity for ``squared_error``/``quantile`` (``offset``
+        is always zero there), the log link's inverse (``mu = exp(link_pred
+        + offset)``, via :func:`zoneboost._common._glm_inverse_link`) for
+        ``poisson``/``gamma``/``tweedie`` -- the same "apply the link only
+        once, at the very end" pattern :class:`zoneboost.ZoneBoostClassifier`
+        already uses for its sigmoid."""
+        if self.loss in ("poisson", "gamma", "tweedie"):
+            return _glm_inverse_link(link_pred + offset)
+        return link_pred
+
+    def _residual(self, y_train: np.ndarray, mu: np.ndarray) -> np.ndarray:
+        """The value each boosting round fits against: ``y - mu`` for
+        ``squared_error``/``quantile`` (where ``mu`` is already
+        ``current_pred`` itself, ``_to_mean`` being the identity there),
+        or the GLM negative deviance gradient (:func:`zoneboost._common.
+        _glm_residual`) for ``poisson``/``gamma``/``tweedie``."""
+        if self.loss in ("poisson", "gamma", "tweedie"):
+            return _glm_residual(y_train, mu, _glm_power(self.loss, self.tweedie_power))
+        return y_train - mu
+
+    def _resolve_offset(self, offset, n: int) -> np.ndarray:
+        """Normalizes a user-supplied ``offset`` (or ``None``, meaning an
+        all-zeros array -- no exposure adjustment) to a plain float array
+        of length ``n``. Not a fitted attribute: unlike every other
+        per-column parameter, ``offset`` is per-row *known* information
+        the model never learns, so it must be supplied fresh at every
+        `fit`/`predict` call, the same contract XGBoost/LightGBM's own
+        ``base_margin``/``init_score`` use."""
+        if offset is None:
+            return np.zeros(n)
+        offset_arr = np.asarray(offset, dtype=float).reshape(-1)
+        if len(offset_arr) != n:
+            raise ValueError(f"offset must have length {n}, got {len(offset_arr)}")
+        return offset_arr
+
     def _score(self, y_true: np.ndarray, pred: np.ndarray) -> float:
-        """The loss actually being minimized, evaluated on ``pred``: RMSE
-        for ``loss="squared_error"``, mean pinball loss at ``self.quantile``
-        for ``loss="quantile"`` -- used identically for
-        ``train_rmse_``/``val_rmse_``/early stopping/``best_n_rounds_``
-        selection regardless of which loss is active."""
+        """The loss actually being minimized, evaluated on ``pred`` (a
+        mean-scale prediction, i.e. already passed through ``_to_mean``
+        for GLM losses): RMSE for ``loss="squared_error"``, mean pinball
+        loss at ``self.quantile`` for ``loss="quantile"``, mean deviance
+        (:func:`zoneboost._common._glm_deviance_score`) for ``"poisson"``/
+        ``"gamma"``/``"tweedie"`` -- used identically for ``train_rmse_``/
+        ``val_rmse_``/early stopping/``best_n_rounds_`` selection
+        regardless of which loss is active."""
         if self.loss == "quantile":
             diff = y_true - pred
             return float(np.mean(np.maximum(self.quantile * diff, (self.quantile - 1) * diff)))
+        if self.loss in ("poisson", "gamma", "tweedie"):
+            return _glm_deviance_score(y_true, pred, self.loss, self.tweedie_power)
         return float(np.sqrt(np.mean((y_true - pred) ** 2)))
 
-    def _boost_rounds(self, X_train, y_train, rng, n_rounds, X_val=None, y_val=None, early_stopping=False):
+    def _boost_rounds(
+        self, X_train, y_train, rng, n_rounds, X_val=None, y_val=None, early_stopping=False,
+        offset_train=None, offset_val=None,
+    ):
         """Core boosting loop -- extracted so `fit` can run it twice: once
         for round-count selection (on the fit split, tracking ``val_rmse_``
         with early stopping), and optionally again for a final refit
@@ -638,7 +758,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         -------
         rounds, baseline, train_rmse, val_rmse
         """
-        baseline = self._baseline_stat(y_train)
+        offset_train = self._resolve_offset(offset_train, len(y_train))
+        baseline = self._baseline_stat(y_train, offset_train)
         n = len(y_train)
         n_row_sample = min(n, max(min(20, n), int(n * self.row_subsample)))
         n_predictors = len(self.predictor_names_)
@@ -647,13 +768,15 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         current_pred = np.full(n, baseline)
         has_val = X_val is not None
         if has_val:
+            offset_val = self._resolve_offset(offset_val, len(y_val))
             current_val_pred = np.full(len(y_val), baseline)
 
         rounds, train_rmse, val_rmse = [], [], []
         no_improve_streak = 0
 
         for _ in range(n_rounds):
-            residual = y_train - current_pred
+            mu = self._to_mean(current_pred, offset_train)
+            residual = self._residual(y_train, mu)
 
             row_idx = rng.choice(n, size=n_row_sample, replace=False)
             if self.group_col_ is not None:
@@ -722,13 +845,13 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                     "diagnostics": diagnostics,
                 }
             )
-            train_rmse.append(self._score(y_train, current_pred))
+            train_rmse.append(self._score(y_train, self._to_mean(current_pred, offset_train)))
 
             if has_val:
                 val_contributions = weak_learner_contributions(X_val, zone_info, main_effects, interactions, triples)
                 val_fitted = intercept + val_contributions @ weights
                 current_val_pred = current_val_pred + self.learning_rate * val_fitted
-                val_rmse.append(self._score(y_val, current_val_pred))
+                val_rmse.append(self._score(y_val, self._to_mean(current_val_pred, offset_val)))
 
                 if early_stopping and self.n_iter_no_change is not None:
                     best_so_far = min(val_rmse)
@@ -741,7 +864,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
 
         return rounds, baseline, train_rmse, val_rmse
 
-    def _raw_predict(self, X: pd.DataFrame, n_rounds: int) -> np.ndarray:
+    def _raw_predict(self, X: pd.DataFrame, n_rounds: int, offset: np.ndarray = None) -> np.ndarray:
+        offset = self._resolve_offset(offset, len(X))
         pred = np.full(len(X), self.baseline_)
         for round_ in self.rounds_[:n_rounds]:
             contributions = weak_learner_contributions(
@@ -749,7 +873,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             )
             fitted_residual = round_["intercept"] + contributions @ round_["weights"]
             pred = pred + self.learning_rate * fitted_residual
-        return pred
+        return self._to_mean(pred, offset)
 
     def _apply_overrides(self, X: pd.DataFrame, contributions: pd.DataFrame) -> pd.DataFrame:
         """Replaces an overridden main effect's contribution with its
@@ -775,7 +899,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             contributions[feature] = values
         return contributions
 
-    def predict(self, X, n_rounds: int = None) -> np.ndarray:
+    def predict(self, X, n_rounds: int = None, offset=None) -> np.ndarray:
         """Predict target values.
 
         Parameters
@@ -786,6 +910,13 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             fitted ``best_n_rounds_``. Useful for inspecting how the
             prediction evolves round by round (analogous to
             ``staged_predict`` on sklearn's own boosting estimators).
+        offset : array-like of shape (n_samples,), default=None
+            Only meaningful for ``loss in ("poisson", "gamma", "tweedie")``
+            -- a per-row, already-link-scale (e.g. ``np.log(exposure)``)
+            term added to the model's own link-scale score before the
+            inverse link is applied. ``None`` (default) means no exposure
+            adjustment. Ignored (with no effect) for
+            ``"squared_error"``/``"quantile"``.
 
         Returns
         -------
@@ -794,9 +925,11 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         check_is_fitted(self, "rounds_")
         n_rounds = n_rounds if n_rounds is not None else self.best_n_rounds_
         X = self._ensure_dataframe(X)
+        offset_arr = self._resolve_offset(offset, len(X))
         if self.effect_overrides_:
-            return self.explain(X, n_rounds).sum(axis=1).to_numpy()
-        return self._raw_predict(X, n_rounds)
+            link_sum = self.explain(X, n_rounds).sum(axis=1).to_numpy()
+            return self._to_mean(link_sum, offset_arr)
+        return self._raw_predict(X, n_rounds, offset=offset_arr)
 
     def predict_interval(self, X, alpha: float = 0.1) -> tuple:
         """Split-conformal prediction interval: a constant-width margin
@@ -820,7 +953,13 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         margin around a single conditional quantile isn't a meaningful
         coverage interval the same way it is around a mean; use
         :class:`zoneboost.ConformalizedQuantileRegressor` instead for a
-        locally-adaptive interval built from two quantile fits.
+        locally-adaptive interval built from two quantile fits. Also not
+        available for ``loss in ("poisson", "gamma", "tweedie")`` -- same
+        reasoning: a symmetric additive margin around a mean prediction is
+        not a sensible interval for a skewed, non-negative target (it can
+        even go negative), and combining it with ``offset`` has no
+        well-defined meaning here. Not designed in this pass -- a
+        distribution-appropriate interval for these losses is future work.
 
         Parameters
         ----------
@@ -838,6 +977,11 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 "predict_interval is not available when loss='quantile' -- a constant-width margin "
                 "around a single conditional quantile isn't a meaningful coverage interval the same "
                 "way it is around a mean. Use zoneboost.ConformalizedQuantileRegressor instead."
+            )
+        if self.loss in ("poisson", "gamma", "tweedie"):
+            raise ValueError(
+                f"predict_interval is not available when loss={self.loss!r} -- a constant-width "
+                "additive margin isn't a sensible interval for a skewed, non-negative target."
             )
         if self.conformal_scores_ is None:
             raise ValueError(
@@ -857,7 +1001,17 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         """Exact per-row, per-term prediction attribution -- not a SHAP/LIME
         -style approximation, but an algebraic decomposition of the same
         computation `predict` performs, so results sum exactly to the
-        prediction (see :mod:`zoneboost._explain` for the derivation).
+        prediction for ``loss="squared_error"``/``"quantile"`` (see
+        :mod:`zoneboost._explain` for the derivation).
+
+        For ``loss in ("poisson", "gamma", "tweedie")``, row sums equal
+        the model's **link-scale** score instead -- ``predict(X, offset=...)
+        == exp(explain(X).sum(axis=1) + offset)`` -- the identical
+        convention already documented for
+        :meth:`zoneboost.ZoneBoostClassifier.explain`'s log-odds sum
+        (probability contributions don't add linearly through a link
+        function either way, so the link-scale decomposition is what
+        stays exact).
 
         Parameters
         ----------
@@ -877,7 +1031,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             One column per term that appeared in any round (a predictor's
             own name for its main effect, ``"A x B"`` for an interaction
             pair, ``"A x B x C"`` for a 3-way interaction) plus
-            ``"baseline"``. Row sums equal ``predict(X)`` exactly, up to
+            ``"baseline"``. Row sums equal ``predict(X)`` exactly (see the
+            link-scale note above for the three GLM losses), up to
             floating-point rounding. If ``include_reliability=True``,
             instead returns a tuple ``(contributions, reliability)`` where
             ``reliability`` is a ``{term_name: DataFrame}`` dict, one row
