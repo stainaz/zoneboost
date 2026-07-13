@@ -531,12 +531,27 @@ dramatically cheaper than the full fit (roughly 36μs vs. 44μs per pair in
 one benchmark) — the real cost driver is the `O(p²)` Python-loop overhead
 itself, which both the old and new mechanism pay equally. The net result is
 a real but modest **~1.4x** speedup, consistent from 80 to 300 columns, not
-an order-of-magnitude win. A fully vectorized screening pass (batching every
-pair's joint cell counts via a single matrix multiplication instead of a
-Python loop) could close that gap further but isn't implemented here —
-noted as a possible future improvement rather than shipped speculatively.
-Leaving `max_pair_interactions=None` (the default) keeps every pair — the
-exact same behavior as before this change, verified bit-for-bit.
+an order-of-magnitude win. Leaving `max_pair_interactions=None` (the
+default) keeps every pair — the exact same behavior as before this change,
+verified bit-for-bit.
+
+A fully vectorized screening pass — batching every pair's joint-cell counts
+via a matrix multiplication instead of a Python loop — was prototyped as a
+possible way to close that remaining gap. A sparse (`scipy.sparse`) version
+came out consistently *slower* than the plain loop (0.2x–0.5x): sparse-sparse
+matmul on a one-hot indicator matrix still pays for every `(row, zone_a,
+zone_b)` triple regardless of how sparse the output is, so it does the same
+`O(n_rows·p²)` work with more overhead, not less. Switching to a dense BLAS
+matmul recovered a real speedup (~1.4x–1.8x), but *only* for wide, fairly
+shallow data (reliable from roughly 80–120+ columns at a few thousand rows);
+at more rows per column it measured up to **~3x slower**, since building the
+dense matrix and its full cross-product has a fixed cost that doesn't always
+pay off. There's no cheap, reliable way to predict which side of that
+crossover a given fit lands on without risking a real regression for some
+users — so it isn't wired into the default screening path. The function
+(`_batched_pair_scores`) ships anyway, tested and exact, for advanced callers
+who've benchmarked their own workload and know it's wide-and-shallow enough
+to benefit.
 
 ### Hierarchical zones (grouped data)
 

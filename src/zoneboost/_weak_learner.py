@@ -408,6 +408,82 @@ def _pair_interaction_score(
     return float(np.sum(counts * (cell_mean - additive) ** 2) / len(residual))
 
 
+def _batched_pair_scores(
+    zones: dict,
+    n_zones: dict,
+    columns: list,
+    residual: np.ndarray,
+    forbidden_interactions: frozenset = frozenset(),
+) -> dict:
+    """Matrix-batched alternative to calling :func:`_pair_interaction_score`
+    once per candidate pair in a Python loop. Mathematically identical, not
+    an approximation -- every column's own one-hot zone-indicator block is
+    concatenated into one big dense matrix ``Z`` (``n_rows x total_zones``),
+    and ``Z.T @ Z`` / ``Z.T @ (Z scaled by residual)`` (both BLAS ``dgemm``
+    calls) are computed *once*; each pair's joint-cell table is then a block
+    slice of these two precomputed matrices, fed through the same
+    cell_mean/row_mean/col_mean/additive/score arithmetic
+    :func:`_pair_interaction_score` uses.
+
+    **Not wired into the default screening path.** A first version used a
+    sparse ``scipy.sparse`` matmul to keep memory down, but benchmarked
+    *slower* than the plain per-pair loop at every size tried (0.2x-0.5x) --
+    sparse-sparse matmul on a one-hot matrix pays for every ``(row, col_a,
+    col_b)`` triple regardless of output sparsity, so it does the same
+    O(n_rows * p^2) work as the loop with more overhead, not less. Switching
+    to a dense BLAS matmul (this version) recovers a real ~1.4x-1.8x speedup,
+    but *only* for wide, fairly shallow problems (benchmarked: reliable from
+    roughly 80-120+ columns at a few thousand rows); at more rows per column
+    (e.g. 8000 rows, 40-70 columns) it was measured up to ~3x *slower*, since
+    building the dense ``n_rows x total_zones`` matrix and its full
+    ``total_zones x total_zones`` product has fixed costs that don't
+    reliably pay off. There is no cheap, reliable way to predict which side
+    of that crossover a given fit falls on without risking a real regression
+    for some users -- so this function is kept available (tested, exact) for
+    advanced callers who have benchmarked their own workload, but
+    :func:`weak_learner_fit`'s screening path keeps using the plain
+    per-pair loop unconditionally. See the "Pair Screening" docs section for
+    the full measured numbers.
+    """
+    if len(columns) < 2:
+        return {}
+
+    n_rows = len(residual)
+    offsets = {}
+    offset = 0
+    for col in columns:
+        offsets[col] = offset
+        offset += n_zones[col]
+    total_zones = offset
+
+    Z = np.zeros((n_rows, total_zones), dtype=np.float64)
+    rows = np.arange(n_rows)
+    for col in columns:
+        Z[rows, zones[col] + offsets[col]] = 1.0
+
+    counts_mat = Z.T @ Z
+    sums_mat = Z.T @ (Z * residual[:, None])
+
+    overall_mean = float(residual.mean())
+    scores = {}
+    for a, b in itertools.combinations(columns, 2):
+        if frozenset((a, b)) in forbidden_interactions:
+            continue
+        oa, ob = offsets[a], offsets[b]
+        na, nb = n_zones[a], n_zones[b]
+        counts = counts_mat[oa : oa + na, ob : ob + nb]
+        sums = sums_mat[oa : oa + na, ob : ob + nb]
+        cell_mean = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
+
+        row_counts, col_counts = counts.sum(axis=1), counts.sum(axis=0)
+        row_mean = np.divide(sums.sum(axis=1), row_counts, out=np.zeros(na), where=row_counts > 0)
+        col_mean = np.divide(sums.sum(axis=0), col_counts, out=np.zeros(nb), where=col_counts > 0)
+
+        additive = row_mean[:, None] + col_mean[None, :] - overall_mean
+        scores[(a, b)] = float(np.sum(counts * (cell_mean - additive) ** 2) / n_rows)
+    return scores
+
+
 def _blend_1d(deviation: np.ndarray, z_lo, z_hi, w: np.ndarray) -> np.ndarray:
     """Linear interpolation between a zone's own value and its neighbor's
     (see ``_column_soft_zone_index``) -- degenerates to the plain hard
