@@ -31,7 +31,13 @@ from ._evidence_card import evidence_card as _evidence_card
 from ._explain import explain_rounds
 from ._purify import purify_contributions
 from ._reliability import evidence_report, explain_reliability
-from ._weak_learner import _column_zone_index, _fit_lasso_weights, weak_learner_contributions, weak_learner_fit
+from ._weak_learner import (
+    _column_zone_index,
+    _fit_lasso_weights,
+    _trimmed_mean,
+    weak_learner_contributions,
+    weak_learner_fit,
+)
 
 __all__ = ["ZoneBoostRegressor"]
 
@@ -480,6 +486,24 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         :attr:`val_rmse_` still reflect the *original* selection-phase
         curves, not the refit pass, since the refit's own training dynamics
         on a different dataset aren't a meaningful continuation of them.
+    trim_fraction : float, default=0.0
+        Robustify each main effect's own per-zone statistic against
+        outlier rows: compute a **trimmed mean** (drop the top/bottom
+        ``trim_fraction`` of a zone's own rows, sorted, then average the
+        rest) instead of the plain mean, before the identical empirical-
+        Bayes shrinkage formula is applied -- see "Robust cell statistics
+        (trim_fraction)" in the docs. Must be in ``[0, 0.5)``. Main
+        effects only -- pairs, triples, zone-boundary construction, and
+        pair-screening's cheap proxy stay ordinary-mean-flavored
+        regardless (the same disclosed scope ``quantile`` mode already
+        carries for those). Not supported with ``loss="quantile"``
+        (raises ``ValueError`` at `fit`) -- quantile mode already targets
+        a specific order statistic, and trimming doesn't compose with
+        that the way it does with a mean. For ``"poisson"``/``"gamma"``/
+        ``"tweedie"``, only each round's own main-effect zone statistics
+        are robustified, not the initial baseline intercept (no simple
+        trimmed equivalent for `_glm_baseline`'s closed-form MLE).
+        ``0.0`` (default) is bit-identical to every prior release.
     random_state : int, default=42
         Seed controlling the validation split and the per-round row/column
         subsampling.
@@ -615,6 +639,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         mondrian_min_group_size: int = 20,
         calibration_fraction: float = 0.0,
         refit_on_full_data: bool = False,
+        trim_fraction: float = 0.0,
         random_state: int = 42,
     ):
         # scikit-learn convention: __init__ only assigns parameters as-is,
@@ -653,6 +678,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.mondrian_min_group_size = mondrian_min_group_size
         self.calibration_fraction = calibration_fraction
         self.refit_on_full_data = refit_on_full_data
+        self.trim_fraction = trim_fraction
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -697,6 +723,14 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             raise ValueError(f"loss={self.loss!r} requires y >= 0.")
         if self.loss == "gamma" and np.any(y_arr <= 0):
             raise ValueError("loss='gamma' requires y > 0.")
+        if not 0 <= self.trim_fraction < 0.5:
+            raise ValueError(f"trim_fraction must be in [0, 0.5), got {self.trim_fraction!r}")
+        if self.trim_fraction > 0 and self.loss == "quantile":
+            raise ValueError(
+                "trim_fraction > 0 is not supported with loss='quantile' -- quantile mode already "
+                "targets a specific order statistic of the residual, and trimming doesn't compose "
+                "with that the way it does with a mean."
+            )
         offset_arr = self._resolve_offset(offset, len(X))
 
         self.n_features_in_ = X.shape[1]
@@ -817,18 +851,26 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
 
     def _baseline_stat(self, y_train: np.ndarray, offset: np.ndarray) -> float:
         """The starting prediction before any boosting round -- the best
-        constant predictor for whichever loss is active: the mean for
+        constant predictor for whichever loss is active: the mean (or,
+        with ``trim_fraction > 0``, a trimmed mean -- see
+        :func:`zoneboost._weak_learner._trimmed_mean`) for
         ``loss="squared_error"``, the target quantile for
         ``loss="quantile"``, or (for ``"poisson"``/``"gamma"``/
         ``"tweedie"``) the link-scale intercept matching ``offset`` via
         :func:`zoneboost._common._glm_baseline` -- ``offset`` is always an
         all-zeros array for the first three losses (enforced at `fit`), so
         this reduces to the plain mean/quantile exactly as before for
-        them."""
+        them. ``trim_fraction`` does *not* robustify the GLM losses'
+        baseline (no simple trimmed equivalent for `_glm_baseline`'s
+        closed-form intercept MLE) -- only each round's own main-effect
+        zone statistics are robustified for those losses; a disclosed
+        scope limit."""
         if self.loss == "quantile":
             return float(np.quantile(y_train, self.quantile))
         if self.loss in ("poisson", "gamma", "tweedie"):
             return _glm_baseline(y_train, offset, _glm_power(self.loss, self.tweedie_power))
+        if self.trim_fraction > 0:
+            return _trimmed_mean(y_train, self.trim_fraction)
         return float(y_train.mean())
 
     def _to_mean(self, link_pred: np.ndarray, offset: np.ndarray) -> np.ndarray:
@@ -957,6 +999,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 forbidden_interactions=self.forbidden_interactions_,
                 track_reliability=self.track_reliability,
                 group_col=self.group_col_,
+                trim_fraction=self.trim_fraction,
             )
             contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
             # The round's own (sub)sampled rows would otherwise be scored by a

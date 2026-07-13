@@ -57,23 +57,46 @@ from ._zones import adaptive_zone_boundaries, categorical_zone_index, categorica
 __all__ = ["weak_learner_fit", "weak_learner_contributions"]
 
 
+def _trimmed_mean(values: np.ndarray, trim_fraction: float) -> float:
+    """Mean of ``values`` after dropping the top and bottom
+    ``floor(trim_fraction * len(values))`` (sorted) entries -- a classic
+    robust location statistic: still literally an average of real,
+    observed rows (no value is altered, unlike winsorizing), just fewer of
+    them. Falls back to the plain mean if trimming would remove the
+    entire array (a tiny cell with few rows), rather than raising or
+    returning ``nan``."""
+    if len(values) == 0:
+        return 0.0
+    sorted_vals = np.sort(values)
+    k = int(np.floor(trim_fraction * len(sorted_vals)))
+    if k <= 0 or 2 * k >= len(sorted_vals):
+        return float(sorted_vals.mean())
+    return float(sorted_vals[k:-k].mean())
+
+
 def _zone_raw_stat(
     zone_values: np.ndarray,
     target_values: np.ndarray,
     n_zones: int,
     quantile: float = None,
+    trim_fraction: float = 0.0,
 ):
     """Each zone's raw (unshrunk) statistic and row count -- a mean via
-    ``bincount`` (``quantile=None``, O(n)), or a given quantile level
-    (sorts rows by zone once via ``argsort``/``searchsorted``, then
-    ``np.quantile`` per zone, O(n log n) -- negligible next to the round's
-    own ``O(p^2)`` pair loop). Shared by :func:`_zone_shrunk_deviation` and
-    its pair/triple counterparts so both loss modes reuse the identical
-    shrinkage arithmetic downstream -- only how the *raw* per-zone number
-    is computed differs.
+    ``bincount`` (``quantile=None`` and ``trim_fraction<=0``, O(n)), a
+    given quantile level, or a trimmed mean (see :func:`_trimmed_mean`)
+    -- both of the latter sort rows by zone once via ``argsort``/
+    ``searchsorted``, then compute the per-zone statistic on each group,
+    O(n log n) -- negligible next to the round's own ``O(p^2)`` pair
+    loop. Shared by :func:`_zone_shrunk_deviation` and its pair/triple
+    counterparts so every mode reuses the identical shrinkage arithmetic
+    downstream -- only how the *raw* per-zone number is computed differs.
+    ``quantile`` and ``trim_fraction`` are mutually exclusive by
+    construction (enforced by callers, e.g. ``ZoneBoostRegressor.fit``
+    rejects ``trim_fraction > 0`` with ``loss="quantile"``); when both are
+    inactive, this is bit-identical to every prior release.
     """
     counts = np.bincount(zone_values, minlength=n_zones).astype(float)
-    if quantile is None:
+    if quantile is None and trim_fraction <= 0:
         sums = np.bincount(zone_values, weights=target_values, minlength=n_zones)
         stat = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
         return stat, counts
@@ -86,19 +109,24 @@ def _zone_raw_stat(
     for z in range(n_zones):
         lo, hi = edges[z], edges[z + 1]
         if hi > lo:
-            stat[z] = np.quantile(sorted_targets[lo:hi], quantile)
+            group = sorted_targets[lo:hi]
+            stat[z] = np.quantile(group, quantile) if quantile is not None else _trimmed_mean(group, trim_fraction)
     return stat, counts
 
 
-def _overall_stat(values: np.ndarray, quantile: float = None) -> float:
+def _overall_stat(values: np.ndarray, quantile: float = None, trim_fraction: float = 0.0) -> float:
     """The scalar prior/baseline a round's terms are shrunk toward: the
-    mean (``quantile=None``, bit-identical to every prior release) or the
-    given quantile level -- shared by every call site that needs "the
-    overall statistic of this residual" (:func:`weak_learner_fit`'s main
-    effects, :func:`_fit_pairs`/:func:`_select_triples`'s mains-removed
-    backfitting prior, :func:`_cross_fitted_contributions`'s per-fold
-    prior)."""
-    return float(values.mean()) if quantile is None else float(np.quantile(values, quantile))
+    mean (``quantile=None`` and ``trim_fraction<=0``, bit-identical to
+    every prior release), the given quantile level, or a trimmed mean --
+    shared by every call site that needs "the overall statistic of this
+    residual" (:func:`weak_learner_fit`'s main effects,
+    :func:`_fit_pairs`/:func:`_select_triples`'s mains-removed backfitting
+    prior, :func:`_cross_fitted_contributions`'s per-fold prior)."""
+    if quantile is not None:
+        return float(np.quantile(values, quantile))
+    if trim_fraction > 0:
+        return _trimmed_mean(values, trim_fraction)
+    return float(values.mean())
 
 
 def _zone_shrunk_deviation(
@@ -109,6 +137,7 @@ def _zone_shrunk_deviation(
     m: float,
     monotonic: int = 0,
     quantile: float = None,
+    trim_fraction: float = 0.0,
 ):
     """For each zone: an empirical-Bayes (m-estimate) shrunk statistic among
     fit-rows in that zone, minus the overall statistic.
@@ -131,6 +160,12 @@ def _zone_shrunk_deviation(
     (there isn't a simple closed form for that), but a defensible extension
     of the identical formula used everywhere else in zoneboost.
 
+    ``trim_fraction`` (default ``0.0``, mutually exclusive with
+    ``quantile`` by construction) shrinks a zone's own trimmed mean
+    (:func:`_trimmed_mean`) toward the overall trimmed mean instead --
+    robustifies the *mean* target against a handful of outlier rows within
+    one zone, still the identical shrinkage formula.
+
     ``monotonic`` (0 = none, +1 = non-decreasing, -1 = non-increasing) is
     only ever passed for a column's own main effect (continuous columns,
     whose zones are meaningfully ordered by construction) -- never from
@@ -148,7 +183,7 @@ def _zone_shrunk_deviation(
     row count so sparse zones don't distort the fit -- the same
     density-aware spirit as the shrinkage above.
     """
-    cell_stat, counts = _zone_raw_stat(zone_values, target_values, n_zones, quantile)
+    cell_stat, counts = _zone_raw_stat(zone_values, target_values, n_zones, quantile, trim_fraction)
     shrunk_stat = (counts * cell_stat + m * overall_stat) / (counts + m)
     deviation = shrunk_stat - overall_stat
 
@@ -742,6 +777,7 @@ def _cross_fitted_contributions(
     return_fold_std: bool = False,
     m_pair: float = None,
     m_triple: float = None,
+    trim_fraction: float = 0.0,
 ):
     """Leakage-free version of what ``weak_learner_contributions`` would
     compute for the exact rows used to build this round's tables: for each
@@ -790,6 +826,12 @@ def _cross_fitted_contributions(
     tables for that round actually used (not a plain constant) --
     otherwise stacking would be fit against a systematically different
     representation than what's stored/used at predict time.
+
+    ``trim_fraction`` (default ``0.0``): threaded only into the
+    main-effect fold computation below, matching
+    :func:`weak_learner_fit`'s own main-effects-only scope for this
+    parameter -- pair/triple fold computation always uses an ordinary
+    mean/quantile prior regardless.
     """
     monotonic_constraints = monotonic_constraints or {}
     m_pair = m_pair if m_pair is not None else m
@@ -811,7 +853,7 @@ def _cross_fitted_contributions(
         in_mask = fold_ids == k
         if not np.any(in_mask):
             continue
-        overall_stat_k = _overall_stat(residual[out_mask], quantile)
+        overall_stat_k = _overall_stat(residual[out_mask], quantile, trim_fraction)
 
         col = 0
         main_dev_k = {}
@@ -824,6 +866,7 @@ def _cross_fitted_contributions(
                 m,
                 monotonic_constraints.get(name, 0),
                 quantile=quantile,
+                trim_fraction=trim_fraction,
             )
             main_dev_k[name] = dev
             if return_fold_std:
@@ -1250,6 +1293,7 @@ def weak_learner_fit(
     track_reliability: bool = False,
     group_col: str = None,
     learn_shrinkage_m: bool = False,
+    trim_fraction: float = 0.0,
 ):
     """Fit one boosting round's weak learner: zone info (adaptive-continuous
     or exact-categorical per column), main effects, interactions, and
@@ -1414,6 +1458,18 @@ def weak_learner_fit(
         ``_zone_shrunk_deviation``/``_pair_shrunk_deviation`` already
         compute internally), so opt-in; ``False`` (default) is
         bit-identical to every prior release.
+    trim_fraction : float, default=0.0
+        Robustify each main effect's own per-zone/overall statistic by
+        computing a **trimmed mean** (drop the top/bottom
+        ``trim_fraction`` of that zone's rows, then average the rest --
+        see :func:`_trimmed_mean`) instead of the plain mean, before the
+        identical empirical-Bayes shrinkage formula is applied. Main
+        effects only -- pairs, triples, zone-boundary construction, and
+        pair-screening's cheap proxy all stay ordinary-mean-flavored
+        regardless (the same disclosed scope ``quantile`` mode already
+        carries for those). Mutually exclusive with ``quantile``
+        (enforced by the caller). ``0.0`` (default) is bit-identical to
+        every prior release.
 
     Returns
     -------
@@ -1457,7 +1513,7 @@ def weak_learner_fit(
     }
     n_zones = {c: _column_n_zones(zone_info[c]) for c in predictor_subset}
     zones = {c: _column_zone_index(X[c], zone_info[c]) for c in predictor_subset}
-    overall_stat = _overall_stat(residual, quantile)
+    overall_stat = _overall_stat(residual, quantile, trim_fraction)
 
     # Hierarchical/multilevel zones: (feature, group_col) pairs are forced
     # to survive pair screening below, guaranteeing every feature gets a
@@ -1478,7 +1534,7 @@ def weak_learner_fit(
     if learn_shrinkage_m and predictor_subset:
         deviations_main = []
         for col in predictor_subset:
-            stat, counts = _zone_raw_stat(zones[col], residual, n_zones[col], quantile)
+            stat, counts = _zone_raw_stat(zones[col], residual, n_zones[col], quantile, trim_fraction)
             deviations_main.append((stat - overall_stat, counts))
         m_main = _estimate_shrinkage_m(deviations_main, float(residual.var()), fallback_m=shrinkage_m)
 
@@ -1492,6 +1548,7 @@ def weak_learner_fit(
             m_main,
             monotonic_constraints.get(col, 0),
             quantile=quantile,
+            trim_fraction=trim_fraction,
         )
         if col in convexity_constraints:
             counts = np.bincount(zones[col], minlength=n_zones[col]).astype(float)
@@ -1549,6 +1606,7 @@ def weak_learner_fit(
             shrinkage_m,
             monotonic_constraints,
             quantile=quantile,
+            trim_fraction=trim_fraction,
         ).sum(axis=1)
         screening_residual = residual - oof_main_pred
 
@@ -1634,6 +1692,7 @@ def weak_learner_fit(
             return_fold_std=True,
             m_pair=m_pair,
             m_triple=shrinkage_m,
+            trim_fraction=trim_fraction,
         )
     else:
         oof_contributions = _cross_fitted_contributions(
@@ -1651,6 +1710,7 @@ def weak_learner_fit(
             quantile=quantile,
             m_pair=m_pair,
             m_triple=shrinkage_m,
+            trim_fraction=trim_fraction,
         )
 
     diagnostics = None

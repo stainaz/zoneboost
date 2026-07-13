@@ -262,6 +262,52 @@ model.rounds_[0]["diagnostics"]["learned_shrinkage_m"]  # {"main": ..., "pair": 
       bit-identical to every prior release.
     </div>
 
+    <h3 id="robust-cell-statistics">Robust Cell Statistics (trim_fraction)</h3>
+    <p>A handful of outlier rows landing in one zone can drag that zone's plain
+    <code>bincount</code>-summed mean toward them — nothing about a mean alone is robust
+    to contamination. <code>trim_fraction</code> swaps the raw per-zone statistic for a
+    <strong>trimmed mean</strong> instead: sort a zone's own rows, drop the top and
+    bottom <code>trim_fraction</code> of them, and average the rest — still a real
+    average of real, observed rows (no value is altered, unlike winsorizing), just fewer
+    of them. The identical empirical-Bayes shrinkage formula above applies to whichever
+    raw statistic comes out, exactly the way it already tolerates a quantile as the raw
+    statistic under <code>loss="quantile"</code>.</p>
+    <pre><code>model = ZoneBoostRegressor(trim_fraction=0.1).fit(X, y)  # drop 10% from each tail, per zone</code></pre>
+    <p><strong>Unlike <code>loss="quantile"</code>, this doesn't change what's being
+    estimated.</strong> Quantile mode targets a genuinely different point of the
+    conditional distribution (a location-family generalization); a trimmed mean is still
+    estimating the same conditional <em>mean</em>, just made robust to outliers — so,
+    unlike quantile mode, the Lasso combination step is completely unaffected
+    (<code>Lasso</code>'s intercept being the residual's own mean isn't fighting the
+    target the way it does for a quantile-shrunk term). The two are mutually exclusive:
+    <code>trim_fraction &gt; 0</code> with <code>loss="quantile"</code> raises
+    <code>ValueError</code> at <code>fit</code>.</p>
+    <div class="note">
+      <strong>Scope:</strong> main effects only — pairs, triples, zone-boundary
+      construction, and pair-screening's cheap ANOVA proxy all stay ordinary-mean-flavored
+      regardless of <code>trim_fraction</code>, the same disclosed scope
+      <code>loss="quantile"</code> already carries for those (verified directly: none of
+      <code>_pair_shrunk_deviation</code>/<code>_triple_shrunk_deviation</code>/
+      <code>_fit_pairs</code>/<code>_select_triples</code> even accept a
+      <code>trim_fraction</code> parameter). Compatible with
+      <code>"poisson"</code>/<code>"gamma"</code>/<code>"tweedie"</code> — each round's
+      own main-effect zone statistics are robustified there too — but the
+      <em>initial baseline intercept</em> for those three losses stays
+      <code>_glm_baseline</code>'s closed-form, untrimmed formula (no simple trimmed
+      equivalent for it). Winsorizing (clip outliers to a threshold instead of dropping
+      them) is a natural extension using the identical per-zone grouping logic, but isn't
+      shipped here — one well-tested mechanism over two half-built ones.
+    </div>
+    <p><strong>Measured, honestly</strong>: on synthetic data (<code>y = 2x</code>,
+    <code>n=2000</code>) with 5 extreme outlier rows planted in one zone (<code>x</code>
+    in <code>[4, 5)</code>, each inflated by +200), the default
+    <code>trim_fraction=0.0</code> predicted <strong>17.45</strong> at <code>x=4.5</code>
+    against a true value of <strong>9.0</strong> — dragged far off by the outliers.
+    <code>trim_fraction=0.2</code> predicted <strong>9.60</strong>, and RMSE against a
+    clean holdout dropped from <strong>2.44</strong> to <strong>0.65</strong>.
+    <code>trim_fraction=0.0</code> (the default) is bit-identical to every prior
+    release.</p>
+
     <h2 id="lasso-stacking">Lasso Stacking</h2>
     <p>Every prior release combined a round's terms by averaging every contribution
     equally (<code>raw = contributions.mean(axis=1)</code>), then fit one shared scale for
@@ -717,6 +763,12 @@ model.predict_interval(X)  # each row's margin comes from its own region</code><
     <code>loss="quantile"</code>: a constant-width margin around a single quantile
     isn't a meaningful coverage interval the same way it is around a mean — see
     Conformalized Quantile Regression below instead.</p>
+    <p>Not to be confused with <code>trim_fraction</code> (see
+    <a href="#robust-cell-statistics">Robust Cell Statistics</a> above): quantile mode
+    changes <em>what's estimated</em> (a different order statistic of <code>y</code>);
+    <code>trim_fraction</code> keeps estimating the mean but makes it robust to outlier
+    rows, so — unlike quantile mode — the Lasso combination step is unaffected. The two
+    are mutually exclusive.</p>
 
     <h2 id="actuarial-losses">Actuarial Losses (Poisson, Gamma, Tweedie)</h2>
     <p><code>loss="poisson"</code>/<code>"gamma"</code>/<code>"tweedie"</code> target the

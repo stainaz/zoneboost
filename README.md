@@ -256,6 +256,55 @@ calibration that removes a hand-tuned constant, not a guaranteed
 accuracy improvement. `learn_shrinkage_m=False` (the default) is
 bit-identical to every prior release.
 
+### Robust cell statistics (`trim_fraction`)
+
+A handful of outlier rows landing in one zone can drag that zone's plain
+`bincount`-summed mean toward them — nothing about a mean alone is
+robust to contamination. `trim_fraction` swaps the raw per-zone
+statistic for a **trimmed mean** instead: sort a zone's own rows, drop
+the top and bottom `trim_fraction` of them, and average the rest — still
+a real average of real, observed rows (no value is altered, unlike
+winsorizing), just fewer of them. The identical empirical-Bayes
+shrinkage formula above applies to whichever raw statistic comes out,
+exactly the way it already tolerates a quantile as the raw statistic
+under `loss="quantile"`.
+
+```python
+model = ZoneBoostRegressor(trim_fraction=0.1).fit(X, y)  # drop 10% from each tail, per zone
+```
+
+**Unlike `loss="quantile"`, this doesn't change what's being estimated.**
+Quantile mode targets a genuinely different point of the conditional
+distribution (a location-family generalization); a trimmed mean is still
+estimating the same conditional *mean*, just made robust to outliers —
+so, unlike quantile mode, the Lasso combination step is completely
+unaffected (`Lasso`'s intercept being the residual's own mean isn't
+fighting the target the way it does for a quantile-shrunk term). The two
+are mutually exclusive: `trim_fraction > 0` with `loss="quantile"`
+raises `ValueError` at `fit`.
+
+**Scope**: main effects only — pairs, triples, zone-boundary
+construction, and pair-screening's cheap ANOVA proxy all stay
+ordinary-mean-flavored regardless of `trim_fraction`, the same disclosed
+scope `loss="quantile"` already carries for those (verified directly:
+none of `_pair_shrunk_deviation`/`_triple_shrunk_deviation`/`_fit_pairs`/
+`_select_triples` even accept a `trim_fraction` parameter). Compatible
+with `"poisson"`/`"gamma"`/`"tweedie"` — each round's own main-effect
+zone statistics are robustified there too — but the *initial baseline
+intercept* for those three losses stays `_glm_baseline`'s closed-form,
+untrimmed formula (no simple trimmed equivalent for it). Winsorizing
+(clip outliers to a threshold instead of dropping them) is a natural
+extension using the identical per-zone grouping logic, but isn't shipped
+here — one well-tested mechanism over two half-built ones.
+
+**Measured, honestly**: on synthetic data (`y = 2x`, `n=2000`) with 5
+extreme outlier rows planted in one zone (`x` in `[4, 5)`, each inflated
+by +200), the default `trim_fraction=0.0` predicted **17.45** at `x=4.5`
+against a true value of **9.0** — dragged far off by the outliers.
+`trim_fraction=0.2` predicted **9.60**, and RMSE against a clean holdout
+dropped from **2.44** to **0.65**. `trim_fraction=0.0` (the default) is
+bit-identical to every prior release.
+
 ### Lasso stacking
 
 Every prior release combined a round's terms by averaging every
@@ -838,6 +887,12 @@ when `loss="quantile"`: a constant-width margin around a single quantile
 isn't a meaningful coverage interval the same way it is around a mean — see
 Conformalized Quantile Regression below instead.
 
+Not to be confused with `trim_fraction` (see "Robust cell statistics"
+above): quantile mode changes *what's estimated* (a different order
+statistic of `y`); `trim_fraction` keeps estimating the mean but makes
+it robust to outlier rows, so — unlike quantile mode — the Lasso
+combination step is unaffected. The two are mutually exclusive.
+
 ### Actuarial losses (Poisson, Gamma, Tweedie)
 
 `loss="poisson"`/`"gamma"`/`"tweedie"` target the conditional mean of a
@@ -1052,6 +1107,7 @@ Identical parameter set on both estimators, except `calibrate`
 | `loss` | `"squared_error"` | **Regressor only.** `"quantile"` targets a conditional quantile (see "Quantile regression" above); `"poisson"`/`"gamma"`/`"tweedie"` target a log-link mean for right-skewed, non-negative targets, with an `offset` on `fit`/`predict` for exposure adjustment (see "Actuarial losses" above) |
 | `quantile` | 0.5 | **Regressor only.** Target quantile level when `loss="quantile"` (ignored otherwise); see "Quantile regression" above |
 | `tweedie_power` | 1.5 | **Regressor only.** Tweedie variance power when `loss="tweedie"` (ignored otherwise); see "Actuarial losses" above |
+| `trim_fraction` | 0.0 | Robustify each main effect's own per-zone statistic against outlier rows via a trimmed mean instead of the plain mean; main effects only, opt-in, incompatible with `loss="quantile"`, see "Robust cell statistics" above |
 | `random_state` | 42 | Seed for the validation split and subsampling |
 
 **On `max_zones` and `categorical_features`:** if a variable genuinely has
