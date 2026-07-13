@@ -183,6 +183,35 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         (row+column, or main effects+pairs), not the flat global mean --
         a materially better guess for a sparse cell than the overall
         average of everything.
+    learn_shrinkage_m : bool, default=False
+        Estimate the shrinkage strength separately for main effects and
+        for pairs each round (pooling raw zone/cell statistics across
+        every column or pair fit at that level), instead of using the
+        constant ``shrinkage_m`` for both -- a DerSimonian-Laird-style
+        method-of-moments estimate of ``sigma^2/tau^2`` under the
+        normal-normal hierarchical model ``shrinkage_m`` already implies
+        (the same "compound normal means" problem DerSimonian & Laird
+        solve for random-effects meta-analysis), chosen over a full
+        numerical marginal-likelihood search for being cheap enough to
+        run every round. Falls back to ``shrinkage_m`` itself whenever
+        there isn't enough evidence to estimate anything better (e.g. a
+        single zone, or no detectable signal beyond sampling noise).
+        Pairs typically earn heavier shrinkage than main effects (sparser
+        cells, more sampling noise relative to real signal) -- read the
+        actual values off ``rounds_[i]["diagnostics"]["learned_shrinkage_m"]``
+        (``{"main": ..., "pair": ...}``, always present when this is
+        ``True``, regardless of ``track_reliability``).
+
+        **Scope**: main effects and pairs only -- triples still use the
+        plain ``shrinkage_m`` constant. Estimating a triple-level
+        strength is deferred: the adaptive-triple-selection accept/
+        reject gain test already uses ``m`` to decide *which* triples
+        survive, before the accepted set is known, making a triple-level
+        estimate circular in a way mains/pairs aren't (every candidate
+        main effect and pair is always fit, nothing is conditionally
+        accepted first). Real per-round extra cost (each level's raw
+        statistics are computed once more for the estimate); ``False``
+        (default) is bit-identical to every prior release.
     stacking_alpha : float, default=0.01
         Every prior release combined a round's terms by averaging every
         contribution equally, then fit one shared scale for the whole
@@ -436,14 +465,16 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
     rounds_ : list
         One entry per fitted boosting round, each a plain dict with keys
         ``"zone_info"``, ``"main_effects"``, ``"interactions"``,
-        ``"triples"`` (empty unless ``max_interaction_order=3``), and
+        ``"triples"`` (empty unless ``max_interaction_order=3``),
         ``"intercept"``/``"weights"`` -- the round's fitted Lasso intercept
         and one weight per term (``fitted_residual = intercept +
         contributions @ weights``, in the same order as
         ``main_effects``/``interactions``/``triples`` are themselves
-        iterated). Every value is plain data (dicts/arrays of numpy arrays
-        or floats) -- fully inspectable, nothing hidden in an opaque model
-        object.
+        iterated) -- and ``"diagnostics"`` (``None`` unless
+        ``track_reliability`` or ``learn_shrinkage_m`` was set; see
+        those parameters). Every value is plain data (dicts/arrays of
+        numpy arrays or floats) -- fully inspectable, nothing hidden in
+        an opaque model object.
     best_n_rounds_ : int
         The number of rounds actually used by `predict` (the early-stopped
         count, or ``n_rounds`` if early stopping was disabled or never
@@ -517,6 +548,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         triple_min_gain: float = 0.05,
         cross_fit_folds: int = 5,
         shrinkage_m: float = 10.0,
+        learn_shrinkage_m: bool = False,
         stacking_alpha: float = 0.01,
         monotonic_constraints=None,
         max_pair_interactions=None,
@@ -553,6 +585,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.triple_min_gain = triple_min_gain
         self.cross_fit_folds = cross_fit_folds
         self.shrinkage_m = shrinkage_m
+        self.learn_shrinkage_m = learn_shrinkage_m
         self.stacking_alpha = stacking_alpha
         self.monotonic_constraints = monotonic_constraints
         self.max_pair_interactions = max_pair_interactions
@@ -852,6 +885,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 triple_min_gain=self.triple_min_gain,
                 cross_fit_folds=self.cross_fit_folds,
                 shrinkage_m=self.shrinkage_m,
+                learn_shrinkage_m=self.learn_shrinkage_m,
                 monotonic_constraints=self.monotonic_constraints_,
                 max_pair_interactions=self.max_pair_interactions,
                 adaptive_boundary_smoothing=self.adaptive_boundary_smoothing,

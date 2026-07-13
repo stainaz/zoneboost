@@ -51,6 +51,7 @@ import pandas as pd
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import Lasso, QuantileRegressor
 
+from ._shrinkage import _estimate_shrinkage_m
 from ._zones import adaptive_zone_boundaries, categorical_zone_index, categorical_zone_map, zone_centers, zone_index
 
 __all__ = ["weak_learner_fit", "weak_learner_contributions"]
@@ -614,6 +615,8 @@ def _cross_fitted_contributions(
     monotonic_constraints: dict = None,
     quantile: float = None,
     return_fold_std: bool = False,
+    m_pair: float = None,
+    m_triple: float = None,
 ):
     """Leakage-free version of what ``weak_learner_contributions`` would
     compute for the exact rows used to build this round's tables: for each
@@ -653,8 +656,19 @@ def _cross_fitted_contributions(
     out. `NaN` at any position no fold ever populated with a real
     (non-prior) estimate is not specially handled -- ``np.std`` naturally
     reflects however close every fold's prior-shrunk placeholder value was.
+
+    ``m_pair``/``m_triple`` (default ``None``, meaning "use ``m`` for
+    this level too" -- bit-identical to every prior release): lets
+    ``learn_shrinkage_m`` pass a level-specific shrinkage strength for
+    the honest, cross-fitted contributions Lasso stacking learns from,
+    so they're shrunk by the *same* strength as whatever the production
+    tables for that round actually used (not a plain constant) --
+    otherwise stacking would be fit against a systematically different
+    representation than what's stored/used at predict time.
     """
     monotonic_constraints = monotonic_constraints or {}
+    m_pair = m_pair if m_pair is not None else m
+    m_triple = m_triple if m_triple is not None else m
     n = len(residual)
     n_terms = len(main_effect_keys) + len(interaction_keys) + len(triple_keys)
     contributions = np.empty((n, n_terms))
@@ -706,7 +720,7 @@ def _cross_fitted_contributions(
                 _overall_stat(partial, quantile),
                 n_zones[a],
                 n_zones[b],
-                m,
+                m_pair,
                 quantile=quantile,
                 monotonic_a=monotonic_constraints.get(a, 0),
                 monotonic_b=monotonic_constraints.get(b, 0),
@@ -736,7 +750,7 @@ def _cross_fitted_contributions(
                 n_zones[a],
                 n_zones[b],
                 n_zones[c],
-                m,
+                m_triple,
                 quantile=quantile,
                 monotonic_a=monotonic_constraints.get(a, 0),
                 monotonic_b=monotonic_constraints.get(b, 0),
@@ -787,17 +801,51 @@ def _fit_pairs(
     m: float,
     quantile: float = None,
     monotonic_constraints: dict = None,
-) -> dict:
+    learn_shrinkage_m: bool = False,
+) -> tuple:
     """Fully fit (backfit against mains, see module docstring) exactly the
     given ``pairs`` -- shared by ``weak_learner_fit``'s screened and
     unscreened paths so there's a single place that does the expensive
     per-pair work. ``monotonic_constraints`` (default ``None``) is looked
     up per column and forwarded to :func:`_pair_shrunk_deviation` as
-    ``monotonic_a``/``monotonic_b`` -- see "inherited monotonicity" there."""
+    ``monotonic_a``/``monotonic_b`` -- see "inherited monotonicity" there.
+
+    ``learn_shrinkage_m`` (default ``False``): estimate one shrinkage
+    strength for this whole level (pooling every pair's own raw joint-cell
+    statistic, mains-removed and centered by that pair's own
+    ``_overall_stat``) via :func:`zoneboost._shrinkage._estimate_shrinkage_m`,
+    instead of using the constant ``m`` for every pair -- see
+    ``weak_learner_fit``'s own ``learn_shrinkage_m`` docstring. Recomputes
+    each pair's joint raw stat once more for this (the same combined-index
+    ``_zone_raw_stat`` call :func:`_pair_shrunk_deviation` makes
+    internally), a real but small extra cost, opt-in like every other
+    computed-not-hand-set knob in this module.
+
+    Returns
+    -------
+    interactions : dict
+    m_used : float
+        The shrinkage strength actually applied to every pair this level
+        -- the constant ``m`` unchanged when ``learn_shrinkage_m=False``.
+    """
     monotonic_constraints = monotonic_constraints or {}
+    partials = {(a, b): residual - main_effects[a][zones[a]] - main_effects[b][zones[b]] for a, b in pairs}
+
+    m_used = m
+    if learn_shrinkage_m and pairs:
+        deviations = []
+        for a, b in partials:
+            partial = partials[(a, b)]
+            overall = _overall_stat(partial, quantile)
+            combined = zones[a] * n_zones[b] + zones[b]
+            stat, counts = _zone_raw_stat(combined, partial, n_zones[a] * n_zones[b], quantile)
+            deviations.append((stat - overall, counts))
+        pooled_residual_var = float(np.concatenate(list(partials.values())).var())
+        m_used = _estimate_shrinkage_m(deviations, pooled_residual_var, fallback_m=m)
+
     interactions = {}
     for a, b in pairs:
-        partial = residual - main_effects[a][zones[a]] - main_effects[b][zones[b]]
+        partial = partials[(a, b)]
         interactions[(a, b)] = _pair_shrunk_deviation(
             zones[a],
             zones[b],
@@ -805,12 +853,12 @@ def _fit_pairs(
             _overall_stat(partial, quantile),
             n_zones[a],
             n_zones[b],
-            m,
+            m_used,
             quantile=quantile,
             monotonic_a=monotonic_constraints.get(a, 0),
             monotonic_b=monotonic_constraints.get(b, 0),
         )
-    return interactions
+    return interactions, m_used
 
 
 def _seed_candidate_columns(pair_importance: dict, max_triple_interactions: int) -> list:
@@ -1076,6 +1124,7 @@ def weak_learner_fit(
     forbidden_interactions: frozenset = frozenset(),
     track_reliability: bool = False,
     group_col: str = None,
+    learn_shrinkage_m: bool = False,
 ):
     """Fit one boosting round's weak learner: zone info (adaptive-continuous
     or exact-categorical per column), main effects, interactions, and
@@ -1220,6 +1269,26 @@ def weak_learner_fit(
         for the column-subsampling half of this guarantee (this function
         alone can't prevent the group column from being subsampled out of
         ``predictor_subset`` in the first place).
+    learn_shrinkage_m : bool, default=False
+        Estimate the empirical-Bayes shrinkage strength separately for
+        main effects and for pairs (pooling raw zone/cell statistics
+        across every column or pair fit at that level this round) via
+        :func:`zoneboost._shrinkage._estimate_shrinkage_m` -- a
+        DerSimonian-Laird-style method-of-moments estimate of
+        ``sigma^2/tau^2`` under the normal-normal hierarchical model this
+        shrinkage formula already implies -- instead of using the
+        constant ``shrinkage_m`` for both. Falls back to ``shrinkage_m``
+        itself whenever there isn't enough evidence to estimate anything
+        better (see that function's own docstring). Triples still use
+        the plain ``shrinkage_m`` constant (deferred -- ``_select_
+        triples``'s own accept/reject gain test already uses ``m`` to
+        decide which triples survive, before the accepted set is known,
+        making a triple-level estimate circular in a way mains/pairs
+        aren't). Real per-round extra cost (each level's raw statistics
+        are computed once more for the estimate, on top of what
+        ``_zone_shrunk_deviation``/``_pair_shrunk_deviation`` already
+        compute internally), so opt-in; ``False`` (default) is
+        bit-identical to every prior release.
 
     Returns
     -------
@@ -1237,16 +1306,22 @@ def weak_learner_fit(
         aligned to ``residual``'s row order and to the column order
         ``weak_learner_contributions`` would produce for the same tables.
     diagnostics : dict or None
-        ``None`` unless ``track_reliability=True``. Otherwise
-        ``{"main_effects": {col: {"counts": arr, "fold_std": arr_or_None}},
-        "interactions": {(a, b): {...}}, "triples": {(a, b, c): {...}}}`` --
+        ``None`` unless ``track_reliability=True`` or ``learn_shrinkage_m=
+        True``. When ``track_reliability=True``: ``{"main_effects": {col:
+        {"counts": arr, "fold_std": arr_or_None}}, "interactions": {(a,
+        b): {...}}, "triples": {(a, b, c): {...}}}`` --
         ``counts`` is each zone/cell's own row count (same shape as that
         term's own deviation array); ``fold_std`` is the elementwise
         standard deviation of that term's shrunk value across the
         cross-fitting folds (``None`` when ``cross_fit_folds`` effectively
         falls back to no cross-fitting for this round) -- see
         :func:`_cross_fitted_contributions`'s ``return_fold_std``. Consumed
-        by :func:`zoneboost._reliability.explain_reliability`.
+        by :func:`zoneboost._reliability.explain_reliability`. When
+        ``learn_shrinkage_m=True``, also gains a ``"learned_shrinkage_m"``
+        key: ``{"main": m_main, "pair": m_pair}``, the shrinkage strength
+        actually applied at each level this round (present alongside the
+        ``track_reliability`` keys above if both are set, or alone if only
+        ``learn_shrinkage_m`` is).
     """
     monotonic_constraints = monotonic_constraints or {}
     convexity_constraints = convexity_constraints or {}
@@ -1274,6 +1349,14 @@ def weak_learner_fit(
             if group_col in (a, b) and frozenset((a, b)) not in forbidden_interactions
         }
 
+    m_main = shrinkage_m
+    if learn_shrinkage_m and predictor_subset:
+        deviations_main = []
+        for col in predictor_subset:
+            stat, counts = _zone_raw_stat(zones[col], residual, n_zones[col], quantile)
+            deviations_main.append((stat - overall_stat, counts))
+        m_main = _estimate_shrinkage_m(deviations_main, float(residual.var()), fallback_m=shrinkage_m)
+
     main_effects = {}
     for col in predictor_subset:
         dev = _zone_shrunk_deviation(
@@ -1281,7 +1364,7 @@ def weak_learner_fit(
             residual,
             overall_stat,
             n_zones[col],
-            shrinkage_m,
+            m_main,
             monotonic_constraints.get(col, 0),
             quantile=quantile,
         )
@@ -1366,9 +1449,10 @@ def weak_learner_fit(
             if frozenset((a, b)) not in forbidden_interactions
         ]
 
-    interactions_full = _fit_pairs(
+    interactions_full, m_pair = _fit_pairs(
         fit_pairs, zones, n_zones, main_effects, residual, shrinkage_m,
         quantile=quantile, monotonic_constraints=monotonic_constraints,
+        learn_shrinkage_m=learn_shrinkage_m,
     )
 
     if max_interaction_order >= 3:
@@ -1419,10 +1503,12 @@ def weak_learner_fit(
             list(triples.keys()),
             fold_ids,
             effective_folds,
-            shrinkage_m,
+            m_main,
             monotonic_constraints,
             quantile=quantile,
             return_fold_std=True,
+            m_pair=m_pair,
+            m_triple=shrinkage_m,
         )
     else:
         oof_contributions = _cross_fitted_contributions(
@@ -1435,9 +1521,11 @@ def weak_learner_fit(
             list(triples.keys()),
             fold_ids,
             effective_folds,
-            shrinkage_m,
+            m_main,
             monotonic_constraints,
             quantile=quantile,
+            m_pair=m_pair,
+            m_triple=shrinkage_m,
         )
 
     diagnostics = None
@@ -1473,6 +1561,9 @@ def weak_learner_fit(
                 for key in triples
             },
         }
+    if learn_shrinkage_m:
+        diagnostics = diagnostics or {}
+        diagnostics["learned_shrinkage_m"] = {"main": m_main, "pair": m_pair}
 
     return zone_info, main_effects, interactions, triples, oof_contributions, diagnostics
 
