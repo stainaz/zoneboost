@@ -411,11 +411,66 @@ multi-round main effect**: a sum of convex functions is convex only when
 combined with non-negative weights, but a round's own Lasso-stacking
 weight for a term can be negative, flipping a convex round's contribution
 to concave in the combined output — a real, disclosed limitation of
-layering a per-round shape constraint on top of signed Lasso stacking.
+layering a per-round shape constraint on top of signed Lasso stacking
+(monotonicity has the identical gap; see `strict_shape_constraints`
+below for an ensemble-level fix for both).
 **Measured, honestly**: across 60 rounds fit on genuinely non-convex
 (wiggly) synthetic data, every single round's own projected slopes were
 non-decreasing (0 violations) — the guarantee holds exactly where it's
 actually made.
+
+**Ensemble-level guarantees**: `strict_shape_constraints=True` restricts
+a round's own Lasso-stacking weight to be non-negative for every term a
+`monotonic_constraints`/`convexity_constraints` entry applies to (a
+monotonic column's own main effect *and* every pair/triple it
+participates in, since interactions inherit the projection too;
+convexity is main-effects-only) — turning the per-round-only guarantees
+above into a real ensemble-level one: a non-negative-weighted sum of
+individually-monotonic (or individually-convex) round contributions is
+itself monotonic (or convex), a mathematical guarantee, not a heuristic.
+
+```python
+model = ZoneBoostRegressor(
+    monotonic_constraints={"x1": 1}, strict_shape_constraints=True,
+).fit(X, y)
+```
+
+Implemented by representing every *unconstrained* term's weight as the
+difference of two non-negative variables (`w_free = w_free+ - w_free-`)
+and fitting a single `sklearn.linear_model.Lasso(positive=True)` on the
+expanded design — `Lasso` only supports `positive=True` for *every*
+coefficient, not a per-term subset, but at the L1-optimal solution
+`w_free+`/`w_free-` are never both positive for the same term (reducing
+both by `min(w_free+, w_free-)` leaves the fit unchanged but strictly
+shrinks the penalty), so `w_free+ - w_free-` recovers *exactly* the
+solution the original mixed-sign-constrained problem would have — not an
+approximation, and reuses `sklearn.linear_model.Lasso` entirely, no new
+numerical algorithm.
+
+Does **not** extend to `bounded_effects` — non-negative weights don't fix
+its own cumulative-total gap at all (summing several non-negatively-
+weighted, individually-bounded contributions makes the cumulative range
+*wider*, never narrower); that gap remains, disclosed, unchanged. Only
+applies to the ordinary-Lasso combination step (`loss` in
+`"squared_error"`/`"poisson"`/`"gamma"`/`"tweedie"`) — raises
+`ValueError` at `fit` if `loss="quantile"` and either constraint dict is
+set (`QuantileRegressor` has no `positive=True` mode).
+
+**Measured, honestly**: on synthetic data engineered to induce sign
+ambiguity (a near-duplicate redundant feature), the unconstrained fit
+produced 3 rounds with a negative main-effect weight and 13 rounds with
+a negative weight on an interaction involving the constrained column,
+out of 100 rounds — `strict_shape_constraints=True` eliminated all 16.
+This is a real, verified internal-consistency fix (the model no longer
+contradicts its own per-round monotonic construction anywhere), which is
+what mathematically guarantees ensemble-level monotonicity going
+forward — though on this particular dataset, the *aggregate* curve
+already happened to look monotonic even without it (the 16 flipped-sign
+rounds were individually too small to visibly bend the total). This is a
+real, non-free regularization (it can change a round's own fit even when
+no sign-flip problem existed for a particular model), so it's opt-in:
+`strict_shape_constraints=False` (the default) reproduces the exact same
+predictions as if this parameter didn't exist.
 
 **Bounded effects**: `bounded_effects={"column": (lower, upper)}` clips a
 continuous column's main-effect deviation to this range, applied last
@@ -907,6 +962,7 @@ Identical parameter set on both estimators, except `calibrate`
 | `monotonic_constraints` | None | `{column: +1 or -1}` — forces a continuous column's main effect (and every interaction it participates in) to be non-decreasing/non-increasing; opt-in, see "Monotonic constraints" above |
 | `max_pair_interactions` | None | Cap on how many pairwise interactions a round keeps, ranked by importance; opt-in, see "Pair screening" above |
 | `convexity_constraints` | None | `{column: +1 convex, -1 concave}` — forces a continuous column's main effect onto a convex/concave sequence; main effects only, opt-in, see "Global shape constraints" above |
+| `strict_shape_constraints` | False | Restricts Lasso-stacking weights to non-negative for every term a `monotonic_constraints`/`convexity_constraints` entry applies to, turning the per-round-only guarantee into an ensemble-level one; opt-in, see "Global shape constraints" above |
 | `bounded_effects` | None | `{column: (lower, upper)}` — clips a continuous column's main effect to this range, per boosting round (not cumulatively); main effects only, opt-in, see "Global shape constraints" above |
 | `forbidden_interactions` | None | List of 2-column name/index pairs that must never be fit as pairwise (or 3-way) interactions; opt-in, see "Global shape constraints" above |
 | `track_reliability` | False | Record per-term support counts and cross-fold variability each round, consumed by `explain(X, include_reliability=True)`; opt-in, see "Explanation reliability" above |

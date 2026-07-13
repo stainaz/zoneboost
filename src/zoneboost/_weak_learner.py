@@ -537,7 +537,13 @@ def _residualize(raw: np.ndarray, residual: np.ndarray) -> np.ndarray:
     return residual - (alpha + beta * raw)
 
 
-def _fit_lasso_weights(contributions: np.ndarray, residual: np.ndarray, alpha: float, quantile: float = None) -> tuple:
+def _fit_lasso_weights(
+    contributions: np.ndarray,
+    residual: np.ndarray,
+    alpha: float,
+    quantile: float = None,
+    positive_mask: np.ndarray = None,
+) -> tuple:
     """Fit an L1-penalized model relating each term's own contribution (one
     column per term) to the residual, replacing the old "average every term,
     then fit one shared scale" combination with a learned per-term weight: an
@@ -566,6 +572,27 @@ def _fit_lasso_weights(contributions: np.ndarray, residual: np.ndarray, alpha: f
     Standardization is a monotonic affine transform, so the same
     ``quantile`` level applies unchanged on the standardized scale.
 
+    ``positive_mask`` (default ``None``, meaning "no constraint," bit-
+    identical to every prior release): a boolean array, aligned to
+    ``contributions``'s own columns, marking which terms' weights must be
+    non-negative -- so that a non-negative-weighted sum of
+    individually-monotonic (or individually-convex) per-round terms stays
+    monotonic (or convex) in the aggregate, rather than a negative round
+    weight silently flipping its sign. ``sklearn.linear_model.Lasso``
+    only supports ``positive=True`` for *every* coefficient, not a
+    per-term subset, so unconstrained columns are represented as the
+    difference of two non-negative variables (``w_free = w_free+ -
+    w_free-``, appending ``-X[:, free]`` as extra columns) and a single
+    ``Lasso(positive=True)`` is fit on the expanded matrix. At the
+    L1-optimal solution ``w_free+``/``w_free-`` are never both positive
+    for the same term (reducing both by ``min(w_free+, w_free-)`` leaves
+    the fit unchanged but strictly shrinks the penalty), so ``w_free+ -
+    w_free-`` recovers *exactly* the solution the original mixed-sign-
+    constrained L1 problem would have -- not an approximation. Raises
+    ``ValueError`` if given together with ``quantile`` set --
+    ``QuantileRegressor`` has no ``positive=True`` mode and no equivalent
+    reformulation applies cleanly to pinball loss.
+
     Returns
     -------
     intercept : float
@@ -580,14 +607,36 @@ def _fit_lasso_weights(contributions: np.ndarray, residual: np.ndarray, alpha: f
     X_std = contributions / safe_col_std
     y_std = (residual - resid_mean) / resid_std
 
-    if quantile is None:
+    if positive_mask is not None and np.any(positive_mask):
+        if quantile is not None:
+            raise ValueError(
+                "positive_mask (strict_shape_constraints) is not supported with loss='quantile' -- "
+                "QuantileRegressor has no positive=True mode and no equivalent variable-splitting "
+                "reformulation applies cleanly to pinball loss."
+            )
+        free_idx = np.where(~positive_mask)[0]
+        pos_idx = np.where(positive_mask)[0]
+        X_expanded = np.hstack([X_std[:, pos_idx], X_std[:, free_idx], -X_std[:, free_idx]])
+        model = Lasso(alpha=alpha, fit_intercept=True, positive=True, max_iter=10000)
+        model.fit(X_expanded, y_std)
+        n_pos, n_free = len(pos_idx), len(free_idx)
+        coefs = np.zeros(contributions.shape[1])
+        coefs[pos_idx] = model.coef_[:n_pos]
+        coefs[free_idx] = model.coef_[n_pos : n_pos + n_free] - model.coef_[n_pos + n_free :]
+        intercept_std = float(model.intercept_)
+    elif quantile is None:
         model = Lasso(alpha=alpha, fit_intercept=True, max_iter=10000)
+        model.fit(X_std, y_std)
+        coefs = model.coef_
+        intercept_std = float(model.intercept_)
     else:
         model = QuantileRegressor(quantile=quantile, alpha=alpha, fit_intercept=True, solver="highs")
-    model.fit(X_std, y_std)
+        model.fit(X_std, y_std)
+        coefs = model.coef_
+        intercept_std = float(model.intercept_)
 
-    weights = np.where(col_std > 0, model.coef_ * (resid_std / safe_col_std), 0.0)
-    intercept = resid_mean + float(model.intercept_) * resid_std
+    weights = np.where(col_std > 0, coefs * (resid_std / safe_col_std), 0.0)
+    intercept = resid_mean + intercept_std * resid_std
     return intercept, weights
 
 

@@ -112,6 +112,7 @@
     { title: "Actuarial Losses (Poisson, Gamma, Tweedie)", crumb: "How It Works", url: "how-it-works.html#actuarial-losses" },
     { title: "Conformalized Quantile Regression (CQR)", crumb: "How It Works", url: "how-it-works.html#conformalized-quantile-regression" },
     { title: "Global Shape Constraints", crumb: "How It Works", url: "how-it-works.html#global-shape-constraints" },
+    { title: "Ensemble-Level Guarantees", crumb: "How It Works › Global Shape Constraints", url: "how-it-works.html#ensemble-level-guarantees" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },

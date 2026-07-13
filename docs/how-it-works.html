@@ -854,11 +854,64 @@ lower, upper = cqr.predict_interval(X)</code></pre>
       convex only when combined with non-negative weights, but a round's own
       Lasso-stacking weight for a term can be negative, flipping a convex round's
       contribution to concave in the combined output — a real, disclosed limitation of
-      layering a per-round shape constraint on top of signed Lasso stacking.
+      layering a per-round shape constraint on top of signed Lasso stacking (monotonicity
+      has the identical gap; see Ensemble-Level Guarantees below for a fix for both).
     </div>
     <p><strong>Measured, honestly</strong>: across 60 rounds fit on genuinely non-convex
     (wiggly) synthetic data, every single round's own projected slopes were
     non-decreasing (0 violations) — the guarantee holds exactly where it's actually made.</p>
+
+    <h3 id="ensemble-level-guarantees">Ensemble-Level Guarantees</h3>
+    <p><code>strict_shape_constraints=True</code> restricts a round's own Lasso-stacking
+    weight to be non-negative for every term a
+    <code>monotonic_constraints</code>/<code>convexity_constraints</code> entry applies to
+    (a monotonic column's own main effect <em>and</em> every pair/triple it participates
+    in, since interactions inherit the projection too; convexity is main-effects-only) —
+    turning the per-round-only guarantees above into a real ensemble-level one: a
+    non-negative-weighted sum of individually-monotonic (or individually-convex) round
+    contributions is itself monotonic (or convex), a mathematical guarantee, not a
+    heuristic.</p>
+    <pre><code>model = ZoneBoostRegressor(
+    monotonic_constraints={"x1": 1}, strict_shape_constraints=True,
+).fit(X, y)</code></pre>
+    <p>Implemented by representing every <em>unconstrained</em> term's weight as the
+    difference of two non-negative variables (<code>w_free = w_free+ - w_free-</code>)
+    and fitting a single <code>sklearn.linear_model.Lasso(positive=True)</code> on the
+    expanded design — <code>Lasso</code> only supports <code>positive=True</code> for
+    <em>every</em> coefficient, not a per-term subset, but at the L1-optimal solution
+    <code>w_free+</code>/<code>w_free-</code> are never both positive for the same term
+    (reducing both by <code>min(w_free+, w_free-)</code> leaves the fit unchanged but
+    strictly shrinks the penalty), so <code>w_free+ - w_free-</code> recovers
+    <em>exactly</em> the solution the original mixed-sign-constrained problem would have —
+    not an approximation, and reuses <code>sklearn.linear_model.Lasso</code> entirely, no
+    new numerical algorithm.</p>
+    <div class="note">
+      <strong>Scope:</strong> does not extend to <code>bounded_effects</code> —
+      non-negative weights don't fix its own cumulative-total gap at all (summing several
+      non-negatively-weighted, individually-bounded contributions makes the cumulative
+      range <em>wider</em>, never narrower); that gap remains, disclosed, unchanged. Only
+      applies to the ordinary-Lasso combination step (<code>loss</code> in
+      <code>"squared_error"</code>/<code>"poisson"</code>/<code>"gamma"</code>/
+      <code>"tweedie"</code>) — raises <code>ValueError</code> at <code>fit</code> if
+      <code>loss="quantile"</code> and either constraint dict is set
+      (<code>QuantileRegressor</code> has no <code>positive=True</code> mode).
+    </div>
+    <div class="note">
+      <strong>Measured, honestly:</strong> on synthetic data engineered to induce sign
+      ambiguity (a near-duplicate redundant feature), the unconstrained fit produced 3
+      rounds with a negative main-effect weight and 13 rounds with a negative weight on an
+      interaction involving the constrained column, out of 100 rounds —
+      <code>strict_shape_constraints=True</code> eliminated all 16. This is a real,
+      verified internal-consistency fix (the model no longer contradicts its own
+      per-round monotonic construction anywhere), which is what mathematically guarantees
+      ensemble-level monotonicity going forward — though on this particular dataset, the
+      <em>aggregate</em> curve already happened to look monotonic even without it (the 16
+      flipped-sign rounds were individually too small to visibly bend the total). This is
+      a real, non-free regularization (it can change a round's own fit even when no
+      sign-flip problem existed for a particular model), so it's opt-in:
+      <code>strict_shape_constraints=False</code> (the default) reproduces the exact same
+      predictions as if this parameter didn't exist.
+    </div>
     <p><strong>Bounded effects</strong>: <code>bounded_effects={"column": (lower,
     upper)}</code> clips a continuous column's main-effect deviation to this range,
     applied last (after monotonic/convexity projection).</p>

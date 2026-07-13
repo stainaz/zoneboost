@@ -243,6 +243,12 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         not a general improvement, so the default (no constraints)
         reproduces the exact same predictions as if this parameter didn't
         exist.
+
+        Each round's own stored value is guaranteed monotonic (via the
+        isotonic projection above), but a round's own Lasso-stacking
+        weight for that term can be negative, flipping its sign in the
+        combined, multi-round output -- see ``strict_shape_constraints``
+        below for an ensemble-level (not just per-round) guarantee.
     loss : str, default="squared_error"
         ``"squared_error"`` (default) targets the conditional mean, exactly
         as every prior release -- zero change to today's behavior or cost.
@@ -326,6 +332,48 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         first), not guaranteed to keep the result strictly monotonic
         afterward. **Opt-in**: the default (no constraints) reproduces the
         exact same predictions as if this parameter didn't exist.
+
+        Guarantees convexity of each round's own stored value, not the
+        ensemble's cumulative multi-round main effect (a sum of convex
+        functions is convex only when combined with non-negative weights,
+        but a round's own Lasso-stacking weight can be negative) -- see
+        ``strict_shape_constraints`` below for an ensemble-level guarantee.
+    strict_shape_constraints : bool, default=False
+        Restricts a round's own Lasso-stacking weight to be non-negative
+        for every term a ``monotonic_constraints``/``convexity_constraints``
+        entry applies to (a monotonic column's own main effect *and*
+        every pair/triple it participates in, since interactions inherit
+        the per-round monotonic projection too; convexity is main-effects-
+        only) -- turning the per-round-only guarantees documented above
+        into a real ensemble-level one: a non-negative-weighted sum of
+        individually-monotonic (or individually-convex) round contributions
+        is itself monotonic (or convex), a mathematical guarantee, not a
+        heuristic. Implemented by representing every *unconstrained*
+        term's weight as the difference of two non-negative variables and
+        fitting a single ``sklearn.linear_model.Lasso(positive=True)`` on
+        the expanded design -- recovers exactly the same solution a
+        mixed-sign-constrained L1 problem would have, not an approximation
+        (see :func:`zoneboost._weak_learner._fit_lasso_weights`).
+
+        Does **not** extend to ``bounded_effects`` -- non-negative weights
+        don't fix its own cumulative-total gap at all (summing several
+        non-negatively-weighted, individually-bounded contributions makes
+        the cumulative range *wider*, never narrower); that gap remains,
+        disclosed, unchanged.
+
+        **Scope**: only applies to the ordinary-Lasso combination step
+        (``loss`` in ``"squared_error"``/``"poisson"``/``"gamma"``/
+        ``"tweedie"``) -- raises ``ValueError`` at `fit` if
+        ``loss="quantile"`` and either constraint dict is set
+        (``QuantileRegressor`` has no ``positive=True`` mode and no
+        equivalent reformulation applies cleanly to pinball loss). Unlike
+        a strictly free fix, this *can* change a round's own fit even
+        when no sign-flip problem existed for a particular model (real,
+        non-free regularization), so it's opt-in rather than automatic --
+        existing ``monotonic_constraints``/``convexity_constraints`` users
+        won't see their model change on upgrade unless they ask.
+        **Opt-in**: the default (``False``) reproduces the exact same
+        predictions as if this parameter didn't exist.
     bounded_effects : dict, default=None
         ``{column: (lower, upper)}`` -- clips a continuous column's *main
         effect* deviation to this range, applied after any monotonic/
@@ -558,6 +606,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         quantile: float = 0.5,
         tweedie_power: float = 1.5,
         convexity_constraints=None,
+        strict_shape_constraints: bool = False,
         bounded_effects=None,
         forbidden_interactions=None,
         track_reliability: bool = False,
@@ -595,6 +644,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.quantile = quantile
         self.tweedie_power = tweedie_power
         self.convexity_constraints = convexity_constraints
+        self.strict_shape_constraints = strict_shape_constraints
         self.bounded_effects = bounded_effects
         self.forbidden_interactions = forbidden_interactions
         self.track_reliability = track_reliability
@@ -663,6 +713,17 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.forbidden_interactions_ = resolve_forbidden_interactions(X, self.forbidden_interactions)
         self.group_col_ = resolve_group_col(X, self.group_col)
         self.mondrian_col_ = resolve_group_col(X, self.mondrian_col)
+        if (
+            self.strict_shape_constraints
+            and self.loss == "quantile"
+            and (self.monotonic_constraints_ or self.convexity_constraints_)
+        ):
+            raise ValueError(
+                "strict_shape_constraints=True is not supported with loss='quantile' when "
+                "monotonic_constraints/convexity_constraints are set -- QuantileRegressor has no "
+                "positive=True mode and no equivalent variable-splitting reformulation applies "
+                "cleanly to pinball loss."
+            )
 
         has_val = self.validation_fraction and self.validation_fraction > 0
         has_cal = self.calibration_fraction and self.calibration_fraction > 0
@@ -907,9 +968,35 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             # Lasso, not a shared equal-weight average: an irrelevant term's
             # weight gets zeroed by the L1 penalty, a strong term gets its
             # own learned weight instead of a diluted 1/n_terms share.
+            positive_mask = None
+            if self.strict_shape_constraints:
+                # Interactions inherit monotonicity (see "Global shape
+                # constraints"), so a monotonic-constrained column's own
+                # pairs/triples need a non-negative weight too, not just
+                # its main effect -- otherwise a negative aggregate weight
+                # on the interaction term alone could still break
+                # monotonicity along that column's axis. Convexity is
+                # main-effects-only (doesn't inherit), so only the main
+                # effect itself is constrained there.
+                mask_list = [
+                    self.monotonic_constraints_.get(col, 0) != 0 or self.convexity_constraints_.get(col, 0) != 0
+                    for col in main_effects
+                ]
+                mask_list += [
+                    self.monotonic_constraints_.get(a, 0) != 0 or self.monotonic_constraints_.get(b, 0) != 0
+                    for a, b in interactions
+                ]
+                mask_list += [
+                    self.monotonic_constraints_.get(a, 0) != 0
+                    or self.monotonic_constraints_.get(b, 0) != 0
+                    or self.monotonic_constraints_.get(c, 0) != 0
+                    for a, b, c in triples
+                ]
+                positive_mask = np.array(mask_list, dtype=bool)
             intercept, weights = _fit_lasso_weights(
                 contributions, residual, self.stacking_alpha,
                 quantile=self.quantile if self.loss == "quantile" else None,
+                positive_mask=positive_mask,
             )
             fitted_residual = intercept + contributions @ weights
 
