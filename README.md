@@ -19,11 +19,8 @@ they work with `Pipeline`, `GridSearchCV`, `cross_val_score`, and `clone`.
 
 ## Installation
 
-zoneboost is currently published on **TestPyPI** only (not yet on real
-PyPI):
-
 ```bash
-pip install -i https://test.pypi.org/simple/ zoneboost
+pip install zoneboost
 ```
 
 ## Quickstart
