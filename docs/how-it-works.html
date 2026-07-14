@@ -308,6 +308,59 @@ model.rounds_[0]["diagnostics"]["learned_shrinkage_m"]  # {"main": ..., "pair": 
     <code>trim_fraction=0.0</code> (the default) is bit-identical to every prior
     release.</p>
 
+    <h3 id="sample-weighting">Sample Weighting (sample_weight)</h3>
+    <p><code>ZoneBoostRegressor.fit(X, y, sample_weight=...)</code> — a per-row weight,
+    like <code>offset</code>, not a tuning knob. Unlike <code>offset</code>, it only
+    affects <em>how the model learns</em> (zone construction, empirical-Bayes shrinkage,
+    GLM baseline/deviance, the Lasso/<code>QuantileRegressor</code> combination step) —
+    never <em>what a fitted model predicts</em> for a given input, so there is no
+    corresponding <code>predict(X, sample_weight=...)</code>.</p>
+    <p>The empirical-Bayes shrinkage formula itself needs <strong>zero changes</strong> to
+    support this: <code>(counts * cell_stat + m * overall_stat) / (counts + m)</code> is
+    pure arithmetic on whatever <code>counts</code>/<code>cell_stat</code> are — making
+    <code>counts</code> a <strong>weighted sum</strong> and <code>cell_stat</code> a
+    <strong>weighted mean</strong> instead of a row count/plain mean is enough, since
+    <code>m</code> already means "how much evidence before trusted as much as the prior,"
+    which composes correctly whether that evidence is measured in rows or weight.</p>
+    <p><strong>Unlike <code>trim_fraction</code> (main effects only), this generalizes to
+    pairs and triples for free</strong> — they already route through the same weighted
+    <code>_zone_raw_stat</code>/<code>_zone_shrunk_deviation</code> machinery internally
+    for their own marginal priors and joint-cell statistic, so threading
+    <code>sample_weight</code> through those shared functions once benefits every term
+    order automatically.</p>
+    <pre><code>model = ZoneBoostRegressor().fit(X, y, sample_weight=exposure)</code></pre>
+    <div class="note">
+      <strong>Scope:</strong> not supported with <code>loss="quantile"</code> or
+      <code>trim_fraction &gt; 0</code> (raises <code>ValueError</code>) — weighted
+      quantiles require picking one of several genuinely ambiguous conventions for
+      generalizing linear-interpolation quantiles to unequal weights (numpy's own
+      <code>weights</code> support for <code>np.quantile</code> requires switching
+      interpolation methods entirely, breaking bit-identical behavior even for uniform
+      weights), and a weighted trimmed mean has an analogous "drop by row count or by
+      weight mass?" ambiguity — both scoped out rather than guessed at. Compatible with
+      <code>"squared_error"</code>/<code>"poisson"</code>/<code>"gamma"</code>/
+      <code>"tweedie"</code> (all share the unambiguous, weighted-mean raw statistic).
+      Pair-screening's cheap ANOVA proxy and <code>adaptive_boundary_smoothing</code>'s
+      own internal fitting stay unweighted regardless — the same disclosed scope other
+      approximations in this library already carry. Row/column subsampling stays uniform
+      regardless of weight. <code>predict_interval</code>'s conformal calibration is not
+      weighted — weighted conformal prediction is a distinct research problem, not
+      attempted here. Weights must be non-negative; a zero weight is valid.
+    </div>
+    <p><strong>Measured, honestly</strong>: on the identical outlier scenario as
+    <code>trim_fraction</code> above, giving the 5 outlier rows
+    <code>sample_weight=0.001</code> instead of dropping them recovered a prediction of
+    <strong>9.07</strong> at <code>x=4.5</code> (true value 9.0) versus <strong>17.45</strong>
+    unweighted. On a genuine <code>a&times;b</code> interaction with 8 joint-cell outliers,
+    down-weighting them moved the predicted joint effect from <strong>3.52</strong> to
+    <strong>2.75</strong> (true value 2.70) — confirming pairs really do inherit the
+    weighting, not just main effects. <code>sample_weight=None</code> (the default) is
+    bit-identical to every prior release — including a subtle case caught during
+    development: the <code>min_zone_frac</code>/<code>min_zone_abs</code> zone-size guards
+    must floor to the same integer row count as the unweighted path even when a
+    <code>sample_weight</code> array of all-ones is passed explicitly, or "uniform weight"
+    would silently stop being bit-identical to "no weight."</p>
+
     <h2 id="lasso-stacking">Lasso Stacking</h2>
     <p>Every prior release combined a round's terms by averaging every contribution
     equally (<code>raw = contributions.mean(axis=1)</code>), then fit one shared scale for

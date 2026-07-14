@@ -98,6 +98,7 @@
     { title: "Cross-Fitted Cell Means", crumb: "How It Works", url: "how-it-works.html#cross-fitted-cell-means" },
     { title: "Empirical Bayes Shrinkage", crumb: "How It Works", url: "how-it-works.html#empirical-bayes-shrinkage" },
     { title: "Robust Cell Statistics (trim_fraction)", crumb: "How It Works › Empirical Bayes Shrinkage", url: "how-it-works.html#robust-cell-statistics" },
+    { title: "Sample Weighting (sample_weight)", crumb: "How It Works › Empirical Bayes Shrinkage", url: "how-it-works.html#sample-weighting" },
     { title: "Lasso Stacking", crumb: "How It Works", url: "how-it-works.html#lasso-stacking" },
     { title: "Soft Zone Boundaries", crumb: "How It Works", url: "how-it-works.html#soft-zone-boundaries" },
     { title: "Cyclic Backfitting", crumb: "How It Works", url: "how-it-works.html#cyclic-backfitting" },

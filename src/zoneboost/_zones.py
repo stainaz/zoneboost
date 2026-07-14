@@ -59,7 +59,7 @@ def zone_index(values, boundaries: np.ndarray) -> np.ndarray:
     return np.where(is_missing, missing_idx, idx)
 
 
-def zone_centers(x, boundaries: np.ndarray) -> np.ndarray:
+def zone_centers(x, boundaries: np.ndarray, sample_weight=None) -> np.ndarray:
     """Each *real* zone's centroid: the empirical mean training-x-value of
     the rows that landed in it (via :func:`zone_index`) -- one entry per
     real zone (``len(boundaries) + 1`` of them; the missing zone has no
@@ -76,6 +76,9 @@ def zone_centers(x, boundaries: np.ndarray) -> np.ndarray:
     x : array-like of shape (n_samples,)
         The same training column ``boundaries`` was fit from.
     boundaries : ndarray of shape (n_cuts,)
+    sample_weight : array-like of shape (n_samples,), default=None
+        Per-row weight for the centroid average. ``None`` (default) is
+        bit-identical to every prior release (an unweighted mean).
 
     Returns
     -------
@@ -85,12 +88,14 @@ def zone_centers(x, boundaries: np.ndarray) -> np.ndarray:
         to its own boundary midpoint rather than producing NaN.
     """
     x_arr = np.asarray(x, dtype=float)
-    x_present = x_arr[~np.isnan(x_arr)]
+    present = ~np.isnan(x_arr)
+    x_present = x_arr[present]
+    w_present = np.asarray(sample_weight, dtype=float)[present] if sample_weight is not None else np.ones_like(x_present)
     n_real = len(boundaries) + 1
     z = np.searchsorted(boundaries, x_present, side="right")
 
-    sums = np.bincount(z, weights=x_present, minlength=n_real)
-    counts = np.bincount(z, minlength=n_real)
+    sums = np.bincount(z, weights=x_present * w_present, minlength=n_real)
+    counts = np.bincount(z, weights=w_present, minlength=n_real)
     centers = np.divide(sums, counts, out=np.full(n_real, np.nan), where=counts > 0)
 
     empty = counts == 0
@@ -104,32 +109,47 @@ def zone_centers(x, boundaries: np.ndarray) -> np.ndarray:
     return centers
 
 
-def _best_split(y_sorted_seg: np.ndarray, x_sorted_seg: np.ndarray, min_size: int):
+def _best_split(y_sorted_seg: np.ndarray, x_sorted_seg: np.ndarray, min_size: float, w_sorted_seg: np.ndarray = None):
     """Vectorized search for the single best variance-reducing split point
     within one x-sorted segment. Returns ``(split_index, gain, cut_value)``,
     or ``(None, 0.0, None)`` if nothing in this segment beats leaving it
-    whole (too small, or every candidate split's gain is non-positive)."""
+    whole (too small, or every candidate split's gain is non-positive).
+
+    ``w_sorted_seg`` (default ``None``, meaning every row has weight 1 --
+    bit-identical to every prior release): per-row weight, used both for
+    the weighted sum-of-squares gain (``total_ss = sum(w*y^2) -
+    sum(w*y)^2/sum(w)``, the weighted generalization of the unweighted
+    formula) and for the ``min_size`` guard, which then compares
+    **weighted sum** (total evidence) on each side rather than a plain
+    row count.
+    """
     n = len(y_sorted_seg)
-    if n < 2 * min_size:
+    if n < 2:
         return None, 0.0, None
+    w = w_sorted_seg if w_sorted_seg is not None else np.ones(n)
 
-    cum_y = np.cumsum(y_sorted_seg)
-    cum_y2 = np.cumsum(y_sorted_seg**2)
-    total_sum, total_sq = cum_y[-1], cum_y2[-1]
-    total_ss = total_sq - (total_sum**2) / n
+    cum_w = np.cumsum(w)
+    cum_wy = np.cumsum(w * y_sorted_seg)
+    cum_wy2 = np.cumsum(w * y_sorted_seg**2)
+    total_w, total_sum, total_sq = cum_w[-1], cum_wy[-1], cum_wy2[-1]
+    if total_w < 2 * min_size:
+        return None, 0.0, None
+    total_ss = total_sq - (total_sum**2) / total_w
 
-    i = np.arange(1, n)  # split after position i-1: left gets i points, right gets n-i
-    left_n, right_n = i, n - i
-    left_sum = cum_y[:-1]
+    i = np.arange(1, n)  # split after position i-1: left gets rows 0..i-1, right gets the rest
+    left_w, right_w = cum_w[:-1], total_w - cum_w[:-1]
+    left_sum = cum_wy[:-1]
     right_sum = total_sum - left_sum
-    left_sq = cum_y2[:-1]
+    left_sq = cum_wy2[:-1]
     right_sq = total_sq - left_sq
-    left_ss = left_sq - (left_sum**2) / left_n
-    right_ss = right_sq - (right_sum**2) / right_n
+    left_mean_term = np.divide(left_sum**2, left_w, out=np.zeros_like(left_sum), where=left_w > 0)
+    right_mean_term = np.divide(right_sum**2, right_w, out=np.zeros_like(right_sum), where=right_w > 0)
+    left_ss = left_sq - left_mean_term
+    right_ss = right_sq - right_mean_term
     gains = total_ss - (left_ss + right_ss)
 
     no_tie = x_sorted_seg[:-1] != x_sorted_seg[1:]
-    valid = (left_n >= min_size) & (right_n >= min_size) & no_tie
+    valid = (left_w >= min_size) & (right_w >= min_size) & no_tie
     if not valid.any():
         return None, 0.0, None
 
@@ -144,7 +164,7 @@ def _best_split(y_sorted_seg: np.ndarray, x_sorted_seg: np.ndarray, min_size: in
 
 
 def adaptive_zone_boundaries(
-    x, y, max_zones: int = 7, min_zone_frac: float = 0.02, min_zone_abs: int = 20
+    x, y, max_zones: int = 7, min_zone_frac: float = 0.02, min_zone_abs: int = 20, sample_weight=None
 ) -> np.ndarray:
     """Variable-width zone boundaries for one continuous variable.
 
@@ -169,11 +189,18 @@ def adaptive_zone_boundaries(
         for variables that need many distinct groups (use categorical
         handling instead of raising this).
     min_zone_frac : float, default=0.02
-        Minimum fraction of rows required on each side of a candidate
-        split.
+        Minimum fraction of rows (or, with ``sample_weight``, of total
+        weight) required on each side of a candidate split.
     min_zone_abs : int, default=20
-        Minimum absolute row count required on each side of a candidate
-        split (the binding constraint on small datasets).
+        Minimum absolute row count (or total weight) required on each
+        side of a candidate split (the binding constraint on small
+        datasets).
+    sample_weight : array-like of shape (n_samples,), default=None
+        Per-row weight. ``None`` (default) is bit-identical to every
+        prior release. When given, the variance-reduction gain and the
+        ``min_zone_frac``/``min_zone_abs`` guards are both computed
+        against **weighted** sums (total evidence) rather than plain row
+        counts -- see :func:`_best_split`.
 
     Returns
     -------
@@ -189,10 +216,16 @@ def adaptive_zone_boundaries(
     y_arr = np.asarray(y, dtype=float)
     present = ~np.isnan(x_arr)
     x_arr, y_arr = x_arr[present], y_arr[present]
+    if sample_weight is not None:
+        w_arr = np.asarray(sample_weight, dtype=float)[present]
+    else:
+        w_arr = None
     order = np.argsort(x_arr)
     x_sorted, y_sorted = x_arr[order], y_arr[order]
+    w_sorted = w_arr[order] if w_arr is not None else None
     n = len(x_sorted)
-    min_size = max(min_zone_abs, int(n * min_zone_frac))
+    total_weight = w_sorted.sum() if w_sorted is not None else float(n)
+    min_size = max(min_zone_abs, int(total_weight * min_zone_frac))
 
     segments = [(0, n)]  # (start, end) index ranges into the sorted arrays
     cut_values = []
@@ -200,7 +233,8 @@ def adaptive_zone_boundaries(
     while len(segments) < max_zones:
         best_gain, best_seg_i, best_split, best_cut = 0.0, None, None, None
         for seg_i, (start, end) in enumerate(segments):
-            split, gain, cut = _best_split(y_sorted[start:end], x_sorted[start:end], min_size)
+            w_seg = w_sorted[start:end] if w_sorted is not None else None
+            split, gain, cut = _best_split(y_sorted[start:end], x_sorted[start:end], min_size, w_seg)
             if split is not None and gain > best_gain:
                 best_gain, best_seg_i, best_split, best_cut = gain, seg_i, split, cut
 

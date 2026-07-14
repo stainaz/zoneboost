@@ -90,6 +90,13 @@
         <tr><td><code>random_state</code></td><td><code>42</code></td><td>Seed for the validation split and subsampling</td></tr>
       </tbody>
     </table>
+    <p><code>fit</code> also accepts two per-row (not constructor) parameters:
+    <code>sample_weight</code> (regressor only — a per-row weight affecting only how the
+    model learns, no corresponding <code>predict</code> argument; incompatible with
+    <code>loss="quantile"</code>/<code>trim_fraction &gt; 0</code> — see
+    <a href="how-it-works.html#sample-weighting">Sample Weighting</a>) and
+    <code>offset</code> (regressor only, <code>loss in ("poisson","gamma","tweedie")</code>
+    — see <a href="how-it-works.html#actuarial-losses">Actuarial Losses</a>).</p>
 
     <h2 id="regressor-attributes">ZoneBoostRegressor Fitted Attributes</h2>
     <p>After <code>fit</code>, <code>ZoneBoostRegressor</code> exposes (among others):</p>

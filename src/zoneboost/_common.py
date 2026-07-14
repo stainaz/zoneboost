@@ -171,25 +171,36 @@ def _glm_residual(y: np.ndarray, mu: np.ndarray, power: float) -> np.ndarray:
     return mu ** (1.0 - power) * (y - mu)
 
 
-def _glm_baseline(y: np.ndarray, offset: np.ndarray, power: float) -> float:
+def _glm_baseline(y: np.ndarray, offset: np.ndarray, power: float, sample_weight: np.ndarray = None) -> float:
     """Best constant link-scale predictor given a (possibly nonzero,
     per-row) fixed ``offset``: ``log(sum(y) / sum(exp(offset)))`` -- the
     exact intercept-only MLE for Poisson with a fixed offset (the score
     equation ``sum(y) = sum(exp(beta0 + offset))`` solved in closed
     form). Reused as-is for Gamma/Tweedie: not their exact MLE, but the
     same mean-matching, disclosed approximation quantile-mode's
-    machinery already relies on elsewhere in this codebase."""
-    return float(np.log(np.sum(y) / np.sum(np.exp(offset))))
+    machinery already relies on elsewhere in this codebase.
+
+    ``sample_weight`` (default ``None``, bit-identical to every prior
+    release) generalizes the same closed form to
+    ``log(sum(w*y) / sum(w*exp(offset)))`` -- the weighted score
+    equation ``sum(w*y) = sum(w*exp(beta0 + offset))``."""
+    if sample_weight is None:
+        return float(np.log(np.sum(y) / np.sum(np.exp(offset))))
+    return float(np.log(np.sum(sample_weight * y) / np.sum(sample_weight * np.exp(offset))))
 
 
-def _glm_deviance_score(y: np.ndarray, mu: np.ndarray, loss: str, tweedie_power: float) -> float:
+def _glm_deviance_score(
+    y: np.ndarray, mu: np.ndarray, loss: str, tweedie_power: float, sample_weight: np.ndarray = None
+) -> float:
     """Mean deviance for whichever GLM loss is active -- the ``_score``
     role RMSE/pinball loss play for ``squared_error``/``quantile``.
     Dispatches directly to scikit-learn's own, already-tested
     ``mean_poisson_deviance``/``mean_gamma_deviance``/
-    ``mean_tweedie_deviance``, not a hand-derived formula."""
+    ``mean_tweedie_deviance``, not a hand-derived formula. ``sample_
+    weight`` (default ``None``) is passed straight through -- all three
+    accept it natively."""
     if loss == "poisson":
-        return float(mean_poisson_deviance(y, mu))
+        return float(mean_poisson_deviance(y, mu, sample_weight=sample_weight))
     if loss == "gamma":
-        return float(mean_gamma_deviance(y, mu))
-    return float(mean_tweedie_deviance(y, mu, power=tweedie_power))
+        return float(mean_gamma_deviance(y, mu, sample_weight=sample_weight))
+    return float(mean_tweedie_deviance(y, mu, power=tweedie_power, sample_weight=sample_weight))

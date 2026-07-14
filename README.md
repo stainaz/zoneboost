@@ -305,6 +305,67 @@ against a true value of **9.0** — dragged far off by the outliers.
 dropped from **2.44** to **0.65**. `trim_fraction=0.0` (the default) is
 bit-identical to every prior release.
 
+### Sample weighting (`sample_weight`)
+
+`ZoneBoostRegressor.fit(X, y, sample_weight=...)` — a per-row weight,
+like `offset`, not a tuning knob. Unlike `offset`, it only affects *how
+the model learns* (zone construction, empirical-Bayes shrinkage, GLM
+baseline/deviance, the Lasso/`QuantileRegressor` combination step) —
+never *what a fitted model predicts* for a given input, so there is no
+corresponding `predict(X, sample_weight=...)`.
+
+The empirical-Bayes shrinkage formula itself needs **zero changes** to
+support this: `(counts * cell_stat + m * overall_stat) / (counts + m)`
+is pure arithmetic on whatever `counts`/`cell_stat` are — making
+`counts` a **weighted sum** and `cell_stat` a **weighted mean** instead
+of a row count/plain mean is enough, since `m` already means "how much
+evidence before trusted as much as the prior," which composes correctly
+whether that evidence is measured in rows or weight.
+
+**Unlike `trim_fraction` (main effects only), this generalizes to pairs
+and triples for free** — they already route through the same weighted
+`_zone_raw_stat`/`_zone_shrunk_deviation` machinery internally for their
+own marginal priors and joint-cell statistic, so threading
+`sample_weight` through those shared functions once benefits every term
+order automatically.
+
+```python
+model = ZoneBoostRegressor().fit(X, y, sample_weight=exposure)
+```
+
+**Scope**: not supported with `loss="quantile"` or `trim_fraction > 0`
+(raises `ValueError`) — weighted quantiles require picking one of
+several genuinely ambiguous conventions for generalizing linear-
+interpolation quantiles to unequal weights (`numpy`'s own `weights`
+support for `np.quantile` requires switching interpolation methods
+entirely, breaking bit-identical behavior even for uniform weights), and
+a weighted trimmed mean has an analogous "drop by row count or by weight
+mass?" ambiguity — both scoped out rather than guessed at. Compatible
+with `"squared_error"`/`"poisson"`/`"gamma"`/`"tweedie"` (all share the
+unambiguous, weighted-mean raw statistic). Pair-screening's cheap ANOVA
+proxy and `adaptive_boundary_smoothing`'s own internal fitting stay
+unweighted regardless — the same disclosed scope other approximations in
+this library already carry. Row/column subsampling stays uniform
+regardless of weight (unrelated to "how much does this row count once
+selected"). `predict_interval`'s conformal calibration is not weighted —
+weighted conformal prediction is a distinct research problem, not
+attempted here. Weights must be non-negative; a zero weight is valid
+(that row contributes nothing).
+
+**Measured, honestly**: on the identical outlier scenario as
+`trim_fraction` above, giving the 5 outlier rows `sample_weight=0.001`
+instead of dropping them recovered a prediction of **9.07** at `x=4.5`
+(true value 9.0) versus **17.45** unweighted. On a genuine `a×b`
+interaction with 8 joint-cell outliers, down-weighting them moved the
+predicted joint effect from **3.52** to **2.75** (true value 2.70) —
+confirming pairs really do inherit the weighting, not just main effects.
+`sample_weight=None` (the default) is bit-identical to every prior
+release — including a subtle case caught during development: the
+`min_zone_frac`/`min_zone_abs` zone-size guards must floor to the same
+integer row count as the unweighted path even when a `sample_weight`
+array of all-ones is passed explicitly, or "uniform weight" would
+silently stop being bit-identical to "no weight."
+
 ### Lasso stacking
 
 Every prior release combined a round's terms by averaging every

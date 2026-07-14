@@ -684,7 +684,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
     def _ensure_dataframe(self, X) -> pd.DataFrame:
         return ensure_dataframe(X, getattr(self, "feature_names_in_", None))
 
-    def fit(self, X, y, offset=None):
+    def fit(self, X, y, sample_weight=None, offset=None):
         """Fit the boosted zone-grid ensemble.
 
         Parameters
@@ -695,6 +695,19 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         y : array-like of shape (n_samples,)
             Training target. ``loss="poisson"``/``"tweedie"`` require
             ``y >= 0``; ``loss="gamma"`` requires ``y > 0``.
+        sample_weight : array-like of shape (n_samples,), default=None
+            Per-row weight -- unlike ``offset``, this only affects *how
+            the model learns* (zone construction, shrinkage, GLM
+            baseline/deviance, the Lasso/``QuantileRegressor``
+            combination step), never *what a fitted model predicts*, so
+            there is no corresponding ``predict(X, sample_weight=...)``.
+            Must be non-negative. Not supported with ``loss="quantile"``
+            or ``trim_fraction > 0`` (raises ``ValueError``) -- see
+            "Sample weighting" in the docs for why (weighted quantiles
+            and weighted trimmed means both require picking one of
+            several genuinely ambiguous conventions, unlike the
+            unambiguous weighted mean this supports). ``None`` (default)
+            is bit-identical to every prior release.
         offset : array-like of shape (n_samples,), default=None
             Only meaningful for ``loss in ("poisson", "gamma", "tweedie")``
             -- see :meth:`predict`. Raises ``ValueError`` if given together
@@ -731,6 +744,19 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 "targets a specific order statistic of the residual, and trimming doesn't compose "
                 "with that the way it does with a mean."
             )
+        if sample_weight is not None and self.loss == "quantile":
+            raise ValueError(
+                "sample_weight is not supported with loss='quantile' -- weighted quantiles require "
+                "choosing one of several genuinely ambiguous conventions for generalizing linear-"
+                "interpolation quantiles to unequal weights, not attempted here."
+            )
+        if sample_weight is not None and self.trim_fraction > 0:
+            raise ValueError(
+                "sample_weight is not supported with trim_fraction > 0 -- a weighted trimmed mean "
+                "has an analogous ambiguity (drop by row count, or by weight mass?), not attempted "
+                "here."
+            )
+        sample_weight_arr = self._resolve_sample_weight(sample_weight, len(X))
         offset_arr = self._resolve_offset(offset, len(X))
 
         self.n_features_in_ = X.shape[1]
@@ -781,21 +807,24 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             X_fit = X.iloc[fit_idx].reset_index(drop=True)
             y_fit = y_arr[fit_idx]
             offset_fit = offset_arr[fit_idx]
+            weight_fit = sample_weight_arr[fit_idx] if sample_weight_arr is not None else None
             X_val = X.iloc[val_idx].reset_index(drop=True) if has_val else None
             y_val = y_arr[val_idx] if has_val else None
             offset_val = offset_arr[val_idx] if has_val else None
+            weight_val = sample_weight_arr[val_idx] if (has_val and sample_weight_arr is not None) else None
             X_cal = X.iloc[cal_idx].reset_index(drop=True) if has_cal else None
             y_cal = y_arr[cal_idx] if has_cal else None
             offset_cal = offset_arr[cal_idx] if has_cal else None
         else:
-            X_fit, y_fit, offset_fit = X, y_arr, offset_arr
-            X_val = y_val = X_cal = y_cal = offset_val = offset_cal = None
+            X_fit, y_fit, offset_fit, weight_fit = X, y_arr, offset_arr, sample_weight_arr
+            X_val = y_val = X_cal = y_cal = offset_val = offset_cal = weight_val = None
 
         # Phase 1 (selection): fit on X_fit, track val_rmse_ on X_val (if
         # any) with early stopping, to decide best_n_rounds_.
         rounds, baseline, train_rmse, val_rmse = self._boost_rounds(
             X_fit, y_fit, rng, self.n_rounds, X_val, y_val, early_stopping=True,
             offset_train=offset_fit, offset_val=offset_val,
+            weight_train=weight_fit, weight_val=weight_val,
         )
         self.train_rmse_ = train_rmse
         self.val_rmse_ = val_rmse
@@ -811,9 +840,11 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             X_refit = pd.concat([X_fit, X_val], ignore_index=True)
             y_refit = np.concatenate([y_fit, y_val])
             offset_refit = np.concatenate([offset_fit, offset_val])
+            weight_refit = np.concatenate([weight_fit, weight_val]) if weight_fit is not None else None
             refit_rng = np.random.default_rng(self.random_state)
             rounds, baseline, _, _ = self._boost_rounds(
-                X_refit, y_refit, refit_rng, self.best_n_rounds_, offset_train=offset_refit
+                X_refit, y_refit, refit_rng, self.best_n_rounds_, offset_train=offset_refit,
+                weight_train=weight_refit,
             )
 
         self.rounds_ = rounds
@@ -849,7 +880,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
 
         return self
 
-    def _baseline_stat(self, y_train: np.ndarray, offset: np.ndarray) -> float:
+    def _baseline_stat(self, y_train: np.ndarray, offset: np.ndarray, sample_weight: np.ndarray = None) -> float:
         """The starting prediction before any boosting round -- the best
         constant predictor for whichever loss is active: the mean (or,
         with ``trim_fraction > 0``, a trimmed mean -- see
@@ -864,13 +895,18 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         baseline (no simple trimmed equivalent for `_glm_baseline`'s
         closed-form intercept MLE) -- only each round's own main-effect
         zone statistics are robustified for those losses; a disclosed
-        scope limit."""
+        scope limit. ``sample_weight`` (default ``None``) is mutually
+        exclusive with ``loss="quantile"``/``trim_fraction > 0`` (enforced
+        at `fit`), so it only ever needs to affect the plain-mean and GLM
+        branches here."""
         if self.loss == "quantile":
             return float(np.quantile(y_train, self.quantile))
         if self.loss in ("poisson", "gamma", "tweedie"):
-            return _glm_baseline(y_train, offset, _glm_power(self.loss, self.tweedie_power))
+            return _glm_baseline(y_train, offset, _glm_power(self.loss, self.tweedie_power), sample_weight=sample_weight)
         if self.trim_fraction > 0:
             return _trimmed_mean(y_train, self.trim_fraction)
+        if sample_weight is not None:
+            return float(np.average(y_train, weights=sample_weight))
         return float(y_train.mean())
 
     def _to_mean(self, link_pred: np.ndarray, offset: np.ndarray) -> np.ndarray:
@@ -910,7 +946,22 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
             raise ValueError(f"offset must have length {n}, got {len(offset_arr)}")
         return offset_arr
 
-    def _score(self, y_true: np.ndarray, pred: np.ndarray) -> float:
+    def _resolve_sample_weight(self, sample_weight, n: int):
+        """Normalizes a user-supplied ``sample_weight`` (or ``None``,
+        meaning "every row weighs the same," returned as-is rather than
+        an all-ones array so every weighted formula downstream can keep
+        its fast, bit-identical unweighted path) to a plain, validated
+        float array of length ``n``."""
+        if sample_weight is None:
+            return None
+        weight_arr = np.asarray(sample_weight, dtype=float).reshape(-1)
+        if len(weight_arr) != n:
+            raise ValueError(f"sample_weight must have length {n}, got {len(weight_arr)}")
+        if np.any(weight_arr < 0):
+            raise ValueError("sample_weight must be non-negative.")
+        return weight_arr
+
+    def _score(self, y_true: np.ndarray, pred: np.ndarray, sample_weight: np.ndarray = None) -> float:
         """The loss actually being minimized, evaluated on ``pred`` (a
         mean-scale prediction, i.e. already passed through ``_to_mean``
         for GLM losses): RMSE for ``loss="squared_error"``, mean pinball
@@ -918,17 +969,22 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         (:func:`zoneboost._common._glm_deviance_score`) for ``"poisson"``/
         ``"gamma"``/``"tweedie"`` -- used identically for ``train_rmse_``/
         ``val_rmse_``/early stopping/``best_n_rounds_`` selection
-        regardless of which loss is active."""
+        regardless of which loss is active. ``sample_weight`` (default
+        ``None``, mutually exclusive with ``loss="quantile"`` -- enforced
+        at `fit`) only ever needs to affect the plain-RMSE/GLM-deviance
+        branches here."""
         if self.loss == "quantile":
             diff = y_true - pred
             return float(np.mean(np.maximum(self.quantile * diff, (self.quantile - 1) * diff)))
         if self.loss in ("poisson", "gamma", "tweedie"):
-            return _glm_deviance_score(y_true, pred, self.loss, self.tweedie_power)
+            return _glm_deviance_score(y_true, pred, self.loss, self.tweedie_power, sample_weight=sample_weight)
+        if sample_weight is not None:
+            return float(np.sqrt(np.average((y_true - pred) ** 2, weights=sample_weight)))
         return float(np.sqrt(np.mean((y_true - pred) ** 2)))
 
     def _boost_rounds(
         self, X_train, y_train, rng, n_rounds, X_val=None, y_val=None, early_stopping=False,
-        offset_train=None, offset_val=None,
+        offset_train=None, offset_val=None, weight_train=None, weight_val=None,
     ):
         """Core boosting loop -- extracted so `fit` can run it twice: once
         for round-count selection (on the fit split, tracking ``val_rmse_``
@@ -941,7 +997,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         rounds, baseline, train_rmse, val_rmse
         """
         offset_train = self._resolve_offset(offset_train, len(y_train))
-        baseline = self._baseline_stat(y_train, offset_train)
+        baseline = self._baseline_stat(y_train, offset_train, sample_weight=weight_train)
         n = len(y_train)
         n_row_sample = min(n, max(min(20, n), int(n * self.row_subsample)))
         n_predictors = len(self.predictor_names_)
@@ -974,6 +1030,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 col_subset = list(rng.choice(self.predictor_names_, size=n_col_sample, replace=False))
             X_sub = X_train.iloc[row_idx][col_subset]
             residual_sub = residual[row_idx]
+            weight_sub = weight_train[row_idx] if weight_train is not None else None
 
             zone_info, main_effects, interactions, triples, oof_contributions, diagnostics = weak_learner_fit(
                 X_sub,
@@ -1000,6 +1057,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 track_reliability=self.track_reliability,
                 group_col=self.group_col_,
                 trim_fraction=self.trim_fraction,
+                sample_weight=weight_sub,
             )
             contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
             # The round's own (sub)sampled rows would otherwise be scored by a
@@ -1040,6 +1098,7 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 contributions, residual, self.stacking_alpha,
                 quantile=self.quantile if self.loss == "quantile" else None,
                 positive_mask=positive_mask,
+                sample_weight=weight_train,
             )
             fitted_residual = intercept + contributions @ weights
 
@@ -1055,13 +1114,17 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                     "diagnostics": diagnostics,
                 }
             )
-            train_rmse.append(self._score(y_train, self._to_mean(current_pred, offset_train)))
+            train_rmse.append(
+                self._score(y_train, self._to_mean(current_pred, offset_train), sample_weight=weight_train)
+            )
 
             if has_val:
                 val_contributions = weak_learner_contributions(X_val, zone_info, main_effects, interactions, triples)
                 val_fitted = intercept + val_contributions @ weights
                 current_val_pred = current_val_pred + self.learning_rate * val_fitted
-                val_rmse.append(self._score(y_val, self._to_mean(current_val_pred, offset_val)))
+                val_rmse.append(
+                    self._score(y_val, self._to_mean(current_val_pred, offset_val), sample_weight=weight_val)
+                )
 
                 if early_stopping and self.n_iter_no_change is not None:
                     best_so_far = min(val_rmse)
