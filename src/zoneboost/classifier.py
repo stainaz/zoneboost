@@ -71,6 +71,23 @@ def _multinomial_log_loss(y_onehot: np.ndarray, p: np.ndarray, eps: float = 1e-1
     return float(-np.mean(np.sum(y_onehot * np.log(p_clipped), axis=1)))
 
 
+def _random_undersample(X: pd.DataFrame, y: np.ndarray, rng: np.random.Generator):
+    """Drop majority-class rows so every class present has exactly as many
+    rows as the rarest one -- classic random undersampling. Callers apply
+    this to the fit split only: validation/calibration rows must stay at
+    the real class balance, since early stopping and (if enabled) isotonic
+    calibration are only honest measures of real-world performance if
+    they're evaluated against the real class distribution, not a
+    rebalanced one."""
+    classes, counts = np.unique(y, return_counts=True)
+    n_min = counts.min()
+    keep_idx = np.concatenate(
+        [rng.choice(np.flatnonzero(y == c), size=n_min, replace=False) for c in classes]
+    )
+    rng.shuffle(keep_idx)
+    return X.iloc[keep_idx].reset_index(drop=True), y[keep_idx]
+
+
 class _LogOddsBooster:
     """One binary log-odds booster -- the actual boosting loop, used only
     for binary targets. Takes already-split fit/val data directly (no
@@ -613,6 +630,17 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         counts and cross-fold variability, consumed by ``explain(X,
         include_reliability=True)``. Opt-in -- see
         :class:`~zoneboost.ZoneBoostRegressor` for the full description.
+    undersample : bool, default=False
+        If ``True``, before boosting begins, randomly drop majority-class
+        rows from the **fit split only** so every class present has exactly
+        as many rows as the rarest one -- classic random undersampling for
+        imbalanced classification. Applied after the validation/calibration
+        split is drawn, so ``val_logloss_``, early stopping, and (if
+        enabled) isotonic calibration still evaluate against the real,
+        un-resampled class balance; only what the boosting rounds actually
+        see is rebalanced. Multiclass drops every class down to the
+        rarest one's count, not just majority-vs-one-minority. ``False``
+        (default) reproduces every prior release's behavior exactly.
     calibrate : bool, default=False
         If ``True``, recalibrate each booster's raw probability with an
         isotonic regression fit on a held-out split, so predicted
@@ -623,9 +651,9 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         :meth:`feature_importance` still decompose the raw log-odds score,
         unaffected. Requires ``validation_fraction > 0`` or
         ``calibration_fraction > 0``; raises ``ValueError`` at `fit`
-        otherwise. This is the one parameter that differs from
-        :class:`~zoneboost.ZoneBoostRegressor` -- every other parameter is
-        identical across both estimators.
+        otherwise. Along with ``undersample`` above, this is one of the two
+        parameters that differ from :class:`~zoneboost.ZoneBoostRegressor`
+        -- every other parameter is identical across both estimators.
     calibration_fraction : float, default=0.0
         Fraction of training rows held out in a **third**, dedicated split
         purely for calibration -- distinct from ``validation_fraction``'s
@@ -710,6 +738,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         bounded_effects=None,
         forbidden_interactions=None,
         track_reliability: bool = False,
+        undersample: bool = False,
         calibrate: bool = False,
         calibration_fraction: float = 0.0,
         refit_on_full_data: bool = False,
@@ -738,6 +767,7 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         self.bounded_effects = bounded_effects
         self.forbidden_interactions = forbidden_interactions
         self.track_reliability = track_reliability
+        self.undersample = undersample
         self.calibrate = calibrate
         self.calibration_fraction = calibration_fraction
         self.refit_on_full_data = refit_on_full_data
@@ -874,6 +904,9 @@ class ZoneBoostClassifier(BaseEstimator, ClassifierMixin):
         else:
             X_fit, y_fit_raw = X, y_arr
             X_val = y_val_raw = X_cal = y_cal_raw = None
+
+        if self.undersample:
+            X_fit, y_fit_raw = _random_undersample(X_fit, y_fit_raw, rng)
 
         if not self.multiclass_:
             y_fit_bin = (y_fit_raw == self.classes_[-1]).astype(float)

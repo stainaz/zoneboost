@@ -814,6 +814,37 @@ target (89.6%/89.8%) — reproducing exactly the "marginal 90% can hide
 70% on a minority segment" problem this fixes. `mondrian_col=None` (the
 default) is bit-identical to every prior release.
 
+### Random undersampling (classifier)
+
+`ZoneBoostClassifier(undersample=True)` addresses class imbalance the same
+way `imblearn.under_sampling.RandomUnderSampler` does: before boosting
+begins, majority-class rows are randomly dropped so every class present has
+exactly as many rows as the rarest one. Binary drops the majority class
+down to the minority's count; multiclass drops *every* class down to the
+smallest class's count, not just the single largest class against a single
+minority.
+
+This is applied to the **fit split only**, after the
+`validation_fraction`/`calibration_fraction` split is already drawn — early
+stopping's `val_logloss_`, the round count `predict` ultimately uses, and
+(if `calibrate=True`) isotonic calibration are all still evaluated against
+the real, un-resampled class balance. Only the rows the boosting rounds
+themselves are fit against get rebalanced; the metrics that decide *how
+many* rounds to use and how to recalibrate probabilities stay honest about
+what production data actually looks like.
+
+This is a deliberately simpler alternative to loss reweighting
+(`class_weight`/`scale_pos_weight`, as `ZoneBoostClassifier` does not
+currently support `sample_weight`): rather than every row participating
+with an unequal vote, undersampling changes which rows the zone tables and
+Lasso stacking weights are computed from, so `explain()`'s attribution is
+still built entirely from rows that actually exist at face value, not
+reweighted ones. The tradeoff is the usual one for undersampling — a large
+majority class gets truncated to the minority's count, so heavily
+imbalanced data with a very small minority class discards a
+correspondingly large fraction of majority-class rows. `False` (default)
+reproduces every prior release's behavior exactly.
+
 ### Probability calibration (classifier)
 
 `ZoneBoostClassifier(calibrate=True)` recalibrates each booster's raw
@@ -829,8 +860,9 @@ noisy-sigmoid data, calibration cut binned reliability error roughly 5x
 at `fit` otherwise. Only affects `predict_proba` —
 `explain()`/`feature_importance()` still decompose the raw log-odds score
 unchanged. This is **opt-in** (default `calibrate=False` reproduces today's
-exact `predict_proba` output, verified bit-for-bit) and is the only
-parameter that differs between the two estimators.
+exact `predict_proba` output, verified bit-for-bit). Along with
+`undersample` above, this is one of the two parameters that differ between
+the two estimators.
 
 ### Honest data splits (calibration & final refit)
 
@@ -1194,9 +1226,10 @@ rather than a deep, wide, default-configured ensemble.
 
 ## Parameters
 
-Identical parameter set on both estimators, except `calibrate`
-(classifier-only — see "Probability calibration" above) and `loss`/
-`quantile` (regressor-only — see "Quantile regression" above).
+Identical parameter set on both estimators, except `undersample`/
+`calibrate` (classifier-only — see "Random undersampling" and "Probability
+calibration" above) and `loss`/`quantile` (regressor-only — see "Quantile
+regression" above).
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -1223,6 +1256,7 @@ Identical parameter set on both estimators, except `calibrate`
 | `bounded_effects` | None | `{column: (lower, upper)}` — clips a continuous column's main effect to this range, per boosting round (not cumulatively); main effects only, opt-in, see "Global shape constraints" above |
 | `forbidden_interactions` | None | List of 2-column name/index pairs that must never be fit as pairwise (or 3-way) interactions; opt-in, see "Global shape constraints" above |
 | `track_reliability` | False | Record per-term support counts and cross-fold variability each round, consumed by `explain(X, include_reliability=True)`; opt-in, see "Explanation reliability" above |
+| `undersample` | False | **Classifier only.** Randomly drop majority-class rows from the fit split so every class present has as many rows as the rarest one; validation/calibration splits stay at the real class balance; opt-in, see "Random undersampling" above |
 | `group_col` | None | **Regressor only.** Column name/index to treat as a hierarchical grouping key: guarantees a `(feature, group_col)` pairwise interaction every round for every feature, for partial-pooling reporting; opt-in, see "Hierarchical zones" above |
 | `mondrian_col` | None | **Regressor only.** Column name/index to stratify `predict_interval`'s conformal margin by (Mondrian conformal), instead of one global margin for every row; independent of `group_col`; opt-in, see "Prediction intervals" above |
 | `mondrian_min_group_size` | 20 | A `mondrian_col` group with fewer calibration rows than this falls back to the global margin; ignored unless `mondrian_col` is set |
