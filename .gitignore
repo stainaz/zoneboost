@@ -6,3 +6,9 @@ build/
 dist/
 .venv/
 venv/
+
+# ephemeral run artifacts from paper/experiments (results/*.json is the
+# real reproducibility output; these are transient console captures and
+# CatBoost's binary internal training dump)
+paper/experiments/*.log
+paper/experiments/catboost_info/

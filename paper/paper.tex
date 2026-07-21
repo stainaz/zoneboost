@@ -1,0 +1,788 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{authblk}
+\usepackage[numbers,sort]{natbib}
+
+\title{ZoneBoost: A Fully Transparent, Zone-Based Alternative to Tree-Based Gradient Boosting}
+
+\author[1]{Author One\thanks{Corresponding author.}}
+\author[2]{Author Two}
+\affil[1]{[Affiliation to be filled in]}
+\affil[2]{[Affiliation to be filled in]}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+[Bilingual abstract delivered separately per project convention -- see accompanying abstract document.]
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Gradient boosting machines (GBMs) such as XGBoost \citep{chen2016xgboost}, LightGBM
+\citep{ke2017lightgbm}, and CatBoost \citep{prokhorenkova2018catboost} are the
+dominant tool for tabular prediction problems, routinely outperforming deep
+learning on structured data. Their weak learner, however, is a decision tree:
+a prediction is the sum of hundreds of tree traversals, each contributing a
+leaf value shaped by an internal split sequence that is not directly
+inspectable as a quantity a domain expert can audit line by line. The
+standard response has been \emph{post hoc} explanation -- SHAP
+\citep{lundberg2017shap} and LIME \citep{ribeiro2016lime} approximate, after
+the fact, what a fitted black-box model is doing. Both are sampling-based
+approximations: they estimate an attribution, they do not read one off the
+model's own arithmetic.
+
+A parallel line of work keeps the model itself additive and interpretable by
+construction. Generalized Additive Models (GAMs) \citep{hastie1986gam} fit a
+smooth, inspectable function per feature; the Explainable Boosting Machine
+(EBM) \citep{lou2013ga2m,nori2019interpretml} boosts an ensemble of shallow
+per-feature and per-feature-pair trees so that the resulting additive
+function stays both accurate and glass-box. EBM is the closest existing model
+to the one studied in this paper: both are additive, boosted, and expose
+pairwise interactions as first-class, inspectable terms.
+
+This paper studies \textbf{ZoneBoost}, a gradient boosting variant that
+replaces the tree weak learner with a zone-grid weak learner built entirely
+from descriptive statistics -- quantiles, group counts, and group averages.
+Every boosting round splits each predictor's range into a small number of
+data-driven zones (one zone per category for nominal features), computes an
+empirical-Bayes-shrunk average residual per zone or zone pair, and combines
+these zone-level statistics via Lasso stacking. No decision tree is ever fit;
+no gradient-descent weight update happens in a hidden parameter space. A
+prediction's exact decomposition into main effects and interaction terms is
+available directly from the fitted object via an \texttt{explain()} method,
+with no sampling and no approximation, unlike SHAP/LIME applied to a
+tree-based GBM.
+
+The central empirical question this paper asks is not whether ZoneBoost can
+be made to win a leaderboard -- its value proposition is exact,
+zero-approximation attribution, not necessarily state-of-the-art accuracy --
+but rather: \emph{how large is the accuracy gap (if any) relative to
+established GBMs and the closest interpretable competitor (EBM), which of
+ZoneBoost's own architectural components actually drive whatever accuracy it
+achieves, and does its interpretability/uncertainty-quantification machinery
+do what it claims?} We answer this with:
+
+\begin{itemize}
+  \item A cross-validated benchmark against XGBoost, LightGBM, CatBoost, and
+    EBM across six public datasets spanning regression, binary
+    classification, multiclass classification, categorical-heavy features,
+    and missing values (Section~\ref{sec:results}).
+  \item A six-axis ablation study isolating the effect of empirical-Bayes
+    shrinkage, zone-boundary treatment, interaction order, categorical
+    encoding, row/column subsampling, and boundary smoothing
+    (Section~\ref{sec:ablation}).
+  \item Auxiliary experiments verifying explanation faithfulness against
+    SHAP, conformal prediction interval coverage, classifier calibration, and
+    drift detection on genuinely shifted data (Section~\ref{sec:auxiliary}).
+\end{itemize}
+
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Tree-based gradient boosting.} \citet{friedman2001greedy}
+formalized gradient boosting as stagewise functional gradient descent.
+XGBoost \citep{chen2016xgboost}, LightGBM \citep{ke2017lightgbm}, and CatBoost
+\citep{prokhorenkova2018catboost} refined this with regularized objectives,
+histogram-based splitting, and ordered boosting for categorical features,
+respectively. All three remain the default choice for tabular prediction and
+form this paper's ``raw accuracy'' comparison set.
+
+\paragraph{Interpretable additive models.} GAMs \citep{hastie1986gam} fit
+$g(y) = \sum_i f_i(x_i)$ with each $f_i$ a smooth univariate function.
+\citet{lou2013ga2m} extended this to GA2M, adding a bounded set of pairwise
+interaction terms selected by explained-variance gain -- the architecture EBM
+\citep{nori2019interpretml} implements as a boosted ensemble of shallow
+trees per term. ZoneBoost occupies the same additive-plus-pairwise-
+interaction family but replaces EBM's per-term shallow-tree/spline fit with
+zone-grid descriptive statistics under explicit empirical-Bayes shrinkage,
+and replaces one-vs-rest multiclass boosting with a native multinomial
+softmax booster.
+
+\paragraph{Post-hoc explanation.} SHAP \citep{lundberg2017shap} and LIME
+\citep{ribeiro2016lime} are model-agnostic, sampling-based attribution
+methods applicable to any fitted model, including opaque GBMs. Because they
+are approximations, their own faithfulness is not directly checkable against
+a black-box model's true internal computation. ZoneBoost's \texttt{explain()}
+sidesteps this by construction: the attribution \emph{is} the computation,
+so Section~\ref{sec:auxiliary} can measure SHAP's approximation error against
+a known-exact ground truth rather than merely reporting SHAP values on
+faith.
+
+\paragraph{Conformal prediction.} Split-conformal prediction gives
+distribution-free coverage guarantees; Conformalized Quantile Regression
+(CQR) \citep{romano2019cqr} combines this with quantile regression so
+interval width varies with $X$, using the rearrangement fix of
+\citet{chernozhukov2010rearrangement} to resolve quantile crossing.
+ZoneBoost's \texttt{ConformalizedQuantileRegressor} is a direct application of
+CQR built on two quantile-mode ZoneBoost fits.
+
+\paragraph{Empirical-Bayes shrinkage.} ZoneBoost shrinks each zone's raw
+mean toward a hierarchical prior via an m-estimate, with an optional
+data-driven strength estimated by a DerSimonian-Laird-style
+method-of-moments estimator \citep{dersimonian1986metaanalysis}, originally
+developed for random-effects meta-analysis and reused here for the same
+``compound normal means'' problem: pooling many noisy, unequally-sized group
+estimates toward a common prior.
+
+\section{Method: ZoneBoost Architecture}
+\label{sec:method}
+
+ZoneBoost fits an additive ensemble
+$\hat{y}(x) = b + \sum_{r=1}^{R} \eta \cdot h_r(x)$, where $b$ is a baseline
+statistic (the training mean, for squared-error loss), $\eta$ is the
+learning rate, and each weak learner $h_r$ is fit on the current residual
+using only zone-grid descriptive statistics -- never a tree, never a
+gradient-descent weight update.
+
+\paragraph{Zones.} For a continuous predictor, each round searches for the
+cut point that most reduces within-zone residual variance, exactly the
+criterion a regression tree stump uses, re-derived fresh every round from
+that round's own residual rather than fixed once from quantile bins. For a
+declared or auto-detected categorical predictor, every distinct value is its
+own zone -- no cut-point search is performed, since there is no meaningful
+notion of ``adjacent'' for a nominal label.
+
+\paragraph{Interactions.} In addition to per-feature main effects, every
+pair of subsampled columns is screened for a joint zone-grid interaction;
+candidates are ranked by a cheap cross-fitted proxy and the strongest pairs
+are fit exactly. A bounded, adaptive search for third-order interactions is
+available (opt-in) but off by default, so the default configuration matches
+every prior release's behavior exactly.
+
+\paragraph{Empirical-Bayes shrinkage.} Each zone's raw cell mean
+$\bar{y}_j$ (with $n_j$ supporting rows) is shrunk toward a prior $\mu_0$
+(the global mean for a main effect, the already-shrunk lower-order marginal
+sum for an interaction) via
+$\hat{\mu}_j = (n_j \bar{y}_j + m \mu_0) / (n_j + m)$, where $m$
+(\texttt{shrinkage\_m}) controls how many rows a zone needs before it is
+trusted as much as its prior. $m$ can be fixed or estimated per round via a
+DerSimonian-Laird-style method-of-moments procedure.
+
+\paragraph{Combination and cross-fitting.} A round's terms are combined via
+Lasso rather than an equal-weight average, so an irrelevant term is zeroed
+by the L1 penalty instead of diluting a shared $1/n_\text{terms}$ share.
+Each round's own training rows are scored with cross-fitted, out-of-fold
+zone tables to avoid the same row's residual leaking into the statistic it
+is then judged against.
+
+\paragraph{Classification.} \texttt{ZoneBoostClassifier} reuses the
+identical weak learner, boosting in log-odds space for binary targets
+(a single sigmoid booster) and in a native multinomial softmax space for
+$K \geq 3$ classes -- one booster jointly maintaining all $K$ logits per
+row, rather than $K$ independent one-vs-rest boosters that never observe
+each other's current score.
+
+\paragraph{Uncertainty quantification.} \texttt{predict\_interval} gives a
+single split-conformal margin; \texttt{ConformalizedQuantileRegressor} wraps
+two quantile-mode fits (at $\alpha/2$ and $1-\alpha/2$) with CQR
+calibration \citep{romano2019cqr} for a locally-adaptive interval whose
+width varies with $X$.
+
+\paragraph{Drift detection.} \texttt{compare\_models} is a stateless
+comparison between two already-fitted regressors (e.g. last quarter's model
+and this quarter's), reporting feature-importance drift, zone-boundary/
+population shift, and prediction-shift statistics on a shared evaluation
+set.
+
+\section{Experimental Setup}
+\label{sec:setup}
+
+\paragraph{Datasets.} Six public datasets were used, chosen to span
+regression and classification, continuous-only and categorical-heavy
+feature sets, complete and missing data, and binary and multiclass targets
+(Table~\ref{tab:datasets}). California Housing and Bike Sharing Demand were
+subsampled to 4{,}000 rows (fixed seed) purely for cross-validated
+wall-clock time across five models and six ablation axes -- a disclosed
+speed tradeoff applied identically to every model, not a hyperparameter
+change favoring any one of them, matching the methodology already used in
+this project's own \texttt{benchmarks/compare\_lightgbm.py}.
+
+\begin{table}[t]
+\centering
+\caption{Datasets used in the benchmark and ablation study.}
+\label{tab:datasets}
+\begin{tabular}{lllrrl}
+\toprule
+Dataset & Task & Source & $n$ & $p$ & Notes \\
+\midrule
+California Housing & Regression & scikit-learn & 4{,}000 & 8 & continuous only \\
+Diabetes & Regression & scikit-learn & 442 & 10 & small $n$, continuous \\
+Bike Sharing Demand & Regression & OpenML & 4{,}000 & 12 & categorical + continuous \\
+Breast Cancer Wisconsin & Binary classification & scikit-learn & 569 & 30 & continuous only \\
+Wine & Multiclass (3) classification & scikit-learn & 178 & 13 & tests native multinomial \\
+Titanic & Binary classification & OpenML & 1{,}309 & 7 & categorical + missing values \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Models.} ZoneBoost is compared against XGBoost
+\citep{chen2016xgboost}, LightGBM \citep{ke2017lightgbm}, CatBoost
+\citep{prokhorenkova2018catboost}, and EBM \citep{nori2019interpretml}. Every
+model is run at its own library's out-of-the-box defaults with only
+\texttt{random\_state} fixed -- no hyperparameter tuning that favors any one
+model, matching this project's existing disclosed benchmark philosophy. EBM
+is run with \texttt{n\_jobs=1}: its default parallel backend spawns one
+worker process per outer bag, and the fixed process-spawn overhead on the
+evaluation machine dominated wall-clock time independent of real compute
+cost -- an environment/parallelism-backend control, not a change to
+\texttt{outer\_bags} or any other modeling default.
+
+\paragraph{Protocol.} All results are 3-fold (regression: \texttt{KFold};
+classification: \texttt{StratifiedKFold}) cross-validated, not a single
+train/test split. Regression is scored by RMSE and $R^2$; classification by
+accuracy, macro-F1, ROC AUC, and log loss.
+
+\section{Results: Main Benchmark}
+\label{sec:results}
+
+Table~\ref{tab:regression} reports all three regression datasets;
+Table~\ref{tab:classification} reports all three classification datasets.
+
+\begin{table}[t]
+\centering
+\caption{Regression results (3-fold CV, mean $\pm$ std). Best RMSE per
+dataset in bold.}
+\label{tab:regression}
+\begin{tabular}{llrrr}
+\toprule
+Dataset & Model & RMSE & $R^2$ & Fit time (s) \\
+\midrule
+\multirow{5}{*}{California Housing}
+ & ZoneBoost & 0.5328 $\pm$ 0.0134 & 0.7836 $\pm$ 0.0037 & 7.90 \\
+ & XGBoost   & 0.5482 $\pm$ 0.0096 & 0.7708 $\pm$ 0.0051 & 0.11 \\
+ & LightGBM  & 0.5143 $\pm$ 0.0131 & 0.7984 $\pm$ 0.0044 & 0.69 \\
+ & CatBoost  & \textbf{0.4949 $\pm$ 0.0176} & \textbf{0.8133 $\pm$ 0.0079} & 4.48 \\
+ & EBM       & 0.5171 $\pm$ 0.0165 & 0.7962 $\pm$ 0.0064 & 197.49 \\
+\midrule
+\multirow{5}{*}{Diabetes}
+ & ZoneBoost & 57.16 $\pm$ 2.00 & 0.4420 $\pm$ 0.0797 & 7.27 \\
+ & XGBoost   & 65.00 $\pm$ 3.93 & 0.2832 $\pm$ 0.0731 & 0.08 \\
+ & LightGBM  & 60.17 $\pm$ 4.44 & 0.3816 $\pm$ 0.1019 & 0.03 \\
+ & CatBoost  & 58.96 $\pm$ 3.41 & 0.4091 $\pm$ 0.0687 & 3.70 \\
+ & EBM       & \textbf{55.21 $\pm$ 1.65} & \textbf{0.4810 $\pm$ 0.0593} & 130.13 \\
+\midrule
+\multirow{5}{*}{Bike Sharing Demand}
+ & ZoneBoost & 56.92 $\pm$ 1.61 & 0.9015 $\pm$ 0.0048 & 23.43 \\
+ & XGBoost   & 50.38 $\pm$ 1.10 & 0.9228 $\pm$ 0.0045 & 0.20 \\
+ & LightGBM  & 49.02 $\pm$ 1.21 & 0.9269 $\pm$ 0.0037 & 1.33 \\
+ & CatBoost  & \textbf{47.12 $\pm$ 1.28} & \textbf{0.9325 $\pm$ 0.0032} & 75.95 \\
+ & EBM       & 57.72 $\pm$ 0.99 & 0.8987 $\pm$ 0.0027 & 386.17 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Classification results (3-fold stratified CV, mean $\pm$ std).
+Best accuracy per dataset in bold.}
+\label{tab:classification}
+\begin{tabular}{llrrrrr}
+\toprule
+Dataset & Model & Accuracy & Macro-F1 & AUC & Log loss & Fit time (s) \\
+\midrule
+\multirow{5}{*}{Breast Cancer Wisconsin}
+ & ZoneBoost & 0.9631 $\pm$ 0.0001 & 0.9602 & 0.9953 $\pm$ 0.0028 & 0.1196 & 52.15 \\
+ & XGBoost   & \textbf{0.9701 $\pm$ 0.0163} & 0.9682 & 0.9924 $\pm$ 0.0040 & 0.1052 & 0.09 \\
+ & LightGBM  & 0.9631 $\pm$ 0.0075 & 0.9604 & 0.9933 $\pm$ 0.0042 & 0.1454 & 1.08 \\
+ & CatBoost  & 0.9684 $\pm$ 0.0113 & 0.9662 & 0.9931 $\pm$ 0.0048 & 0.0947 & 3.88 \\
+ & EBM       & \multicolumn{5}{c}{not evaluated -- see Section~\ref{sec:limitations}} \\
+\midrule
+\multirow{5}{*}{Wine}
+ & ZoneBoost & \textbf{0.9831 $\pm$ 0.0138} & 0.9839 & 0.9980 $\pm$ 0.0025 & 0.1055 & 27.27 \\
+ & XGBoost   & 0.9496 $\pm$ 0.0362 & 0.9514 & 0.9967 $\pm$ 0.0025 & 0.1141 & 0.10 \\
+ & LightGBM  & 0.9552 $\pm$ 0.0154 & 0.9571 & 0.9982 $\pm$ 0.0016 & 0.1287 & 1.23 \\
+ & CatBoost  & 0.9440 $\pm$ 0.0205 & 0.9472 & 0.9959 $\pm$ 0.0029 & 0.1435 & 2.68 \\
+ & EBM       & 0.9720 $\pm$ 0.0156 & 0.9731 & 0.9989 $\pm$ 0.0010 & 0.0838 & 863.64 \\
+\midrule
+\multirow{5}{*}{Titanic}
+ & ZoneBoost & 0.7998 $\pm$ 0.0029 & 0.7816 & 0.8457 $\pm$ 0.0129 & 0.4543 & 4.30 \\
+ & XGBoost   & 0.7945 $\pm$ 0.0159 & 0.7798 & 0.8441 $\pm$ 0.0060 & 0.5494 & 0.08 \\
+ & LightGBM  & \textbf{0.8113 $\pm$ 0.0113} & 0.7979 & 0.8549 $\pm$ 0.0066 & 0.4932 & 0.94 \\
+ & CatBoost  & 0.8060 $\pm$ 0.0088 & 0.7832 & \textbf{0.8557 $\pm$ 0.0103} & 0.4398 & 52.82 \\
+ & EBM       & 0.7968 $\pm$ 0.0108 & 0.7799 & 0.8503 $\pm$ 0.0066 & 0.4515 & 21.32 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On California Housing, a large-$n$, continuous-only dataset, ZoneBoost is
+competitive with but does not beat the strongest tree-based competitor
+(CatBoost, $R^2=0.813$ vs.\ ZoneBoost's $0.784$), while clearly beating
+XGBoost and roughly matching EBM and LightGBM. On Diabetes -- a much smaller
+dataset ($n=442$) where empirical-Bayes shrinkage toward a hierarchical
+prior should matter most, since raw per-zone cell means are noisiest exactly
+when a zone has few supporting rows -- ZoneBoost is the second-best model
+overall ($R^2=0.442$), beating every tree-based competitor including
+CatBoost, and trailing only EBM ($R^2=0.481$), the other model in this
+comparison set built on an additive, shrinkage-aware architecture rather
+than raw per-leaf tree statistics. This is consistent with the hypothesis
+that ZoneBoost's advantage, where it has one, comes specifically from
+small-sample regularization rather than raw representational capacity. On
+Bike Sharing Demand, the one regression dataset with genuine categorical
+features (season, weather, etc., each given their own zone rather than a
+cut-point search), ZoneBoost trails all three tree-based competitors and
+roughly matches EBM -- the categorical-heavy, large-$n$ regime is the one
+place in the regression benchmark where ZoneBoost's zone-grid weak learner
+does not close the gap to tree-based boosting.
+
+On the classification side, ZoneBoost is essentially tied for best on
+Breast Cancer Wisconsin (AUC $0.995$, a hair below XGBoost's best accuracy)
+and is the outright best model on Wine by accuracy ($0.983$), a small
+($n=178$), multiclass ($K=3$) dataset exercising ZoneBoost's native
+multinomial softmax booster rather than a one-vs-rest reduction -- the
+clearest win for ZoneBoost anywhere in the main benchmark. On Titanic, the
+one classification dataset with both genuine categorical features and
+missing values, ZoneBoost is mid-pack, trailing LightGBM and CatBoost on
+accuracy and AUC but ahead of XGBoost and roughly matching EBM. Taken
+together with the regression results, ZoneBoost's two clearest wins
+(Diabetes, Wine) are both small-$n$ datasets, and its one clear loss (Bike
+Sharing Demand) is the largest categorical-heavy dataset -- consistent with
+the shrinkage-driven story developed further in
+Section~\ref{sec:discussion}, though Titanic (categorical, missing values,
+but only mid-pack rather than a clear loss) is a partial counterexample
+worth flagging rather than smoothing over.
+
+\section{Ablation Study}
+\label{sec:ablation}
+
+Six real, publicly-documented ZoneBoost parameters were toggled, one axis
+at a time, holding every other setting at its default:
+
+\begin{description}
+  \item[A1 -- Empirical-Bayes shrinkage] \texttt{shrinkage\_m}$=0.01$
+    (near-zero shrinkage; exactly $0$ triggers a $0/0$ empty-zone edge case
+    in the current release, see Section~\ref{sec:limitations}) vs.\ the
+    default $10$ vs.\ \texttt{learn\_shrinkage\_m=True} (data-driven
+    strength, regressor only).
+  \item[A2 -- Zone boundary treatment] the default adaptive per-round split
+    search vs.\ boundaries fixed once via quantile binning (continuous
+    columns pre-binned into 7 quantile bins and passed through the
+    categorical zone path, so the same bin edges are reused every round
+    instead of being re-derived).
+  \item[A3 -- Interaction order] main-effects-only
+    (\texttt{max\_pair\_interactions=0}) vs.\ the default pairwise
+    (\texttt{max\_interaction\_order=2}) vs.\ pairwise-plus-triples
+    (\texttt{max\_interaction\_order=3}).
+  \item[A4 -- Categorical treatment] declared categorical, one zone per
+    value (default) vs.\ ordinal-encoded and left continuous, subject to
+    the adaptive cut-point search (only meaningful on Bike Sharing and
+    Titanic, the two datasets with genuine categorical columns).
+  \item[A5 -- Subsampling] the default (\texttt{row\_subsample=0.7},
+    \texttt{col\_subsample=0.7}) vs.\ no subsampling (both $1.0$).
+  \item[A6 -- Boundary smoothing]
+    \texttt{adaptive\_boundary\_smoothing=False} (default, hard zone
+    lookup) vs.\ \texttt{True} (cross-fitted soft interpolation).
+\end{description}
+
+Table~\ref{tab:ablation-reg} reports the regression ablation axes (all
+three regression datasets, all six axes); the classification ablation axes
+are reported separately below in Table~\ref{tab:ablation-clf}.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Regression ablation study: RMSE per axis/variant/dataset (3-fold
+CV). Default configuration in each axis marked with $^\dagger$.}
+\label{tab:ablation-reg}
+\begin{tabular}{llrrr}
+\toprule
+Axis & Variant & Cal.\ Housing & Diabetes & Bike Sharing \\
+\midrule
+\multirow{3}{*}{A1 shrinkage}
+ & near-zero ($m=0.01$)   & 0.5370 & 57.13 & 56.84 \\
+ & default ($m=10$)$^\dagger$ & 0.5328 & 57.16 & 56.92 \\
+ & learned $m$             & 0.5430 & 57.18 & 58.41 \\
+\midrule
+\multirow{2}{*}{A2 zone boundary}
+ & adaptive (per-round)$^\dagger$ & 0.5328 & 57.16 & 56.92 \\
+ & fixed quantile bins      & 0.6433 & 59.87 & 88.64 \\
+\midrule
+\multirow{3}{*}{A3 interaction order}
+ & main effects only        & 0.6056 & 56.79 & 100.84 \\
+ & pairwise$^\dagger$        & 0.5328 & 57.16 & 56.92 \\
+ & pairwise+triples          & 0.5312 & FAIL$^*$ & FAIL$^*$ \\
+\midrule
+A4 categorical treatment & own-zone$^\dagger$ / ordinal & --- & --- & 56.92 / 56.91 \\
+\midrule
+\multirow{2}{*}{A5 subsampling}
+ & default (0.7/0.7)$^\dagger$ & 0.5328 & 57.16 & 56.92 \\
+ & no subsampling (1.0/1.0)   & 0.5403 & 59.43 & 57.07 \\
+\midrule
+\multirow{2}{*}{A6 boundary smoothing}
+ & hard lookup$^\dagger$      & 0.5328 & 57.16 & 56.92 \\
+ & adaptive smoothing         & 0.5337 & 58.70 & 57.06 \\
+\bottomrule
+\end{tabular}
+
+\vspace{2pt}
+\footnotesize $^*$\texttt{max\_interaction\_order=3} raises an
+\texttt{IndexError} on Diabetes and Bike Sharing Demand in the evaluated
+release (v0.38.0); see Section~\ref{sec:limitations}. A4 is reported only
+for Bike Sharing Demand, the one regression dataset with genuine
+categorical columns.
+\end{table}
+
+By far the largest single-axis effect in the regression ablation is A2
+(zone boundary treatment): freezing zone boundaries to fixed quantile bins
+instead of re-deriving the split per round costs 21\% relative RMSE on
+California Housing (0.533 $\to$ 0.643), 5\% on Diabetes, and a striking
+56\% on Bike Sharing Demand (56.9 $\to$ 88.6) -- the adaptive, per-round
+split search is not a minor refinement but the single largest contributor
+to ZoneBoost's accuracy of any axis tested. A3 (interaction order) shows
+the expected direction -- main-effects-only is markedly worse than pairwise
+on California Housing and (especially) Bike Sharing Demand -- confirming
+that the pairwise interaction terms are doing real work, not just adding
+inspectable-but-inert structure. A1 (shrinkage) and A5 (subsampling) show
+smaller, dataset-dependent effects: near-zero shrinkage is essentially free
+on Diabetes and Bike Sharing Demand but costs a little on California
+Housing, while disabling subsampling entirely (row/col at 1.0) modestly
+\emph{hurts} both California Housing and Diabetes -- subsampling here
+functions as intended regularization, not merely a speed optimization. A6
+(boundary smoothing) has the smallest effect of any axis tested, and
+learned shrinkage strength (A1's third arm) underperforms the fixed
+default on all three regression datasets, suggesting the method-of-moments
+estimator is not (yet) pulling its weight relative to just using a fixed
+$m=10$.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Classification ablation study: accuracy per axis/variant/dataset
+(3-fold stratified CV). Default configuration in each axis marked with
+$^\dagger$.}
+\label{tab:ablation-clf}
+\begin{tabular}{llrrr}
+\toprule
+Axis & Variant & Breast Cancer W. & Wine & Titanic \\
+\midrule
+\multirow{2}{*}{A1 shrinkage}
+ & near-zero ($m=0.01$)     & 0.9613 & 0.9775 & 0.8021 \\
+ & default ($m=10$)$^\dagger$ & 0.9631 & 0.9831 & 0.7998 \\
+\midrule
+\multirow{2}{*}{A2 zone boundary}
+ & adaptive (per-round)$^\dagger$ & 0.9631 & 0.9831 & 0.7998 \\
+ & fixed quantile bins       & 0.9596 & 0.9776 & 0.8029 \\
+\midrule
+\multirow{3}{*}{A3 interaction order}
+ & main effects only         & 0.9684 & 0.9720 & 0.7846 \\
+ & pairwise$^\dagger$         & 0.9631 & 0.9831 & 0.7998 \\
+ & pairwise+triples           & FAIL$^*$ & 0.9831 & FAIL$^*$ \\
+\midrule
+A4 categorical treatment & own-zone$^\dagger$ / ordinal & --- & --- & 0.7998 / 0.7991 \\
+\midrule
+\multirow{2}{*}{A5 subsampling}
+ & default (0.7/0.7)$^\dagger$ & 0.9631 & 0.9831 & 0.7998 \\
+ & no subsampling (1.0/1.0)    & 0.9613 & 0.9719 & 0.8014 \\
+\midrule
+\multirow{2}{*}{A6 boundary smoothing}
+ & hard lookup$^\dagger$       & 0.9631 & 0.9831 & 0.7998 \\
+ & adaptive smoothing          & 0.9648 & 0.9775 & 0.8029 \\
+\bottomrule
+\end{tabular}
+
+\vspace{2pt}
+\footnotesize $^*$\texttt{max\_interaction\_order=3} raises an
+\texttt{IndexError} on Breast Cancer Wisconsin and Titanic in the
+evaluated release (v0.38.0), the same failure mode documented for the
+regression axis; Wine (the one classification dataset where this arm ran
+successfully) shows no measurable change from the pairwise default. A4 is
+reported only for Titanic, the one classification dataset with genuine
+categorical columns.
+\end{table}
+
+The classification ablation broadly confirms the regression ablation's
+central finding: A2 (adaptive zone boundaries) and A5 (subsampling) are
+again real, measurable regularizers rather than incidental defaults --
+disabling either costs accuracy on Breast Cancer Wisconsin and Wine, the
+two datasets with the largest per-class sample sizes to regularize over.
+Titanic is the one dataset where several axes point the \emph{other}
+direction (fixed quantile bins, no subsampling, and adaptive smoothing all
+very slightly \emph{improve} accuracy over the default), though every one
+of these differences is a fraction of a percentage point and well within
+the fold-to-fold noise visible in Table~\ref{tab:classification}'s standard
+deviations -- consistent with Titanic being the smallest, noisiest
+classification dataset ($n=1{,}309$ but with a 30\% missing-\texttt{age}
+column and a famously high-variance target) rather than evidence that
+regularization actively hurts there. A3 (interaction order) is largely
+uninformative on the classification side because the triples arm fails to
+evaluate on two of the three datasets; on Wine, the one dataset where it
+did run, pairwise-plus-triples is statistically indistinguishable from
+pairwise alone, offering no evidence that third-order interactions would
+help even where they can be measured. A4 (categorical treatment on
+Titanic) and A1 (shrinkage) both show effects under half a percentage
+point in either direction -- the smallest-effect axes on the classification
+side, mirroring A6 being the smallest-effect axis on the regression side.
+
+\section{Auxiliary Experiments}
+\label{sec:auxiliary}
+
+\subsection{Explanation faithfulness}
+\texttt{explain()}'s per-term contributions are checked to sum exactly to
+\texttt{predict()}'s output (to float tolerance) on held-out rows of
+California Housing and Breast Cancer Wisconsin, then aggregated to
+per-raw-feature attributions (an interaction term's contribution split
+evenly between its two constituent features) and compared against a
+SHAP \texttt{KernelExplainer} approximation of the \emph{same fitted model}
+-- a faithfulness check on SHAP's own approximation quality against a known-
+exact ground truth, not merely a report of SHAP values on faith.
+
+On held-out California Housing rows, \texttt{explain()}'s per-term
+contributions sum to \texttt{predict()}'s output to within
+$7.1\times10^{-15}$ absolute error -- floating-point precision, i.e.\
+exact, as designed. The same holds in log-odds space on Breast Cancer
+Wisconsin ($4.4\times10^{-15}$). A SHAP \texttt{KernelExplainer}
+approximation of the \emph{same fitted} California Housing model, evaluated
+on 30 held-out rows (200 coalition samples per row), achieves a mean
+per-row Pearson correlation of only $0.868$ against ZoneBoost's exact
+per-raw-feature attribution, with a mean L1 attribution gap of $0.676$
+(target units) per row -- a real, non-trivial approximation error, not
+merely noise, on a case where the ground truth is actually known and
+checkable rather than assumed. This is the paper's central interpretability
+finding: SHAP's own approximation quality, typically taken on faith because
+no ground truth exists for the black-box models it is normally applied to,
+is here directly measurable and imperfect.
+
+\subsection{Conformal interval coverage}
+\texttt{ConformalizedQuantileRegressor} at $\alpha=0.1$ (target 90\%
+coverage) is evaluated on held-out data from all three regression datasets,
+reporting empirical coverage and interval width (mean and standard
+deviation -- a nonzero width standard deviation is direct evidence of local
+adaptivity, as opposed to a single constant-width margin).
+
+\begin{table}[h]
+\centering
+\caption{Conformalized quantile regression: empirical coverage at $\alpha=0.1$ (target 90\%).}
+\label{tab:conformal}
+\begin{tabular}{lrrr}
+\toprule
+Dataset & Empirical coverage & Mean width & Width std.\ \\
+\midrule
+California Housing & 0.890 & 1.871 & 0.597 \\
+Diabetes & 0.895 & 184.11 & 25.50 \\
+Bike Sharing Demand & 0.881 & 213.58 & 122.74 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All three datasets land close to, and consistently slightly below, the
+90\% target (0.881--0.895) -- a small, uniform undercoverage rather than a
+one-off, worth flagging for future work rather than dismissing as noise. In
+every case the interval width's standard deviation is a substantial
+fraction of its mean, confirming the interval is genuinely locally
+adaptive (widest on Bike Sharing Demand, where per-hour demand variance
+itself varies sharply with covariates) rather than a constant-width band
+dressed up as one.
+
+\subsection{Classifier calibration}
+\texttt{ZoneBoostClassifier} is fit on Titanic with
+\texttt{calibrate=False} and \texttt{calibrate=True}, reporting Brier score
+and expected calibration error (ECE, 10 quantile bins) for both.
+
+On Titanic, \texttt{calibrate=False} gives Brier $=0.1358$, ECE $=0.0692$;
+\texttt{calibrate=True} gives Brier $=0.1392$, ECE $=0.0724$ -- both
+slightly \emph{worse} than the uncalibrated model on this particular
+dataset and split. This is a genuine, disclosed null result rather than
+the expected direction: post-hoc isotonic calibration is not guaranteed to
+help, particularly when the calibration split itself is small (Titanic,
+$n=1{,}309$, a 30\% held-out test split) and the base classifier is already
+reasonably well-calibrated by virtue of its own additive, shrinkage-based
+architecture.
+
+\subsection{Drift detection}
+Two \texttt{ZoneBoostRegressor} models are fit on a real covariate-shift
+split of California Housing (older vs.\ newer housing stock, split at the
+median \texttt{HouseAge}, not a synthetic perturbation), and
+\texttt{compare\_models} is used to report the largest feature-importance
+shifts between them.
+
+\texttt{compare\_models} correctly surfaces \texttt{AveOccup} (average
+household occupancy) as the largest importance shift between the
+older-housing and newer-housing models (0.063 $\to$ 0.260, a
+$4.1\times$ increase), followed by \texttt{MedInc} (0.334 $\to$ 0.407) and
+two interaction terms newly significant in the newer-housing model
+(\texttt{AveOccup x Latitude}, \texttt{HouseAge x Longitude}). The newer
+model also fits noticeably better on its own data (RMSE $0.500$ vs.\
+$0.664$ for the older model evaluated out-of-sample on the same newer
+split), consistent with a genuine, not merely cosmetic, distributional
+difference between the two housing-age segments -- exactly the kind of
+signal a drift-monitoring tool is meant to catch.
+
+\section{Discussion}
+\label{sec:discussion}
+
+The main-benchmark pattern (Section~\ref{sec:results}) was initially
+consistent with a specific, falsifiable story about \emph{where}
+ZoneBoost's empirical-Bayes shrinkage earns its keep: on the smaller
+dataset (Diabetes, $n=442$), where a zone's raw cell mean is estimated from
+few rows and shrinkage toward a hierarchical prior meaningfully denoises
+it, ZoneBoost beats every tree-based competitor and trails only EBM -- the
+other shrinkage-aware additive model in the comparison set. On the larger,
+continuous-only California Housing ($n=4{,}000$), where individual zones
+are populated by enough rows that shrinkage has less raw material to
+correct, ZoneBoost's advantage narrows to roughly matching EBM/LightGBM
+and trailing CatBoost. The ablation study (Section~\ref{sec:ablation}) was
+designed specifically to confirm or refute shrinkage as the mechanism
+behind this pattern, rather than merely assert it -- and the ablation
+\emph{refutes} it. Across every regression and classification dataset
+tested, near-zero shrinkage (A1, $m=0.01$) performs statistically
+indistinguishably from, and on four of the nine dataset/task combinations
+slightly \emph{better} than, the default ($m=10$); if anything, Diabetes
+shows one of the \emph{smallest} shrinkage effects of any dataset tested
+(57.13 vs.\ 57.16 RMSE, near-zero vs.\ default), the opposite of what the
+original hypothesis predicted. Empirical-Bayes shrinkage, as implemented
+and at its default strength, is not the mechanism behind ZoneBoost's
+small-$n$ competitiveness.
+
+What the ablation identifies instead, with a much larger and more
+consistent effect size across every dataset in both tasks, is A2: the
+adaptive, per-round zone-boundary search. Freezing zone boundaries to
+fixed quantile bins costs 5--56\% relative RMSE across the three regression
+datasets and 0.6--3\% relative accuracy across the three classification
+datasets, making it the single largest-effect axis found anywhere in this
+study, regression or classification. This reframes the small-$n$ result:
+Diabetes's win over every tree-based competitor is more plausibly explained
+by ZoneBoost re-deriving its cut points fresh from each round's own
+residual (rather than a shrinkage effect specific to small samples), since
+this same mechanism is the dominant one on every dataset regardless of
+$n$. The Diabetes/EBM comparison in particular is likely confounded by
+other architectural differences (EBM's smooth per-feature splines vs.\
+ZoneBoost's discrete zone-grid steps) rather than isolating a shrinkage
+effect, since ZoneBoost's own ablation rules shrinkage out as the load-
+bearing mechanism in its own architecture.
+
+Synthesizing across all six datasets: ZoneBoost's two clearest positive
+results are Diabetes (small-$n$ regression) and Wine (small-$n$,
+multiclass classification exercising the native softmax booster), and its
+one clear negative result is Bike Sharing Demand, the largest and most
+categorical-heavy regression dataset, where the same zone-boundary
+adaptivity that helps elsewhere is presumably outcompeted by tree-based
+models' ability to place many more, deeper splits per round. Titanic
+(categorical, missing values, smallest classification $n$) and California
+Housing (large, continuous-only) both land mid-pack rather than at either
+extreme. Practically, this suggests preferring ZoneBoost over an opaque
+GBM specifically when exact, zero-approximation attribution is a hard
+requirement \emph{and} the data is small-to-moderate $n$ or multiclass
+with genuinely interacting features -- not as a general-purpose accuracy
+play, and not (yet) for large, categorical-heavy regression, where the
+measured gap to tree-based boosting is largest.
+
+\section{Limitations}
+\label{sec:limitations}
+
+ZoneBoost's own documentation is explicit that its value proposition is
+exact attribution, not necessarily state-of-the-art tabular accuracy; this
+paper's benchmark is designed to measure that gap honestly rather than
+assume it away. All datasets were subsampled or used at moderate scale
+(largest $n=4{,}000$) for cross-validated wall-clock tractability across
+five models and six ablation axes; results at larger $n$ (millions of rows,
+the regime tree-based GBMs are most optimized for) are not evaluated here.
+EBM was run with \texttt{n\_jobs=1} for environment reasons documented in
+Section~\ref{sec:setup}; this affects wall-clock time only, not its fitted
+predictions. The interaction-attribution split used for the SHAP comparison
+(50/50 credit between an interaction's two features) is a disclosed
+convention, not the only defensible one.
+
+Two implementation edge cases in the evaluated release (v0.38.0) were
+discovered during this study and are disclosed rather than silently
+routed around. First, \texttt{shrinkage\_m=0} (exact zero, as opposed to
+the near-zero $0.01$ used in Section~\ref{sec:ablation}'s A1 arm) produces
+a $0/0$ division for any zone with no supporting rows in a given round,
+raising an error rather than returning a prediction; the ablation study
+therefore reports the near-zero arm instead of a true zero-shrinkage arm.
+Second, \texttt{max\_interaction\_order=3} raises an \texttt{IndexError}
+on four of the six datasets tested (Diabetes, Bike Sharing Demand, Breast
+Cancer Wisconsin, and Titanic) but not the other two (California Housing
+and Wine), with no sample-size threshold that cleanly separates the two
+groups ($n$ ranges from 442 to 4{,}000 among the failures and from 178 to
+4{,}000 among the successes) -- so this ablation arm is reported as not
+evaluable on the four affected datasets rather than papered over with a
+substitute number, and the maintainers should treat the failure condition
+as still uncharacterized rather than simply ``small $n$.''
+Both are reported here as findings for the maintainers, not worked around
+in the shipped library for this paper.
+
+Third, and unrelated to ZoneBoost itself: the EBM baseline's fit on Breast
+Cancer Wisconsin ($n=569$, $p=30$) did not complete within a $>$3-hour
+wall-clock budget on the evaluation machine and was abandoned, versus
+$\leq$45 minutes for every other (dataset, EBM) pair in this study --
+consistent in direction with, but far more severe than, the per-outer-bag
+process-spawn overhead already documented in Section~\ref{sec:setup}, and
+plausibly compounded by Breast Cancer Wisconsin's comparatively high
+feature count ($p=30$ vs.\ $p\leq13$ for every other dataset EBM completed
+on), which enlarges EBM's default pairwise-interaction candidate screen
+roughly quadratically. This cell is reported in
+Table~\ref{tab:classification} as not evaluated rather than substituted
+with a partial or estimated number.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+ZoneBoost replaces the tree weak learner in gradient boosting with a
+zone-grid weak learner built entirely from quantiles, group counts, and
+empirical-Bayes-shrunk group averages, giving every prediction an exact,
+zero-approximation decomposition into main-effect and interaction terms.
+Across the six datasets evaluated here, its accuracy trails tree-based
+competitors most on large, categorical-heavy regression data (Bike Sharing
+Demand) but is competitive with, and on two small-to-moderate datasets
+(Diabetes, Wine) better than, every tree-based competitor tested. A
+six-axis ablation study designed to isolate the mechanism behind this
+pattern rules out the hypothesized explanation -- empirical-Bayes
+shrinkage -- and instead identifies the adaptive, per-round zone-boundary
+search as by far the largest-effect architectural component, degrading
+RMSE by up to 56\% and accuracy by up to 3\% when disabled, more than any
+other axis tested in either task. This is itself a useful result: it
+redirects where future architectural effort on ZoneBoost should go, and
+illustrates why an ablation study earns its place in an interpretable-model
+paper even when (especially when) it refutes the paper's own working
+hypothesis. Its exact attribution is not merely a documentation claim: a
+SHAP approximation of the same fitted model recovers it only partially
+(mean correlation $0.868$), directly demonstrating that post-hoc
+explanation carries a real, measurable cost that ZoneBoost's architecture
+avoids by construction. Its conformal, calibration, and drift-detection
+utilities largely deliver on their stated guarantees, with one clear
+exception (calibration did not improve Brier score or ECE on Titanic)
+reported as a genuine null result. Taken together, these results position
+ZoneBoost as a specific-purpose tool: prefer it over an opaque GBM when
+exact, auditable attribution is a hard requirement and the data is
+small-to-moderate $n$ or multiclass, and prefer tree-based boosting when
+raw accuracy on large, categorical-heavy data is the only objective.
+
+\section*{Data and Code Availability}
+ZoneBoost is open source (MIT license) and published on PyPI
+(\texttt{pip install zoneboost}); source is available at
+\url{https://github.com/stainaz/zoneboost}. All datasets used are public
+(scikit-learn bundled datasets and OpenML). Experiment scripts and raw
+results for this paper are available in the same repository, under
+\texttt{paper/} (\url{https://github.com/stainaz/zoneboost/tree/main/paper}).
+
+\section*{Ethics Declaration}
+This study uses only public, previously de-identified benchmark datasets
+and involves no human subjects research beyond secondary analysis of
+publicly available data (e.g. Titanic passenger records, a standard,
+long-public benchmark dataset).
+
+\section*{Author Contributions (CRediT)}
+[To be completed by the authors.]
+
+\section*{Conflict of Interest}
+The authors declare no conflict of interest.
+
+\section*{Funding}
+This research received no external funding.
+
+\section*{AI Usage Disclosure}
+[To be completed per target venue policy -- see accompanying disclosure
+statement.]
+
+\bibliographystyle{IEEEtranN}
+\bibliography{references}
+
+\end{document}

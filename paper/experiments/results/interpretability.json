@@ -1,0 +1,14 @@
+[
+  {
+    "dataset": "California Housing",
+    "max_abs_reconstruction_error": 7.105427357601002e-15,
+    "shap_mean_row_correlation": 0.8676151077382191,
+    "shap_mean_l1_gap": 0.6757484571419886,
+    "shap_wall_time_s": 20.502133499947377,
+    "n_rows_explained": 30
+  },
+  {
+    "dataset": "Breast Cancer Wisconsin",
+    "max_abs_reconstruction_error_logodds": 4.440892098500626e-15
+  }
+]

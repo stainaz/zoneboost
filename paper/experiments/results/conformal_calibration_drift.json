@@ -1,0 +1,75 @@
+{
+  "conformal": [
+    {
+      "dataset": "California Housing",
+      "target_coverage": 0.9,
+      "empirical_coverage": 0.89,
+      "mean_width": 1.8714757875253296,
+      "width_std": 0.5974697750595697
+    },
+    {
+      "dataset": "Diabetes",
+      "target_coverage": 0.9,
+      "empirical_coverage": 0.8947368421052632,
+      "mean_width": 184.1100630808206,
+      "width_std": 25.49692869732765
+    },
+    {
+      "dataset": "Bike Sharing Demand",
+      "target_coverage": 0.9,
+      "empirical_coverage": 0.8808333333333334,
+      "mean_width": 213.57613040558883,
+      "width_std": 122.74148219255497
+    }
+  ],
+  "calibration": {
+    "dataset": "Titanic",
+    "calibrate=False": {
+      "brier": 0.13578386659097402,
+      "ece": 0.06923447129270274
+    },
+    "calibrate=True": {
+      "brier": 0.13916687299959704,
+      "ece": 0.07235094029493848
+    }
+  },
+  "drift": {
+    "dataset": "California Housing",
+    "top_importance_shifts": [
+      {
+        "index": "AveOccup",
+        "old": 0.06289130308042745,
+        "new": 0.2604394884614842,
+        "change": 0.19754818538105673
+      },
+      {
+        "index": "MedInc",
+        "old": 0.33405051229840665,
+        "new": 0.4065148248597508,
+        "change": 0.07246431256134417
+      },
+      {
+        "index": "AveOccup x Latitude",
+        "old": 0.010559728769902799,
+        "new": 0.051637746469407324,
+        "change": 0.041078017699504525
+      },
+      {
+        "index": "Longitude",
+        "old": 0.2205298441442681,
+        "new": 0.2605087720618726,
+        "change": 0.03997892791760452
+      },
+      {
+        "index": "HouseAge x Longitude",
+        "old": 0.0047229975731406205,
+        "new": 0.0405755969501169,
+        "change": 0.03585259937697628
+      }
+    ],
+    "performance_change": {
+      "rmse_old": 0.6638168629895328,
+      "rmse_new": 0.49989951238237335
+    }
+  }
+}
