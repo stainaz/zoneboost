@@ -22,7 +22,7 @@ useful context on its own.
 | Time-based drift comparison (`compare_models`) | Shipped, no alerting yet | Notebook page 2 | `src/zoneboost/_drift.py` |
 | **ZoneProfileEncoder** | **Shipped** | Notebook pages 2-3 | `src/zoneboost/_zone_profile.py` |
 | **DepthTransformer** | **Shipped** | Notebook page 3 (core/outlier rings) | `src/zoneboost/_depth.py` |
-| ConditionalZoneGrid | Proposed | Notebook page 1 (`a=1 & b=1` filtering) | sequence after `_purify.py`, since attribution should be canonicalized before nesting grids |
+| **ConditionalZoneGrid** | **Shipped** | Notebook page 1 (`a=1 & b=1` filtering) | `src/zoneboost/_conditional_grid.py` |
 | Drift threshold/alert monitor | Proposed | Notebook page 2 (red-ink date note) | extends `_drift.py`'s `compare_models`, reuses Mondrian's per-group calibration scores |
 | LLM zone auto-naming (business language) | Proposed, needs a scope decision | Strategy discussion, not the notebook | would sit outside the core package — flag before building; zoneboost is currently a zero-ML-dependency, numpy/pandas-only library, and this is the first idea that would break that |
 
@@ -82,14 +82,27 @@ with any downstream model. See `src/zoneboost/_depth.py`, `README.md`
 ("Depth transformer"), `docs/how-it-works.html` (`#depth-transformer`),
 `docs/api-reference.html` (`#depth-parameters`).
 
-**ConditionalZoneGrid** (proposed). Fit separate zone grids per discrete
-segment (the notebook's "keep filtering: (x,y) if a=1 & b=1 & c=1..."),
-capturing third-order-and-up interactions while keeping each segment's own
-grid visual and auditable. Natural sequencing point: after the
-functional-ANOVA purification work (`src/zoneboost/_purify.py`), since
-attribution should be canonicalized before nesting grids inside segments —
-otherwise a segment's own grid and the top-level grid could double-count
-the same effect.
+**ConditionalZoneGrid.** Fits a 2D zone grid over two continuous columns
+*separately within each discrete segment* (the notebook's "keep
+filtering: (x,y) if a=1 & b=1 & c=1..."). Built as a standalone
+transformer, the same `ZoneProfileEncoder`/`DepthTransformer` sibling
+pattern, not folded into the boosting/`explain()` machinery — a real
+scope decision, since the original framing here assumed sequencing after
+functional-ANOVA purification (`_purify.py`) to avoid double-counting
+attribution. Read in full: purification only rewrites `explain(X)`'s
+already-computed contribution columns and has nothing to do with a
+standalone transformer that never touches `rounds_`/`explain()`, so that
+concern doesn't apply to what actually shipped. A segment below
+`min_segment_size` (or unseen at `fit` time) falls back to a single
+pooled global grid, with a `"..._used_segment_grid"` flag disclosing
+which grid a row actually got. See
+`src/zoneboost/_conditional_grid.py`, `README.md` ("Conditional zone
+grids"), `docs/how-it-works.html` (`#conditional-zone-grid`),
+`docs/api-reference.html` (`#conditional-grid-parameters`). If a
+boosting-integrated version (feeding `predict`/`explain` directly, a true
+alternative to the 3-way interaction search) is ever wanted instead,
+that's a materially larger, different change to `_weak_learner.py` itself
+— not covered by what shipped here.
 
 **Drift threshold/alert monitor** (proposed). Extends `compare_models`
 (`_drift.py`) from a stateless diff into an active flag: alert when a

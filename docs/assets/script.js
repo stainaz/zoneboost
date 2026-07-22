@@ -119,6 +119,7 @@
     { title: "Compile to SQL Scorecard", crumb: "How It Works", url: "how-it-works.html#compile-to-sql-scorecard" },
     { title: "Zone Profile Encoder", crumb: "How It Works", url: "how-it-works.html#zone-profile-encoder" },
     { title: "Depth Transformer", crumb: "How It Works", url: "how-it-works.html#depth-transformer" },
+    { title: "Conditional Zone Grid", crumb: "How It Works", url: "how-it-works.html#conditional-zone-grid" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },
@@ -130,6 +131,7 @@
     { title: "ZoneBoostSurvival Parameters", crumb: "API Reference", url: "api-reference.html#survival-parameters" },
     { title: "ZoneProfileEncoder Parameters", crumb: "API Reference", url: "api-reference.html#zone-profile-parameters" },
     { title: "DepthTransformer Parameters", crumb: "API Reference", url: "api-reference.html#depth-parameters" },
+    { title: "ConditionalZoneGrid Parameters", crumb: "API Reference", url: "api-reference.html#conditional-grid-parameters" },
     { title: "compare_models Signature", crumb: "API Reference", url: "api-reference.html#compare-models-signature" },
     { title: "compile_to_sql Signature", crumb: "API Reference", url: "api-reference.html#compile-to-sql-signature" },
     { title: "evidence_card Signature", crumb: "API Reference", url: "api-reference.html#evidence-card-signature" },

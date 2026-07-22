@@ -16,6 +16,7 @@ parameter and attribute reference.
 """
 
 from ._bootstrap import BootstrapStability
+from ._conditional_grid import ConditionalZoneGrid
 from ._conformal import ConformalizedQuantileRegressor
 from ._depth import DepthTransformer
 from ._drift import compare_models
@@ -34,6 +35,7 @@ __all__ = [
     "ZoneBoostSurvival",
     "ZoneProfileEncoder",
     "DepthTransformer",
+    "ConditionalZoneGrid",
     "compare_models",
     "compile_to_sql",
     "__version__",

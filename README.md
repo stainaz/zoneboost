@@ -1303,6 +1303,39 @@ group, same precedent as `ZoneProfileEncoder` above.
 with any downstream model, which can bin or threshold it itself if
 discrete regions are still wanted.
 
+## Conditional zone grids
+
+A 2D zone grid over two continuous columns, fit **separately within each
+discrete segment** — the notebook's own "keep filtering: (x,y) if a=1 &
+b=1 & c=1 etc" — instead of relying on the core boosting estimator's own
+combinatorial 3-way search (`max_interaction_order=3`) to discover the
+same structure:
+
+```python
+from zoneboost import ConditionalZoneGrid
+
+grid = ConditionalZoneGrid(columns=["age", "income"], segment_columns=["region"]).fit(X_train, y_train)
+out = grid.transform(X_test)  # "age_income__cell_mean", "..._cell_count", "..._cell_var", "..._used_segment_grid"
+```
+
+For every distinct combination of `segment_columns` values with at least
+`min_segment_size` rows, independently fits its own adaptive zone
+boundaries for both `columns` (same mechanism as `ZoneProfileEncoder`)
+using only that segment's own rows, then each joint cell's shrunk mean,
+count, and variance of `y`. A segment below `min_segment_size`, or never
+seen at `fit` time, falls back to a single pooled grid fit on every row —
+`"..._used_segment_grid"` discloses which one a row actually got (`1` =
+its own segment's grid, `0` = the global fallback), rather than a silent
+fallback with no way to detect it.
+
+Like `ZoneProfileEncoder`/`DepthTransformer`, one instance encodes one
+pair of columns nested within one segment definition — compose several
+via `ColumnTransformer`/`FeatureUnion` for more.
+
+**Deferred**: only a single level of shrinkage (a cell toward its own
+grid's grand mean) — no second, hierarchical level additionally pulling a
+segment's cell toward the global grid's corresponding cell.
+
 ## Parameters
 
 Identical parameter set on both estimators, except `undersample`/
@@ -1427,6 +1460,23 @@ and per-zone counts/means/variances, every value plain inspectable data),
 
 Fitted attributes: `columns_` (columns actually encoded), `mean_` (fitted
 mean vector), `covariance_` (fitted, ridge-regularized covariance matrix).
+
+## ConditionalZoneGrid parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `columns` | — | Exactly two continuous columns to grid jointly; required. Must not be categorical |
+| `segment_columns` | — | One or more columns whose distinct value combination defines a segment; required. Grouped by exact value, not zone-binned |
+| `max_zones` | 7 | Zone cap per column, per grid (segment or global) |
+| `min_zone_frac` | 0.02 | Minimum row fraction required on each side of a zone split |
+| `min_zone_abs` | 20 | Minimum absolute row count required on each side of a zone split |
+| `min_segment_size` | 50 | A segment with fewer training rows than this falls back to the global grid instead of fitting its own — see "Conditional zone grids" above |
+| `shrinkage` | `True` | Empirical-Bayes-shrink each grid's own cell means toward that grid's own grand mean; `False` emits raw, unshrunk cell means |
+| `random_state` | 42 | Accepted for interface consistency; fitting is fully deterministic given `X`/`y`, so this is currently unused |
+
+Fitted attributes: `segment_grids_` (`{segment_key: grid}` for every
+segment that met `min_segment_size`), `global_grid_` (the pooled fallback
+grid).
 
 ## Explaining predictions
 

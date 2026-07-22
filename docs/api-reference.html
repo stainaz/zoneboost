@@ -232,6 +232,28 @@
       </tbody>
     </table>
 
+    <h2 id="conditional-grid-parameters">ConditionalZoneGrid Parameters</h2>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>columns</code></td><td>—</td><td>Exactly two continuous columns to grid jointly; required. Must not be categorical</td></tr>
+        <tr><td><code>segment_columns</code></td><td>—</td><td>One or more columns whose distinct value combination defines a segment; required. Grouped by exact value, not zone-binned</td></tr>
+        <tr><td><code>max_zones</code></td><td><code>7</code></td><td>Zone cap per column, per grid (segment or global)</td></tr>
+        <tr><td><code>min_zone_frac</code></td><td><code>0.02</code></td><td>Minimum row fraction required on each side of a zone split</td></tr>
+        <tr><td><code>min_zone_abs</code></td><td><code>20</code></td><td>Minimum absolute row count required on each side of a zone split</td></tr>
+        <tr><td><code>min_segment_size</code></td><td><code>50</code></td><td>A segment with fewer training rows than this falls back to the global grid instead of fitting its own — see <a href="how-it-works.html#conditional-zone-grid">Conditional Zone Grid</a></td></tr>
+        <tr><td><code>shrinkage</code></td><td><code>True</code></td><td>Empirical-Bayes-shrink each grid's own cell means toward that grid's own grand mean; <code>False</code> emits raw, unshrunk cell means</td></tr>
+        <tr><td><code>random_state</code></td><td><code>42</code></td><td>Accepted for interface consistency; fitting is fully deterministic given <code>X</code>/<code>y</code>, so this is currently unused</td></tr>
+      </tbody>
+    </table>
+    <p><code>ConditionalZoneGrid</code> fitted attributes:</p>
+    <table>
+      <tbody>
+        <tr><td><code>segment_grids_</code></td><td><code>{segment_key: grid}</code> for every segment that met <code>min_segment_size</code>.</td></tr>
+        <tr><td><code>global_grid_</code></td><td>The pooled fallback grid, fit on every row regardless of segment.</td></tr>
+      </tbody>
+    </table>
+
     <h2 id="compare-models-signature">compare_models Signature</h2>
     <p><code>compare_models(model_old, model_new, X_eval, y_eval=None)</code> — a
     top-level function, not a method, comparing two already-fitted

@@ -1236,6 +1236,34 @@ sql = compile_to_sql(model, table_name="customers")
       wanted.
     </div>
 
+    <h2 id="conditional-zone-grid">Conditional Zone Grid</h2>
+    <p>A 2D zone grid over two continuous columns, fit <strong>separately within each
+    discrete segment</strong> — the notebook's own "keep filtering: (x,y) if a=1 & b=1 &
+    c=1 etc" — instead of relying on the core boosting estimator's own combinatorial 3-way
+    search (<code>max_interaction_order=3</code>) to discover the same structure. Built as
+    a standalone transformer, like <a href="#zone-profile-encoder">Zone Profile
+    Encoder</a>/<a href="#depth-transformer">Depth Transformer</a> above — it emits new
+    feature columns for an external downstream model and never touches
+    <code>rounds_</code>/<code>explain()</code>, so there's no attribution to canonicalize
+    or double-count the way there would be if this were folded into the boosting loop
+    itself.</p>
+    <p>For every distinct combination of <code>segment_columns</code> values with at least
+    <code>min_segment_size</code> rows, independently fits its own adaptive zone
+    boundaries for both <code>columns</code> using only that segment's own rows, then each
+    joint cell's shrunk mean, count, and variance of <code>y</code> — the same
+    <code>combined = zone_a * n_zones_b + zone_b</code> bincount trick the core weak
+    learner already uses internally for pairwise interactions, reimplemented locally and
+    self-contained rather than importing that private, round-coupled function. A segment
+    below <code>min_segment_size</code>, or never seen at <code>fit</code> time, falls back
+    to a single pooled grid fit on every row — <code>"..._used_segment_grid"</code>
+    discloses which one a row actually got, rather than a silent fallback with no way to
+    detect it.</p>
+    <div class="note">
+      Only a single level of shrinkage (a cell toward its own grid's grand mean) — no
+      second, hierarchical level additionally pulling a segment's cell toward the global
+      grid's corresponding cell. A real future refinement, not built here.
+    </div>
+
     <h2 id="how-it-compares">How It Compares</h2>
     <p>zoneboost sits at the intersection of additive models (GAMs), boosting frameworks
     (like XGBoost), and rule/bin-based models — combining the interpretable, additive
