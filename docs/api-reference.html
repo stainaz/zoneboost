@@ -254,6 +254,18 @@
       </tbody>
     </table>
 
+    <h2 id="llm-zone-namer-parameters">LLMZoneNamer Parameters</h2>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>client</code></td><td><code>None</code></td><td>Anything exposing <code>.messages.create(...)</code> with the Anthropic Messages API's response shape; <code>None</code> lazily constructs a bare <code>anthropic.Anthropic()</code> on first use — see <a href="how-it-works.html#llm-zone-naming">LLM Zone Naming</a></td></tr>
+        <tr><td><code>model</code></td><td><code>"claude-opus-4-8"</code></td><td>Model ID passed to <code>messages.create</code></td></tr>
+        <tr><td><code>max_tokens</code></td><td><code>1024</code></td><td>Passed to <code>messages.create</code>; scale up for large batches of zones</td></tr>
+      </tbody>
+    </table>
+    <p>No fitted attributes — <code>name_zones(zone_summaries, context=None)</code> is a
+    plain method call, not <code>fit</code>/<code>transform</code>.</p>
+
     <h2 id="compare-models-signature">compare_models Signature</h2>
     <p><code>compare_models(model_old, model_new, X_eval, y_eval=None)</code> — a
     top-level function, not a method, comparing two already-fitted
@@ -266,6 +278,21 @@
         <tr><td><code>model_old</code> / <code>model_new</code></td><td>—</td><td>Both already-fitted <code>ZoneBoostRegressor</code> instances (classifier not yet supported)</td></tr>
         <tr><td><code>X_eval</code></td><td>—</td><td>Shared evaluation data both models can score — every column either model needs, even if only one uses it</td></tr>
         <tr><td><code>y_eval</code></td><td><code>None</code></td><td>If given, adds <code>performance_change</code> (<code>rmse_old</code>/<code>rmse_new</code>) to the result</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="flag-drift-signature">flag_drift Signature</h2>
+    <p><code>flag_drift(model_old, model_new, X_eval, y_eval=None, alpha=0.1)</code> — a
+    top-level function that wraps <code>compare_models</code> with an active alert. See
+    <a href="explaining-predictions.html#drift-threshold-monitor">Drift Threshold/Alert
+    Monitor</a> for the full return-value reference.</p>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>model_old</code> / <code>model_new</code></td><td>—</td><td>Both already-fitted <code>ZoneBoostRegressor</code> instances; <code>model_new</code> must have a non-<code>None</code> <code>conformal_scores_</code></td></tr>
+        <tr><td><code>X_eval</code></td><td>—</td><td>Passed straight through to <code>compare_models</code></td></tr>
+        <tr><td><code>y_eval</code></td><td><code>None</code></td><td>Passed straight through to <code>compare_models</code></td></tr>
+        <tr><td><code>alpha</code></td><td><code>0.1</code></td><td>Miscoverage rate for the conformal margin — same parameter and meaning as <code>predict_interval</code></td></tr>
       </tbody>
     </table>
 

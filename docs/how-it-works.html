@@ -1264,6 +1264,32 @@ sql = compile_to_sql(model, table_name="customers")
       grid's corresponding cell. A real future refinement, not built here.
     </div>
 
+    <h2 id="llm-zone-naming">LLM Zone Naming (Optional)</h2>
+    <p>Every feature above is local, deterministic numpy/pandas math — this one isn't.
+    <code>LLMZoneNamer</code> turns a zone's raw statistics into a short business-language
+    name ("young, low-affordability, high-claims corridor") via the Claude API, so an audit
+    artifact reads like an underwriting manual instead of a table of cut points. It's the
+    first zoneboost feature that makes a network call, costs money per call, and needs a
+    dependency beyond <code>numpy</code>/<code>pandas</code>/<code>scikit-learn</code> — so
+    it ships behind its own <code>zoneboost[llm]</code> extra and is never imported
+    eagerly.</p>
+    <p><code>zone_summaries</code> is a plain list of dicts the caller builds themselves —
+    from <code>ZoneProfileEncoder.zone_stats_</code>, <code>ConditionalZoneGrid.
+    segment_grids_</code>, or by hand — <code>LLMZoneNamer</code> doesn't parse zoneboost's
+    own internal shapes directly, the same compose-rather-than-couple precedent every
+    transformer above already set. Requests structured JSON output (exactly one name per
+    zone, in order) and raises <code>ValueError</code> rather than guessing if the model
+    returns the wrong count.</p>
+    <div class="note">
+      <code>import zoneboost</code> never requires <code>anthropic</code> to be installed —
+      including <code>from zoneboost import LLMZoneNamer</code> itself. Only calling
+      <code>name_zones()</code> with no injected <code>client</code> triggers the import,
+      raising a clear <code>ImportError</code> pointing at <code>pip install
+      zoneboost[llm]</code> if it's missing. Pass any object exposing
+      <code>.messages.create(...)</code> as <code>client</code> to use your own (or a fake
+      one in tests) without ever touching the network.
+    </div>
+
     <h2 id="how-it-compares">How It Compares</h2>
     <p>zoneboost sits at the intersection of additive models (GAMs), boosting frameworks
     (like XGBoost), and rule/bin-based models — combining the interpretable, additive

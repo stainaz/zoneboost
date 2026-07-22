@@ -23,8 +23,8 @@ useful context on its own.
 | **ZoneProfileEncoder** | **Shipped** | Notebook pages 2-3 | `src/zoneboost/_zone_profile.py` |
 | **DepthTransformer** | **Shipped** | Notebook page 3 (core/outlier rings) | `src/zoneboost/_depth.py` |
 | **ConditionalZoneGrid** | **Shipped** | Notebook page 1 (`a=1 & b=1` filtering) | `src/zoneboost/_conditional_grid.py` |
-| Drift threshold/alert monitor | Proposed | Notebook page 2 (red-ink date note) | extends `_drift.py`'s `compare_models`, reuses Mondrian's per-group calibration scores |
-| LLM zone auto-naming (business language) | Proposed, needs a scope decision | Strategy discussion, not the notebook | would sit outside the core package — flag before building; zoneboost is currently a zero-ML-dependency, numpy/pandas-only library, and this is the first idea that would break that |
+| **Drift threshold/alert monitor** | **Shipped** | Notebook page 2 (red-ink date note) | `src/zoneboost/_drift_alert.py` (`flag_drift`) |
+| **LLM zone auto-naming (business language)** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_zone_namer.py` (`LLMZoneNamer`), gated behind the `zoneboost[llm]` extra |
 
 ## Detail
 
@@ -104,19 +104,43 @@ alternative to the 3-way interaction search) is ever wanted instead,
 that's a materially larger, different change to `_weak_learner.py` itself
 — not covered by what shipped here.
 
-**Drift threshold/alert monitor** (proposed). Extends `compare_models`
-(`_drift.py`) from a stateless diff into an active flag: alert when a
-zone's conditional mean has shifted beyond a conformal band, rather than
-requiring a person to eyeball the diff. Reuses the per-group calibration
-scores Mondrian conformal prediction already computes
-(`regressor.py`'s `mondrian_col`) rather than inventing new calibration
-machinery.
+**Drift threshold/alert monitor.** `flag_drift(model_old, model_new,
+X_eval, y_eval=None, alpha=0.1)` turns `compare_models`'s stateless diff
+into an active alert: flags when the observed prediction shift between
+two model snapshots exceeds `model_new`'s own already-calibrated
+split-conformal margin (the same quantity `predict_interval` uses), and
+when `mondrian_col` was set, additionally flags any per-group shift that
+exceeds that group's own margin from `conformal_scores_by_group_` —
+reusing Mondrian conformal prediction's existing per-group calibration
+scores rather than inventing new calibration machinery. Ships as a new
+function in a new file, `src/zoneboost/_drift_alert.py`, which *calls*
+`compare_models` rather than editing it in place — `_drift.py` itself has
+a zero-line diff. Disclosed as a heuristic significance check, not a
+formal hypothesis test. See `README.md` ("Drift threshold/alert monitor"
+under "Time-based drift comparison"), `docs/explaining-predictions.html`
+(`#drift-threshold-monitor`), `docs/api-reference.html`
+(`#flag-drift-signature`).
 
-**LLM zone auto-naming** (proposed, stretch). Auto-name a zone or
-zone-pair in business language ("young, low-affordability, high-claims
-corridor") so an audit artifact reads like an underwriting manual instead
-of a table of cut points. Needs an explicit scope decision before building:
-zoneboost is currently a zero-ML-dependency, numpy/pandas-only library, and
-this is the first idea that would introduce an external (LLM) dependency —
-likely belongs in a separate optional extra or a docs/tooling layer, not
-the core package, if built at all.
+**LLM zone auto-naming.** `LLMZoneNamer.name_zones(zone_summaries,
+context=None)` turns a batch of plain zone-description dicts into short
+business-language names ("young, low-affordability, high-claims
+corridor") via the Claude API — so an audit artifact reads like an
+underwriting manual instead of a table of cut points. Asked the user for
+the scope decision this item was flagged as needing; they chose "separate
+optional extra": ships inside the `zoneboost` package
+(`src/zoneboost/_zone_namer.py`), gated behind `pip install
+zoneboost[llm]` (the new `anthropic` optional dependency in
+`pyproject.toml`), and never imported eagerly — `anthropic` is only
+imported inside `LLMZoneNamer`'s own method bodies, so `import zoneboost`
+(and even `from zoneboost import LLMZoneNamer`) keeps working with zero
+extra dependencies installed; verified directly by blocking the
+`anthropic` import and confirming both still succeed. `client` is
+injectable (any object exposing `.messages.create(...)`), which is what
+makes the test suite fully offline — no network call, no API key, no
+`anthropic` runtime dependency required to run `pytest`. Decoupled from
+every other zoneboost internal on purpose: `zone_summaries` is a plain
+list of dicts the caller builds from `ZoneProfileEncoder.zone_stats_`,
+`ConditionalZoneGrid.segment_grids_`, or by hand, not something this class
+parses out of `rounds_` itself. See `README.md` ("LLM zone naming
+(optional)"), `docs/how-it-works.html` (`#llm-zone-naming`),
+`docs/api-reference.html` (`#llm-zone-namer-parameters`).

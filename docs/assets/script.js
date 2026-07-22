@@ -120,6 +120,7 @@
     { title: "Zone Profile Encoder", crumb: "How It Works", url: "how-it-works.html#zone-profile-encoder" },
     { title: "Depth Transformer", crumb: "How It Works", url: "how-it-works.html#depth-transformer" },
     { title: "Conditional Zone Grid", crumb: "How It Works", url: "how-it-works.html#conditional-zone-grid" },
+    { title: "LLM Zone Naming (Optional)", crumb: "How It Works", url: "how-it-works.html#llm-zone-naming" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },
@@ -132,7 +133,9 @@
     { title: "ZoneProfileEncoder Parameters", crumb: "API Reference", url: "api-reference.html#zone-profile-parameters" },
     { title: "DepthTransformer Parameters", crumb: "API Reference", url: "api-reference.html#depth-parameters" },
     { title: "ConditionalZoneGrid Parameters", crumb: "API Reference", url: "api-reference.html#conditional-grid-parameters" },
+    { title: "LLMZoneNamer Parameters", crumb: "API Reference", url: "api-reference.html#llm-zone-namer-parameters" },
     { title: "compare_models Signature", crumb: "API Reference", url: "api-reference.html#compare-models-signature" },
+    { title: "flag_drift Signature", crumb: "API Reference", url: "api-reference.html#flag-drift-signature" },
     { title: "compile_to_sql Signature", crumb: "API Reference", url: "api-reference.html#compile-to-sql-signature" },
     { title: "evidence_card Signature", crumb: "API Reference", url: "api-reference.html#evidence-card-signature" },
     { title: "explain / feature_importance purify Parameters", crumb: "API Reference", url: "api-reference.html#purify-parameters" },
@@ -149,6 +152,7 @@
     { title: "Audited Human Editing", crumb: "Explaining Predictions", url: "explaining-predictions.html#audited-human-editing" },
     { title: "Zone-Native Counterfactuals", crumb: "Explaining Predictions", url: "explaining-predictions.html#zone-native-counterfactuals" },
     { title: "Time-Based Drift Comparison", crumb: "Explaining Predictions", url: "explaining-predictions.html#time-based-drift-comparison" },
+    { title: "Drift Threshold/Alert Monitor", crumb: "Explaining Predictions › Time-Based Drift Comparison", url: "explaining-predictions.html#drift-threshold-monitor" },
     { title: "Model Evidence Cards", crumb: "Explaining Predictions", url: "explaining-predictions.html#model-evidence-cards" },
     { title: "How This Differs from SHAP/LIME", crumb: "Explaining Predictions", url: "explaining-predictions.html#vs-shap-lime" },
 

@@ -9,14 +9,18 @@ Two estimators sharing the exact same weak learner, `ZoneBoostRegressor`
 and `ZoneBoostClassifier` (binary and multiclass), plus wrappers built on
 top of them: `ConformalizedQuantileRegressor` for locally-adaptive
 prediction intervals, `BootstrapStability` for resampling-based
-contribution/importance intervals and term stability, and
-`ZoneProfileEncoder`, a standalone `scikit-learn` transformer that emits
-per-zone target statistics as engineered features for *any* downstream
-model, not only zoneboost's own estimators. `compare_models` compares two
-already-fitted `ZoneBoostRegressor` models refit on different time
-periods, reporting feature-importance drift, boundary/population shift,
-and prediction-shift statistics. All are scikit-learn-compatible: they
-work with `Pipeline`, `GridSearchCV`, `cross_val_score`, and `clone`.
+contribution/importance intervals and term stability, and three
+standalone `scikit-learn` transformers usable ahead of *any* downstream
+model, not only zoneboost's own estimators — `ZoneProfileEncoder`
+(per-zone target statistics), `DepthTransformer` (a continuous "coreness"
+score), and `ConditionalZoneGrid` (a 2D zone grid nested within discrete
+segments). `compare_models` compares two already-fitted
+`ZoneBoostRegressor` models refit on different time periods, reporting
+feature-importance drift, boundary/population shift, and prediction-shift
+statistics; `flag_drift` adds an active alert on top of it, reusing the
+model's own calibrated conformal margin as the threshold. All are
+scikit-learn-compatible: they work with `Pipeline`, `GridSearchCV`,
+`cross_val_score`, and `clone`.
 
 ![Overview of zoneboost's mechanism: zones, per-zone scoring, pairwise interactions, boosting rounds, and a worked prediction with its exact contribution breakdown](docs/assets/images/zoneboost-explanation.png)
 
@@ -1336,6 +1340,47 @@ via `ColumnTransformer`/`FeatureUnion` for more.
 grid's grand mean) — no second, hierarchical level additionally pulling a
 segment's cell toward the global grid's corresponding cell.
 
+## LLM zone naming (optional)
+
+Every feature above is local, deterministic numpy/pandas math — this one
+isn't. `LLMZoneNamer` turns a zone's raw statistics into a short
+business-language name ("young, low-affordability, high-claims corridor")
+via the Claude API, so an audit artifact reads like an underwriting manual
+instead of a table of cut points. It's the first zoneboost feature that
+makes a network call, costs money per call, and needs a dependency beyond
+`numpy`/`pandas`/`scikit-learn` — so it ships behind its own extra and is
+never imported eagerly:
+
+```bash
+pip install "zoneboost[llm]"
+```
+
+```python
+from zoneboost import LLMZoneNamer
+
+zones = [
+    {"feature": "age", "range": (18, 25), "count": 812, "outcome_rate": 0.31},
+    {"feature": "age", "range": (45, 60), "count": 1204, "outcome_rate": 0.06},
+]
+namer = LLMZoneNamer()  # reads ANTHROPIC_API_KEY from the environment
+names = namer.name_zones(zones, context="auto insurance underwriting")
+```
+
+`zone_summaries` is a plain list of dicts the caller builds themselves —
+from `ZoneProfileEncoder.zone_stats_`, `ConditionalZoneGrid.
+segment_grids_`, or by hand — `LLMZoneNamer` doesn't parse zoneboost's own
+internal shapes directly, the same compose-rather-than-couple precedent
+every transformer above already set. Requests structured JSON output
+(exactly one name per zone, in order) and raises `ValueError` rather than
+guessing if the model returns the wrong count.
+
+**`import zoneboost` never requires `anthropic` to be installed** —
+including `from zoneboost import LLMZoneNamer` itself. Only calling
+`name_zones()` with no injected `client` triggers the import, raising a
+clear `ImportError` pointing at `pip install zoneboost[llm]` if it's
+missing. Pass any object exposing `.messages.create(...)` as `client` to
+use your own (or a fake one in tests) without ever touching the network.
+
 ## Parameters
 
 Identical parameter set on both estimators, except `undersample`/
@@ -1477,6 +1522,17 @@ mean vector), `covariance_` (fitted, ridge-regularized covariance matrix).
 Fitted attributes: `segment_grids_` (`{segment_key: grid}` for every
 segment that met `min_segment_size`), `global_grid_` (the pooled fallback
 grid).
+
+## LLMZoneNamer parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `client` | `None` | Anything exposing `.messages.create(...)` with the Anthropic Messages API's response shape; `None` lazily constructs a bare `anthropic.Anthropic()` on first use — see "LLM zone naming" above |
+| `model` | `"claude-opus-4-8"` | Model ID passed to `messages.create` |
+| `max_tokens` | 1024 | Passed to `messages.create`; scale up for large batches of zones |
+
+No fitted attributes — `name_zones(zone_summaries, context=None)` is a
+plain method call, not `fit`/`transform`.
 
 ## Explaining predictions
 
@@ -1893,6 +1949,39 @@ model would have placed them) — `boundary_shift["income"]["center_shift"]`
 stayed small (both periods draw income from the same overall range), which
 is the expected, disclosed limitation above: the *threshold* moved, not
 the column's observed range.
+
+**Drift threshold/alert monitor.** `compare_models` is purely descriptive
+— it reports numbers, not a verdict. `flag_drift(model_old, model_new,
+X_eval, y_eval=None, alpha=0.1)` adds an active alert on top of it,
+answering "is this drift bigger than the model's own normal residual
+noise":
+
+```python
+from zoneboost import flag_drift
+
+result = flag_drift(model_q1, model_q2, X_q2, y_q2)
+result["drifted"]           # True/False
+result["comparison"]        # the full compare_models dict, unchanged
+result["group_alerts"]      # per-Mondrian-group alerts, if mondrian_col was set
+```
+
+Reuses `model_new`'s own already-calibrated split-conformal margin — the
+exact same quantity `predict_interval` already uses — as the band a drift
+must exceed to be flagged, rather than inventing a new arbitrary
+threshold. `drifted` is `True` when
+`|mean(predict_new(X_eval) - predict_old(X_eval))|` exceeds that margin.
+When `mondrian_col` was set at fit time, `group_alerts` additionally
+compares each group's own mean shift against its own margin from
+`conformal_scores_by_group_` — falling back to the global margin for a
+group too small at fit time or unseen here, the identical fallback
+`predict_interval` already applies.
+
+**Honesty check**: this is a heuristic significance check reusing an
+existing calibrated quantity, not a formal hypothesis test — no p-value,
+no multiple-comparison correction across features or groups. Requires
+`model_new` to have been fit with `validation_fraction > 0` (the default)
+or `calibration_fraction > 0`; raises the same `ValueError` `predict_interval`
+would if neither held.
 
 ### Model evidence cards
 

@@ -432,6 +432,35 @@ result["feature_importance_change"]
     periods draw income from the same overall range), which is the expected, disclosed
     limitation above: the <em>threshold</em> moved, not the column's observed range.</p>
 
+    <h3 id="drift-threshold-monitor">Drift Threshold/Alert Monitor</h3>
+    <p><code>compare_models</code> is purely descriptive — it reports numbers, not a
+    verdict. <code>flag_drift(model_old, model_new, X_eval, y_eval=None, alpha=0.1)</code>
+    adds an active alert on top of it, answering "is this drift bigger than the model's
+    own normal residual noise":</p>
+    <pre><code>from zoneboost import flag_drift
+
+result = flag_drift(model_q1, model_q2, X_q2, y_q2)
+result["drifted"]           # True/False
+result["comparison"]        # the full compare_models dict, unchanged
+result["group_alerts"]      # per-Mondrian-group alerts, if mondrian_col was set</code></pre>
+    <p>Reuses <code>model_new</code>'s own already-calibrated split-conformal margin —
+    the exact same quantity <code>predict_interval</code> already uses — as the band a
+    drift must exceed to be flagged, rather than inventing a new arbitrary threshold.
+    <code>drifted</code> is <code>True</code> when <code>|mean(predict_new(X_eval) -
+    predict_old(X_eval))|</code> exceeds that margin. When <code>mondrian_col</code> was
+    set at fit time, <code>group_alerts</code> additionally compares each group's own
+    mean shift against its own margin from <code>conformal_scores_by_group_</code> —
+    falling back to the global margin for a group too small at fit time or unseen here,
+    the identical fallback <code>predict_interval</code> already applies.</p>
+    <div class="note">
+      <strong>Honesty check</strong>: this is a heuristic significance check reusing an
+      existing calibrated quantity, not a formal hypothesis test — no p-value, no
+      multiple-comparison correction across features or groups. Requires
+      <code>model_new</code> to have been fit with <code>validation_fraction &gt; 0</code>
+      (the default) or <code>calibration_fraction &gt; 0</code>; raises the same
+      <code>ValueError</code> <code>predict_interval</code> would if neither held.
+    </div>
+
     <h2 id="model-evidence-cards">Model Evidence Cards</h2>
     <p><code>model.evidence_card(X=None)</code> assembles a compact, JSON-serializable
     snapshot of a fitted model — zones/boundaries, per-term support/shrinkage,

@@ -38,6 +38,9 @@ dev = [
 benchmark = [
     "lightgbm>=4.0",
 ]
+llm = [
+    "anthropic",
+]
 
 [project.urls]
 Homepage = "https://github.com/stainaz/zoneboost"

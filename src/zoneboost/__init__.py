@@ -20,9 +20,11 @@ from ._conditional_grid import ConditionalZoneGrid
 from ._conformal import ConformalizedQuantileRegressor
 from ._depth import DepthTransformer
 from ._drift import compare_models
+from ._drift_alert import flag_drift
 from ._sql_export import compile_to_sql
 from ._survival import ZoneBoostSurvival
 from ._version import __version__
+from ._zone_namer import LLMZoneNamer
 from ._zone_profile import ZoneProfileEncoder
 from .classifier import ZoneBoostClassifier
 from .regressor import ZoneBoostRegressor
@@ -36,7 +38,9 @@ __all__ = [
     "ZoneProfileEncoder",
     "DepthTransformer",
     "ConditionalZoneGrid",
+    "LLMZoneNamer",
     "compare_models",
+    "flag_drift",
     "compile_to_sql",
     "__version__",
 ]
