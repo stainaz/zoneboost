@@ -118,6 +118,7 @@
     { title: "Ensemble-Level Guarantees", crumb: "How It Works › Global Shape Constraints", url: "how-it-works.html#ensemble-level-guarantees" },
     { title: "Compile to SQL Scorecard", crumb: "How It Works", url: "how-it-works.html#compile-to-sql-scorecard" },
     { title: "Zone Profile Encoder", crumb: "How It Works", url: "how-it-works.html#zone-profile-encoder" },
+    { title: "Depth Transformer", crumb: "How It Works", url: "how-it-works.html#depth-transformer" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },
@@ -128,6 +129,7 @@
     { title: "BootstrapStability Parameters", crumb: "API Reference", url: "api-reference.html#bootstrap-parameters" },
     { title: "ZoneBoostSurvival Parameters", crumb: "API Reference", url: "api-reference.html#survival-parameters" },
     { title: "ZoneProfileEncoder Parameters", crumb: "API Reference", url: "api-reference.html#zone-profile-parameters" },
+    { title: "DepthTransformer Parameters", crumb: "API Reference", url: "api-reference.html#depth-parameters" },
     { title: "compare_models Signature", crumb: "API Reference", url: "api-reference.html#compare-models-signature" },
     { title: "compile_to_sql Signature", crumb: "API Reference", url: "api-reference.html#compile-to-sql-signature" },
     { title: "evidence_card Signature", crumb: "API Reference", url: "api-reference.html#evidence-card-signature" },

@@ -1267,6 +1267,42 @@ the raw features via `ColumnTransformer`/`FeatureUnion` (as above) and let
 the downstream model find cross-column effects itself, rather than this
 class trying to pre-select which pairs matter.
 
+## Depth transformer
+
+A continuous "how typical is this observation" score over a group of
+numeric columns, replacing a hand-drawn inner-core/outer-core/outlier
+grouping with one bounded number:
+
+```python
+from zoneboost import DepthTransformer
+
+depth = DepthTransformer(columns=["age", "income"]).fit(X_train)
+out = depth.transform(X_test)   # "age_income__depth_distance", "age_income__coreness"
+```
+
+Uses **Mahalanobis distance** — a point's distance from the joint mean of
+the column group, scaled by their covariance — rather than Tukey
+halfspace depth or convex-hull peeling: exact halfspace depth has no
+simple closed form past ~2 dimensions, and convex-hull peeling needs
+`scipy.spatial.ConvexHull`, a dependency this package doesn't otherwise
+carry. `coreness = 1 / (1 + distance)` is a bounded, monotonically
+decreasing rescaling of the raw distance — **not** a calibrated
+percentile or probability (that would need a chi-square CDF assumption
+this class doesn't make); both numbers are emitted so the uncalibrated
+distance is still available directly. The covariance inverse is computed
+via `np.linalg.pinv` with a small ridge term added to the diagonal
+(`ridge`, default `1e-6`), so a singular or ill-conditioned covariance
+(perfectly correlated columns, or more columns than rows) degrades
+gracefully instead of raising.
+
+One instance encodes one column group — combine several via
+`ColumnTransformer`/`FeatureUnion` for depth scores over more than one
+group, same precedent as `ZoneProfileEncoder` above.
+
+**Deferred**: no discrete region labels — a continuous score composes
+with any downstream model, which can bin or threshold it itself if
+discrete regions are still wanted.
+
 ## Parameters
 
 Identical parameter set on both estimators, except `undersample`/
@@ -1379,6 +1415,18 @@ default upper query time for `predict_survival_function`/
 Fitted attributes: `zone_stats_` (per-column zone boundaries/category map
 and per-zone counts/means/variances, every value plain inspectable data),
 `columns_` (columns actually encoded, in output order).
+
+## DepthTransformer parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `columns` | `None` | Column group to compute joint depth over; `None` uses every numeric column of `X` (categorical columns auto-excluded; declaring one explicitly raises `ValueError`) |
+| `group_name` | `None` | Name used in the two emitted output columns; `None` joins the encoded column names with `"_"` |
+| `ridge` | `1e-6` | Added to the covariance matrix's diagonal before inverting, so a singular/ill-conditioned covariance degrades gracefully — see "Depth transformer" above |
+| `random_state` | 42 | Accepted for interface consistency; fitting is fully deterministic given `X`, so this is currently unused |
+
+Fitted attributes: `columns_` (columns actually encoded), `mean_` (fitted
+mean vector), `covariance_` (fitted, ridge-regularized covariance matrix).
 
 ## Explaining predictions
 

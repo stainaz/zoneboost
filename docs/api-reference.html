@@ -213,6 +213,25 @@
       </tbody>
     </table>
 
+    <h2 id="depth-parameters">DepthTransformer Parameters</h2>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>columns</code></td><td><code>None</code></td><td>Column group to compute joint depth over; <code>None</code> uses every numeric column of <code>X</code> (categorical columns auto-excluded; declaring one explicitly raises <code>ValueError</code>)</td></tr>
+        <tr><td><code>group_name</code></td><td><code>None</code></td><td>Name used in the two emitted output columns; <code>None</code> joins the encoded column names with <code>"_"</code></td></tr>
+        <tr><td><code>ridge</code></td><td><code>1e-6</code></td><td>Added to the covariance matrix's diagonal before inverting, so a singular/ill-conditioned covariance degrades gracefully — see <a href="how-it-works.html#depth-transformer">Depth Transformer</a></td></tr>
+        <tr><td><code>random_state</code></td><td><code>42</code></td><td>Accepted for interface consistency; fitting is fully deterministic given <code>X</code>, so this is currently unused</td></tr>
+      </tbody>
+    </table>
+    <p><code>DepthTransformer</code> fitted attributes:</p>
+    <table>
+      <tbody>
+        <tr><td><code>columns_</code></td><td>Columns actually encoded.</td></tr>
+        <tr><td><code>mean_</code></td><td>Fitted mean vector.</td></tr>
+        <tr><td><code>covariance_</code></td><td>Fitted, ridge-regularized covariance matrix.</td></tr>
+      </tbody>
+    </table>
+
     <h2 id="compare-models-signature">compare_models Signature</h2>
     <p><code>compare_models(model_old, model_new, X_eval, y_eval=None)</code> — a
     top-level function, not a method, comparing two already-fitted

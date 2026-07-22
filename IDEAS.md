@@ -21,7 +21,7 @@ useful context on its own.
 | Mondrian conformal prediction | Shipped | — | `src/zoneboost/regressor.py` (`mondrian_col`) |
 | Time-based drift comparison (`compare_models`) | Shipped, no alerting yet | Notebook page 2 | `src/zoneboost/_drift.py` |
 | **ZoneProfileEncoder** | **Shipped** | Notebook pages 2-3 | `src/zoneboost/_zone_profile.py` |
-| DepthTransformer | Proposed | Notebook page 3 (core/outlier rings) | would reuse `_zones.py` math, new `_depth.py` |
+| **DepthTransformer** | **Shipped** | Notebook page 3 (core/outlier rings) | `src/zoneboost/_depth.py` |
 | ConditionalZoneGrid | Proposed | Notebook page 1 (`a=1 & b=1` filtering) | sequence after `_purify.py`, since attribution should be canonicalized before nesting grids |
 | Drift threshold/alert monitor | Proposed | Notebook page 2 (red-ink date note) | extends `_drift.py`'s `compare_models`, reuses Mondrian's per-group calibration scores |
 | LLM zone auto-naming (business language) | Proposed, needs a scope decision | Strategy discussion, not the notebook | would sit outside the core package — flag before building; zoneboost is currently a zero-ML-dependency, numpy/pandas-only library, and this is the first idea that would break that |
@@ -66,14 +66,21 @@ zoneboost's own estimators. See `src/zoneboost/_zone_profile.py`,
 (`#zone-profile-encoder`), `docs/api-reference.html`
 (`#zone-profile-parameters`).
 
-**DepthTransformer** (proposed). Generalizes the notebook's discrete
-inner-core/outer-core/outlier rings into a continuous "coreness" score per
-observation (e.g. Mahalanobis distance, Tukey halfspace depth, or convex
-hull peeling) — a single interpretable "how typical is this row" feature
-per variable (or variable pair), with the notebook's 50%/0/1/2 region
-weighting becoming a learnable depth-weighting function. Would reuse
-`_zones.py`'s existing per-column machinery for the underlying distance
-computation; numpy-only, no new dependency.
+**DepthTransformer.** Generalizes the notebook's discrete
+inner-core/outer-core/outlier rings into a continuous "coreness" score
+over a group of numeric columns, via **Mahalanobis distance** — a point's
+distance from the joint mean of the group, scaled by their covariance.
+Tukey halfspace depth and convex-hull peeling were considered and
+rejected: halfspace depth has no simple closed form past ~2 dimensions,
+and convex-hull peeling needs `scipy.spatial.ConvexHull`, a dependency
+this package doesn't otherwise carry. Emits both the raw distance and a
+bounded `1 / (1 + distance)` rescaling (disclosed as a monotonic
+rescaling, not a calibrated percentile), with `np.linalg.pinv` + a ridge
+term guarding against singular/ill-conditioned covariance. No discrete
+region labels — deliberately deferred, since a continuous score composes
+with any downstream model. See `src/zoneboost/_depth.py`, `README.md`
+("Depth transformer"), `docs/how-it-works.html` (`#depth-transformer`),
+`docs/api-reference.html` (`#depth-parameters`).
 
 **ConditionalZoneGrid** (proposed). Fit separate zone grids per discrete
 segment (the notebook's "keep filtering: (x,y) if a=1 & b=1 & c=1..."),

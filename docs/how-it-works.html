@@ -1207,6 +1207,35 @@ sql = compile_to_sql(model, table_name="customers")
       pairs matter.
     </div>
 
+    <h2 id="depth-transformer">Depth Transformer</h2>
+    <p>A continuous "how typical is this observation" score over a group of numeric
+    columns, replacing a hand-drawn inner-core/outer-core/outlier grouping with one
+    bounded number. Uses <strong>Mahalanobis distance</strong> — a point's distance from
+    the joint mean of the column group, scaled by their covariance — rather than Tukey
+    halfspace depth or convex-hull peeling: exact halfspace depth has no simple closed form
+    past ~2 dimensions, and convex-hull peeling needs <code>scipy.spatial.ConvexHull</code>,
+    a dependency this package doesn't otherwise carry.</p>
+    <p><code>coreness = 1 / (1 + distance)</code> is a bounded, monotonically decreasing
+    rescaling of the raw distance — <strong>not</strong> a calibrated percentile or
+    probability (that would need a chi-square CDF assumption this class doesn't make); both
+    numbers are emitted so the uncalibrated distance is still available directly. The
+    covariance inverse is computed via <code>np.linalg.pinv</code> with a small ridge term
+    added to the diagonal, so a singular or ill-conditioned covariance (perfectly
+    correlated columns, or more columns than rows) degrades gracefully instead of raising.
+    A missing value in any encoded column is mean-imputed with that column's own fitted
+    mean before computing distance, the same "carries zero confidence, doesn't crash"
+    precedent the <a href="#missing-values">Missing Values</a> zones already set.</p>
+    <p>One instance encodes one column group — combine several via
+    <code>ColumnTransformer</code>/<code>FeatureUnion</code> for depth scores over more
+    than one group, same precedent <a href="#zone-profile-encoder">Zone Profile
+    Encoder</a> above sets. Unsupervised: depth is a property of a column group's own
+    joint distribution, not of any target.</p>
+    <div class="note">
+      No discrete region labels are emitted — a continuous score composes with any
+      downstream model, which can bin or threshold it itself if discrete regions are still
+      wanted.
+    </div>
+
     <h2 id="how-it-compares">How It Compares</h2>
     <p>zoneboost sits at the intersection of additive models (GAMs), boosting frameworks
     (like XGBoost), and rule/bin-based models — combining the interpretable, additive
