@@ -6,14 +6,17 @@ back to a quantile, a group count, or a group average, and is inspectable
 directly from the fitted model.
 
 Two estimators sharing the exact same weak learner, `ZoneBoostRegressor`
-and `ZoneBoostClassifier` (binary and multiclass), plus two wrappers built
-on top of them: `ConformalizedQuantileRegressor` for locally-adaptive
-prediction intervals, and `BootstrapStability` for resampling-based
-contribution/importance intervals and term stability. `compare_models`
-compares two already-fitted `ZoneBoostRegressor` models refit on different
-time periods, reporting feature-importance drift, boundary/population
-shift, and prediction-shift statistics. All are scikit-learn-compatible:
-they work with `Pipeline`, `GridSearchCV`, `cross_val_score`, and `clone`.
+and `ZoneBoostClassifier` (binary and multiclass), plus wrappers built on
+top of them: `ConformalizedQuantileRegressor` for locally-adaptive
+prediction intervals, `BootstrapStability` for resampling-based
+contribution/importance intervals and term stability, and
+`ZoneProfileEncoder`, a standalone `scikit-learn` transformer that emits
+per-zone target statistics as engineered features for *any* downstream
+model, not only zoneboost's own estimators. `compare_models` compares two
+already-fitted `ZoneBoostRegressor` models refit on different time
+periods, reporting feature-importance drift, boundary/population shift,
+and prediction-shift statistics. All are scikit-learn-compatible: they
+work with `Pipeline`, `GridSearchCV`, `cross_val_score`, and `clone`.
 
 ![Overview of zoneboost's mechanism: zones, per-zone scoring, pairwise interactions, boosting rounds, and a worked prediction with its exact contribution breakdown](docs/assets/images/zoneboost-explanation.png)
 
@@ -1224,6 +1227,46 @@ any gradient-boosted-ensemble-to-SQL compiler has, and in practice suits
 the traditional "scorecard" use case directly — a small, curated model —
 rather than a deep, wide, default-configured ensemble.
 
+## Zone profile encoding
+
+`ZoneBoostRegressor`/`ZoneBoostClassifier` use a column's zones as one
+weak learner among many, boosted together — useful only inside
+zoneboost's own fit loop. `ZoneProfileEncoder` fits the same per-column
+zone construction once, then emits the result as standalone feature
+columns usable ahead of *any* downstream estimator:
+
+```python
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from zoneboost import ZoneProfileEncoder
+
+encode_zones = ColumnTransformer(
+    [("zones", ZoneProfileEncoder(), ["age", "income"])],
+    remainder="passthrough",
+)
+pipe = Pipeline([("encode", encode_zones), ("model", LogisticRegression())])
+pipe.fit(X_train, y_train)
+```
+
+For each fitted column, `transform(X)` emits three new columns —
+`"<col>__zone_mean"`, `"<col>__zone_count"`, `"<col>__zone_var"` — the
+zone's (empirical-Bayes-shrunk, by default) mean of `y`, its support
+count, and its raw variance. A zone's mean of `y` is exactly
+`P(outcome | zone)` when `y` is 0/1 (e.g. "take-up rate in this
+affordability zone is 12%"), and a plain conditional mean otherwise — one
+code path serves both. Missing values and unseen categories fall into the
+same dedicated fallback zones `ZoneBoostRegressor` already uses (see
+"Missing values" above), so their emitted mean already leans toward the
+column's grand mean with no special-casing needed.
+
+**Deferred**: only per-column (main-effect) profiles — no automatic
+pairwise zone-grid profiling. Combine `ZoneProfileEncoder`'s output with
+the raw features via `ColumnTransformer`/`FeatureUnion` (as above) and let
+the downstream model find cross-column effects itself, rather than this
+class trying to pre-select which pairs matter.
+
 ## Parameters
 
 Identical parameter set on both estimators, except `undersample`/
@@ -1320,6 +1363,22 @@ directly on it), `breakpoints_` (interval boundaries actually used, ending
 in `inf`), `max_duration_` (largest observed `duration` at `fit` time — the
 default upper query time for `predict_survival_function`/
 `predict_cumulative_hazard`).
+
+## ZoneProfileEncoder parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `columns` | `None` | Columns to encode; `None` encodes every column of `X` |
+| `categorical_features` | `None` | Columns to treat as categorical, in addition to auto-detected ones — same convention as `ZoneBoostRegressor` |
+| `max_zones` | 7 | Zone cap for continuous columns; see "Parameters" above |
+| `min_zone_frac` | 0.02 | Minimum row fraction required on each side of a zone split, for continuous columns |
+| `min_zone_abs` | 20 | Minimum absolute row count required on each side of a zone split, for continuous columns |
+| `shrinkage` | `True` | Empirical-Bayes-shrink each zone's raw mean toward the column's own grand mean; `False` emits the raw, unshrunk mean — see "Zone profile encoding" above |
+| `random_state` | 42 | Accepted for interface consistency; fitting is fully deterministic given `X`/`y`, so this is currently unused |
+
+Fitted attributes: `zone_stats_` (per-column zone boundaries/category map
+and per-zone counts/means/variances, every value plain inspectable data),
+`columns_` (columns actually encoded, in output order).
 
 ## Explaining predictions
 

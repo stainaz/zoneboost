@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Origin Story — zoneboost docs</title>
+<meta name="description" content="The handwritten notebook pages that started zoneboost, and how each rough sketch maps onto the model that shipped.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="container">
+    <a class="wordmark" href="index.html">
+      <span class="mark"><img src="assets/favicon.svg" alt="" width="22" height="22"></span>
+      zoneboost
+    </a>
+    <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false">☰</button>
+    <nav class="main-nav">
+      <a href="getting-started.html" aria-current="page">Docs</a>
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+    </nav>
+  </div>
+</header>
+
+<div class="docs-layout container">
+  <button class="sidebar-toggle" aria-expanded="false">☰ Docs menu</button>
+  <aside class="docs-sidebar">
+    <div class="docs-search">
+      <input type="text" placeholder="Search docs…" aria-label="Search docs" autocomplete="off">
+      <div class="search-results"></div>
+    </div>
+    <p class="docs-nav-label">Docs</p>
+    <nav>
+      <a href="getting-started.html">Getting Started</a>
+      <a href="how-it-works.html">How It Works</a>
+      <a href="api-reference.html">API Reference</a>
+      <a href="explaining-predictions.html">Explaining Predictions</a>
+      <a href="benchmarks.html">Benchmarks</a>
+      <a href="origin-story.html" aria-current="page">Origin Story</a>
+    </nav>
+  </aside>
+
+  <article class="docs-content">
+    <h1>Origin Story</h1>
+    <p class="subtitle">Before there was a <code>fit()</code> method, there were three
+    pages of pen-and-paper sketching. Nothing here was implemented as written — but
+    almost everything zoneboost does today is a more rigorous version of a question
+    asked on one of these pages.</p>
+
+    <p>The notes below are transcribed close to verbatim, in the order they were
+    written, with a short note on how each idea eventually landed (or didn't) in the
+    shipped model. See <a href="how-it-works.html">How It Works</a> for what actually
+    got built.</p>
+
+    <h2 id="page-1">Page 1 — "Advanced Feature Engineering"</h2>
+    <figure class="docs-figure">
+      <img src="assets/origin-story/page-1.webp" alt="Handwritten notebook page titled Advanced Feature Engineering, sketching a 2D grid split into labeled regions (1a, 2, 3) along two variables x and y, with a note about standardizing data since some values may be large and others small. Below it, a table headed ORIGINAL lists an outcome column of raw numbers (76, 79, 80, 100, 30, 120, 200, 18, ..., 276, 120, 130) alongside ten variable columns x, y, z, a, b, c, d, e, f, h, with a red annotation distinguishing a valid outlier the business has confirmed from an invalid value that should be dropped.">
+      <figcaption>The first sketch: splitting two variables into a labeled grid of
+      regions, and a worked table of ten variables plus an outcome.</figcaption>
+    </figure>
+    <p>The page opens with "creating your own transformer to use in improving
+    predictive power," then draws a grid over two variables (x and y) and labels the
+    cells — a core region, an inner ring, an outer ring. A side note flags that
+    variables will need to be standardized first, "since some might be huge values vs
+    small values" — the raw problem that zone boundaries have to be scale-aware.</p>
+    <p>It generalizes almost immediately: "can be ideally 2 variables, x & y," but
+    also "can continue filtering on the variable... i.e. (x&y) of a∈1 & b=1 &
+    c=1 & d=1 etc." That's stacking conditions across more than two variables — the
+    seed of what became pairwise (and eventually higher-order) <a
+    href="how-it-works.html#interactions">interactions</a> and <a
+    href="how-it-works.html#adaptive-interaction-order">adaptive interaction
+    order</a> rather than a single fixed 2D grid.</p>
+    <p>A starred note reframes the whole thing: "coming up with a new profile almost
+    similar to decision trees" — for a simplified 10-variable example (x, y, z, a, b,
+    c, d, e, f, h, outcome), with "outcome could be a number or classes." That
+    regression-or-classification framing is exactly the
+    <code>ZoneBoostRegressor</code> / <code>ZoneBoostClassifier</code> split, years
+    before either existed. The red-ink aside on the outcome table — a business-confirmed
+    outlier is a valid value, an invalid one should be dropped — is an early, informal
+    version of the trust-the-data-boundary judgment that <a
+    href="how-it-works.html#robust-cell-statistics"><code>trim_fraction</code></a> now
+    makes automatic and consistent instead of a manual call per dataset.</p>
+
+    <h2 id="page-2">Page 2 — Regions of Interest</h2>
+    <figure class="docs-figure">
+      <img src="assets/origin-story/page-2.webp" alt="Handwritten notebook page headed Regions of interest, with CORR and COV written at top right. Notes list mean and variance/std, and a new profile showing the range of important values. A starred section asks what the weight of an overall variable is with the outcome, flags that this could be affected by how it interacts with other variables, argues for a quick variable-importance analysis before modeling, and notes the model will keep changing as older data affects performance, using min-max scaling and boxplots comparing outcome and variables. A numbered list at the bottom reads: 1. the ado-transformer, 2. correlation, 3. covariance, 4. original value, with a bracket noting rescaling via min-max scaler with direction included.">
+      <figcaption>Naming the pieces: weighting a variable by its relationship to the
+      outcome, correcting for interaction effects, and re-checking importance as the
+      model (and the data) evolves.</figcaption>
+    </figure>
+    <p>This page names the object directly — "regions of interest" — and starts
+    asking the harder questions about them: "what is the weight of that
+    [region/]variable with the outcome? But this could be affected by how it interacts
+    with another variable." That's the moment a single-variable zone average stops
+    being enough and an interaction term becomes necessary — you can't judge one
+    variable's zone in isolation if its effect depends on another variable's zone too.</p>
+    <p>Two circled notes push further: variable importance needs to run <em>before</em>
+    modeling, not just be read off the fitted model after the fact — and "the model
+    will keep changing... using older data might affect its performance," so
+    boxplots comparing outcome against each variable are proposed as a running sanity
+    check. That's an early, manual stand-in for what
+    <a href="how-it-works.html#empirical-bayes-shrinkage">empirical Bayes
+    shrinkage</a> now does automatically per zone, and what a <a
+    href="explaining-predictions.html#time-based-drift-comparison">time-based drift
+    comparison</a> does automatically across model versions.</p>
+    <p>The closing numbered list — "1. the ado-transformer, 2. correlation, 3.
+    covariance, 4. original value," with min-max scaling and "direction included" —
+    is the first draft of a feature-engineering pipeline: rescale, then compute
+    per-region relationships, keeping the sign of the relationship rather than just
+    its magnitude. "ado-transformer" never became a real class name, but the
+    idea — a transformer built from region statistics rather than a fixed formula —
+    is the through-line to every zone in zoneboost today.</p>
+
+    <h2 id="page-3">Page 3 — Weighting Regions and Resampling</h2>
+    <figure class="docs-figure">
+      <img src="assets/origin-story/page-3.webp" alt="Handwritten notebook page describing an approach that works with samples of data, breaking it down into smaller samples and averaging the results. It proposes weighting sections of the data by density, e.g. giving a region between 0.8 and 1.0 on one axis and 90 to 100 on another a higher weight such as 50 percent. It defines four kinds of regions: inner core, outer core (split into important-to-one and important-to-neither variants), and outliers (split into important-to-both, outlier-to-both, and further outlier variants), with a note to try changing the importance weighting of each region as a scenario. A list of important steps to include follows: correlation (filtered per region), covariance, joint probability, conditional probability, interaction effects, point-biserial correlation, mean, median, mode, variance/standard deviation, and range. A final note says that if the data follows a date pattern it should be broken down sequentially, and if not, it should be sampled without replacement, since generating many such datasets and averaging their output imputes the final prediction.">
+      <figcaption>The density-weighting and resampling idea: split the data into many
+      small samples, weight each region by how much data actually falls in it, and
+      average many such runs into one prediction.</figcaption>
+    </figure>
+    <p>The last page is the most complete draft of the mechanism. It opens: "works
+    with samples of data, i.e. breaks down the data to smaller samples & then
+    average it out" — followed by "the idea is to see what weight you give each
+    section of the data," with a worked example (a region between 0.8–1.0 on one
+    axis and 90–100 on another getting a 50% weight). That's <a
+    href="how-it-works.html#empirical-bayes-shrinkage">density-aware shrinkage</a> in
+    everything but name: a zone with more supporting data should count for more than
+    a sparse one.</p>
+    <p>It then defines four kinds of regions by name — inner core, outer core,
+    outliers, with sub-cases for whether a point matters to one variable, both, or
+    neither — which is a hand-drawn precursor to the model shrinking sparse or
+    disagreeing zones toward a shared prior rather than trusting every region
+    equally. The "important steps to include" list underneath — correlation,
+    covariance, joint/conditional probability, interaction effects, point-biserial
+    correlation, mean/median/mode, variance, range — is essentially a checklist of
+    the descriptive statistics zoneboost's zones are built from, rather than anything
+    resembling a decision-tree split criterion or a gradient-descent update.</p>
+    <p>The closing note is the earliest version of an evaluation discipline that
+    stuck: "if data follows a date pattern, it's broken down to follow [a] sequential
+    date pattern; if no date pattern, data is chosen without replacement" — and
+    because that process "creates a lot of datasets," the output has to be imputed
+    (averaged) back into one number. That distinction — sequential holdout for
+    ordered data, resampling without replacement otherwise, many runs averaged into
+    one estimate — is the direct ancestor of <a
+    href="how-it-works.html#honest-data-splits">honest data splits</a>, <a
+    href="how-it-works.html#cross-fitted-cell-means">cross-fitted cell means</a>, and
+    <a href="explaining-predictions.html#bootstrap-stability">bootstrap
+    stability</a>.</p>
+
+    <h2 id="what-stuck">What Stuck, and What Didn't</h2>
+    <p>Read together, three ideas from these pages survived essentially intact into
+    the shipped model:</p>
+    <ul>
+      <li><strong>Regions, not splits or gradients.</strong> Every version of the
+      sketch reaches for the same object — a labeled section of the data with its
+      own average — rather than a tree's recursive split or a neural net's learned
+      weight. That's still exactly what a zoneboost zone is.</li>
+      <li><strong>Weight a region by how much data actually supports it.</strong> The
+      page 3 density-weighting example is the informal version of <a
+      href="how-it-works.html#empirical-bayes-shrinkage">empirical Bayes
+      shrinkage</a>.</li>
+      <li><strong>A variable's effect on the outcome can depend on another
+      variable.</strong> Flagged as a caveat on page 2, this became a first-class
+      output — <a href="how-it-works.html#interactions">interactions</a> are reported
+      as their own term, never split back between the two variables that produced
+      them.</li>
+    </ul>
+    <p>A few things didn't survive, or survived only loosely:</p>
+    <ul>
+      <li>The fixed 2D grid on page 1 gave way to <a
+      href="how-it-works.html#continuous-vs-categorical">adaptive, data-driven zone
+      boundaries</a> re-derived every boosting round, rather than one grid drawn
+      once.</li>
+      <li>"The ado-transformer" as a named, standalone preprocessing step never
+      shipped — its job got absorbed into the zone-fitting step itself rather than
+      staying a separate transform.</li>
+      <li>The manual "re-check boxplots as the model changes" habit on page 2 is now
+      closer to an explicit tool — <a
+      href="explaining-predictions.html#time-based-drift-comparison">time-based drift
+      comparison</a> — than something a person has to remember to do.</li>
+    </ul>
+    <p>None of this was planned as a coherent design when it was written — it reads
+    like someone working out, page by page, why a decision tree's opacity bothered
+    them and what a transparent alternative would have to track instead. The rest of
+    these docs describe what that alternative turned into.</p>
+  </article>
+</div>
+
+<footer class="site-footer">
+  <div class="container">
+    <span>MIT licensed — © zoneboost contributors</span>
+    <div class="footer-links">
+      <a href="https://github.com/stainaz/zoneboost">GitHub</a>
+      <a href="https://github.com/stainaz/zoneboost/issues">Issues</a>
+      <a href="https://pypi.org/project/zoneboost/">PyPI</a>
+      <a href="https://github.com/stainaz/zoneboost/blob/main/LICENSE">License</a>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/script.js"></script>
+</body>
+</html>

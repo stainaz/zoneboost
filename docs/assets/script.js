@@ -117,6 +117,7 @@
     { title: "Global Shape Constraints", crumb: "How It Works", url: "how-it-works.html#global-shape-constraints" },
     { title: "Ensemble-Level Guarantees", crumb: "How It Works › Global Shape Constraints", url: "how-it-works.html#ensemble-level-guarantees" },
     { title: "Compile to SQL Scorecard", crumb: "How It Works", url: "how-it-works.html#compile-to-sql-scorecard" },
+    { title: "Zone Profile Encoder", crumb: "How It Works", url: "how-it-works.html#zone-profile-encoder" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },
@@ -126,6 +127,7 @@
     { title: "ConformalizedQuantileRegressor Parameters", crumb: "API Reference", url: "api-reference.html#cqr-parameters" },
     { title: "BootstrapStability Parameters", crumb: "API Reference", url: "api-reference.html#bootstrap-parameters" },
     { title: "ZoneBoostSurvival Parameters", crumb: "API Reference", url: "api-reference.html#survival-parameters" },
+    { title: "ZoneProfileEncoder Parameters", crumb: "API Reference", url: "api-reference.html#zone-profile-parameters" },
     { title: "compare_models Signature", crumb: "API Reference", url: "api-reference.html#compare-models-signature" },
     { title: "compile_to_sql Signature", crumb: "API Reference", url: "api-reference.html#compile-to-sql-signature" },
     { title: "evidence_card Signature", crumb: "API Reference", url: "api-reference.html#evidence-card-signature" },
@@ -149,7 +151,13 @@
     { title: "Benchmarks", crumb: "Docs", url: "benchmarks.html" },
     { title: "Methodology", crumb: "Benchmarks", url: "benchmarks.html#methodology" },
     { title: "Regression: California Housing", crumb: "Benchmarks", url: "benchmarks.html#regression" },
-    { title: "Reproducing", crumb: "Benchmarks", url: "benchmarks.html#reproduce" }
+    { title: "Reproducing", crumb: "Benchmarks", url: "benchmarks.html#reproduce" },
+
+    { title: "Origin Story", crumb: "Docs", url: "origin-story.html" },
+    { title: "Page 1 — \"Advanced Feature Engineering\"", crumb: "Origin Story", url: "origin-story.html#page-1" },
+    { title: "Page 2 — Regions of Interest", crumb: "Origin Story", url: "origin-story.html#page-2" },
+    { title: "Page 3 — Weighting Regions and Resampling", crumb: "Origin Story", url: "origin-story.html#page-3" },
+    { title: "What Stuck, and What Didn't", crumb: "Origin Story", url: "origin-story.html#what-stuck" }
   ];
 
   function initDocsSearch() {

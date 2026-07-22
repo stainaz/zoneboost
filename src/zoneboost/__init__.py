@@ -21,6 +21,7 @@ from ._drift import compare_models
 from ._sql_export import compile_to_sql
 from ._survival import ZoneBoostSurvival
 from ._version import __version__
+from ._zone_profile import ZoneProfileEncoder
 from .classifier import ZoneBoostClassifier
 from .regressor import ZoneBoostRegressor
 
@@ -30,6 +31,7 @@ __all__ = [
     "ConformalizedQuantileRegressor",
     "BootstrapStability",
     "ZoneBoostSurvival",
+    "ZoneProfileEncoder",
     "compare_models",
     "compile_to_sql",
     "__version__",

@@ -39,6 +39,7 @@
       <a href="api-reference.html" aria-current="page">API Reference</a>
       <a href="explaining-predictions.html">Explaining Predictions</a>
       <a href="benchmarks.html">Benchmarks</a>
+      <a href="origin-story.html">Origin Story</a>
     </nav>
   </aside>
 
@@ -188,6 +189,27 @@
         <tr><td><code>regressor_</code></td><td>The fitted Poisson-loss <code>ZoneBoostRegressor</code> on the expanded person-period table — call <code>explain()</code>/<code>feature_importance()</code> directly on it for a transparent hazard decomposition.</td></tr>
         <tr><td><code>breakpoints_</code></td><td>Interval boundaries actually used, ending in <code>inf</code>.</td></tr>
         <tr><td><code>max_duration_</code></td><td>Largest observed <code>duration</code> at <code>fit</code> time — the default upper query time for <code>predict_survival_function</code>/<code>predict_cumulative_hazard</code>.</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="zone-profile-parameters">ZoneProfileEncoder Parameters</h2>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>columns</code></td><td><code>None</code></td><td>Columns to encode; <code>None</code> encodes every column of <code>X</code></td></tr>
+        <tr><td><code>categorical_features</code></td><td><code>None</code></td><td>Columns to treat as categorical, in addition to auto-detected ones — same convention as <code>ZoneBoostRegressor</code></td></tr>
+        <tr><td><code>max_zones</code></td><td><code>7</code></td><td>Zone cap for continuous columns — see <a href="#parameters">Parameters</a> above</td></tr>
+        <tr><td><code>min_zone_frac</code></td><td><code>0.02</code></td><td>Minimum row fraction required on each side of a zone split, for continuous columns</td></tr>
+        <tr><td><code>min_zone_abs</code></td><td><code>20</code></td><td>Minimum absolute row count required on each side of a zone split, for continuous columns</td></tr>
+        <tr><td><code>shrinkage</code></td><td><code>True</code></td><td>Empirical-Bayes-shrink each zone's raw mean toward the column's own grand mean; <code>False</code> emits the raw, unshrunk mean — see <a href="how-it-works.html#zone-profile-encoder">Zone Profile Encoder</a></td></tr>
+        <tr><td><code>random_state</code></td><td><code>42</code></td><td>Accepted for interface consistency; fitting is fully deterministic given <code>X</code>/<code>y</code>, so this is currently unused</td></tr>
+      </tbody>
+    </table>
+    <p><code>ZoneProfileEncoder</code> fitted attributes:</p>
+    <table>
+      <tbody>
+        <tr><td><code>zone_stats_</code></td><td>Per-column zone boundaries/category map and per-zone counts/means/variances — every value plain inspectable data.</td></tr>
+        <tr><td><code>columns_</code></td><td>Columns actually encoded, in output order.</td></tr>
       </tbody>
     </table>
 

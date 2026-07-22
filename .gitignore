@@ -6,6 +6,8 @@ build/
 dist/
 .venv/
 venv/
+.m4a
+audio/
 
 # ephemeral run artifacts from paper/experiments (results/*.json is the
 # real reproducibility output; these are transient console captures and

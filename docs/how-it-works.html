@@ -39,6 +39,7 @@
       <a href="api-reference.html">API Reference</a>
       <a href="explaining-predictions.html">Explaining Predictions</a>
       <a href="benchmarks.html">Benchmarks</a>
+      <a href="origin-story.html">Origin Story</a>
     </nav>
   </aside>
 
@@ -1177,6 +1178,34 @@ sql = compile_to_sql(model, table_name="customers")
     rounds). This is the same size characteristic any gradient-boosted-ensemble-to-SQL
     compiler has, and in practice suits the traditional "scorecard" use case directly — a
     small, curated model — rather than a deep, wide, default-configured ensemble.</p>
+
+    <h2 id="zone-profile-encoder">Zone Profile Encoder</h2>
+    <p><code>ZoneBoostRegressor</code>/<code>ZoneBoostClassifier</code> use a column's zones
+    as one weak learner among many, boosted together — useful only inside zoneboost's own
+    fit loop. <code>ZoneProfileEncoder</code> fits the same per-column zone construction
+    once, then emits the result as standalone feature columns usable ahead of <em>any</em>
+    downstream estimator — a plain <code>LogisticRegression</code>, XGBoost, anything
+    scikit-learn can fit, not only zoneboost's own estimators.</p>
+    <p>For each fitted column, <code>transform(X)</code> emits three new columns —
+    <code>"&lt;col&gt;__zone_mean"</code>, <code>"&lt;col&gt;__zone_count"</code>,
+    <code>"&lt;col&gt;__zone_var"</code> — the zone's (empirical-Bayes-shrunk, by default)
+    mean of <code>y</code>, its support count, and its raw variance. A zone's mean of
+    <code>y</code> is exactly <code>P(outcome | zone)</code> when <code>y</code> is 0/1 (e.g.
+    "take-up rate in this affordability zone is 12%"), and a plain conditional mean
+    otherwise — one code path serves both. Shrinkage reuses the exact same
+    DerSimonian-Laird empirical-Bayes estimator described in <a
+    href="#empirical-bayes-shrinkage">Empirical Bayes Shrinkage</a> above, applied once per
+    column rather than once per boosting round. Missing values and unseen categories fall
+    into the same dedicated fallback zones described in <a href="#missing-values">Missing
+    Values</a> above, so their emitted mean already leans toward the column's grand mean
+    with no special-casing needed.</p>
+    <div class="note">
+      Only per-column (main-effect) profiles are emitted — no automatic pairwise zone-grid
+      profiling. Combine <code>ZoneProfileEncoder</code>'s output with the raw features via
+      <code>ColumnTransformer</code>/<code>FeatureUnion</code> and let the downstream model
+      find cross-column effects itself, rather than this class trying to pre-select which
+      pairs matter.
+    </div>
 
     <h2 id="how-it-compares">How It Compares</h2>
     <p>zoneboost sits at the intersection of additive models (GAMs), boosting frameworks
