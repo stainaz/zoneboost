@@ -615,6 +615,59 @@ split), consistent with a genuine, not merely cosmetic, distributional
 difference between the two housing-age segments -- exactly the kind of
 signal a drift-monitoring tool is meant to catch.
 
+\subsection{Depth-based typicality scoring}
+\texttt{DepthTransformer} emits a continuous Mahalanobis-distance-based
+``coreness'' score for a group of numeric columns -- a standalone,
+unsupervised typicality measure, not part of the boosting estimator itself.
+Real datasets carry no ground-truth outlier label, so this follows the
+standard contaminated-data protocol for evaluating an unsupervised depth
+score: inject a small, disclosed fraction of synthetic outlier rows into
+each real dataset's numeric columns, fit \texttt{DepthTransformer} on the
+combined set, and check whether its distance actually separates injected
+rows from real ones via ROC-AUC against the known injection label -- a
+checkable number, not a plausibility argument.
+
+Two easier injection protocols were tried first and discarded: perturbing
+every numeric column of an injected row simultaneously, at 6--10 standard
+deviations and then at a milder 2.5--4, both produced AUC $\geq 0.998$ on
+every dataset regardless of magnitude. Perturbing every dimension at once
+makes the joint Mahalanobis distance blow up by construction -- a
+curse-of-dimensionality artifact of the injection design, not a property of
+\texttt{DepthTransformer} worth reporting as if it were. The result below
+instead uses a harder, more realistic \emph{partial} anomaly: each injected
+row starts as a real row (typical in every column), then 1--3 randomly
+chosen numeric columns are overwritten with an extreme value (mean $\pm$
+$U(2.5, 4)$ standard deviations, sign at random) -- a few fields go
+haywire while the rest stay normal, closer to what a real anomalous record
+(a single bad sensor reading, a data-entry error in one field) looks like.
+
+\begin{table}[h]
+\centering
+\caption{DepthTransformer: separating partial-anomaly injected rows (1--3 of the numeric columns perturbed at 2.5--4$\sigma$) from real rows, by ROC-AUC on the fitted coreness score.}
+\label{tab:depth}
+\begin{tabular}{lrrrr}
+\toprule
+Dataset & Numeric cols & Injected rows & AUC & Mean coreness (normal / injected) \\
+\midrule
+California Housing & 8 & 80 & 0.991 & 0.352 / 0.122 \\
+Diabetes & 10 & 9 & 0.997 & 0.272 / 0.116 \\
+Bike Sharing Demand & 7 & 80 & 0.998 & 0.306 / 0.136 \\
+Breast Cancer Wisconsin & 30 & 11 & 0.967 & 0.202 / 0.077 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Coreness separates the partial-anomaly rows cleanly on all four datasets
+(AUC $0.967$--$0.998$), and the injected rows' mean coreness sits well
+below the normal rows' mean on every dataset, with no overlap in any of the
+four cases at the level of the reported means. The one dataset without a
+near-saturated AUC is Breast Cancer Wisconsin, the highest-dimensional case
+tested (30 numeric columns, only 1--3 perturbed): with most dimensions left
+untouched, a perturbation restricted to a handful of 30 columns is
+genuinely harder to distinguish from ordinary multivariate noise, and the
+lower (though still strong) AUC there is the expected direction for that
+difficulty, not an anomaly in the result itself.
+
 \section{Discussion}
 \label{sec:discussion}
 

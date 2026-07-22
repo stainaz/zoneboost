@@ -59,6 +59,12 @@ def aux_tables():
     print("\n=== DRIFT ===")
     print(ccd["drift"])
 
+    with open("results/depth_transformer.json") as f:
+        depth = json.load(f)
+    print("\n=== DEPTH TRANSFORMER ===")
+    for r in depth:
+        print(r)
+
 
 if __name__ == "__main__":
     main_benchmark_tables()

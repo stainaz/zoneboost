@@ -1,0 +1,38 @@
+[
+  {
+    "dataset": "California Housing",
+    "n_numeric_cols": 8,
+    "n_rows": 4000,
+    "n_injected": 80,
+    "auc": 0.991396875,
+    "mean_coreness_normal": 0.3520532109776362,
+    "mean_coreness_injected": 0.12233525363875504
+  },
+  {
+    "dataset": "Diabetes",
+    "n_numeric_cols": 10,
+    "n_rows": 442,
+    "n_injected": 9,
+    "auc": 0.9972347913524384,
+    "mean_coreness_normal": 0.2716858138980318,
+    "mean_coreness_injected": 0.11600442275808345
+  },
+  {
+    "dataset": "Bike Sharing Demand",
+    "n_numeric_cols": 7,
+    "n_rows": 4000,
+    "n_injected": 80,
+    "auc": 0.997909375,
+    "mean_coreness_normal": 0.30632358039847,
+    "mean_coreness_injected": 0.13619640579103048
+  },
+  {
+    "dataset": "Breast Cancer Wisconsin",
+    "n_numeric_cols": 30,
+    "n_rows": 569,
+    "n_injected": 11,
+    "auc": 0.9672471640837195,
+    "mean_coreness_normal": 0.20182081857872505,
+    "mean_coreness_injected": 0.0771364172203968
+  }
+]
