@@ -1340,6 +1340,70 @@ via `ColumnTransformer`/`FeatureUnion` for more.
 grid's grand mean) — no second, hierarchical level additionally pulling a
 segment's cell toward the global grid's corresponding cell.
 
+## Laplace history transformer
+
+Exponential (half-life) decay-weighted aggregation of a per-entity event
+history — insurance claims, purchases, fraud events, sensor readings —
+giving a model memory of "what happened before now" without a recurrent or
+attention architecture:
+
+```python
+from zoneboost import LaplaceHistoryTransformer
+
+laplace = LaplaceHistoryTransformer(
+    entity_col="customer_id",
+    time_col="claim_date",
+    value_columns=["claim_amount"],
+    half_lives=[7, 30, 90, 365],   # days
+)
+laplace.fit(X_train, event_history=claim_history)   # claim_history: long-format event log
+
+# each row supplies its own point-in-time cutoff via asof_col
+features = laplace.transform(X_train, asof_col="snapshot_date")
+X_enriched = X_train.merge(features, left_index=True, right_index=True)
+```
+
+The critical rule for any point-in-time feature: a row may only see events
+at or before its own asof moment, never after, or future events leak into a
+training row. `transform` takes a **per-row** `asof_col` rather than one
+global cutoff shared by every row, since a training set built from
+historical snapshots has rows genuinely "as of" many different past dates —
+a single shared cutoff would either leak future events into early rows or
+go stale on recent ones. A constant `cutoff_date` remains available as a
+convenience for scoring an entire batch as of one shared moment (e.g.
+production scoring); it's still filtered through the same per-row lookup, it
+just gives every row the same one.
+
+For each `half_life`, `transform` emits a decay-weighted sum of every
+`value_columns` entry (`"<group>__<value_col>__laplace_<half_life>d"`) plus
+a decay-weighted event count (`"<group>__event_decay_count_<half_life>d"`)
+— the amount and frequency halves of a standard RFM-style feature, sharing
+one computation. `"<group>__had_history"` discloses whether the entity had
+any qualifying event at all before its own asof (`0` for a cold-start
+entity never seen in `event_history`, whose decay columns are then exactly
+`0.0`, an empty sum, not `NaN`).
+
+`event_history` is supplied at `fit`, not `__init__` — keeping the
+constructor to hyperparameters only, sklearn's own `clone()`/`get_params()`
+convention. Because the leakage guard (`time_col <= asof`) is enforced
+independently per output row, the same fitted `event_history` — which may
+contain events later than some rows' own asof — is safe to reuse across an
+entire historical training set with no need to slice it per fold first.
+
+Unlike `ZoneProfileEncoder`/`DepthTransformer`/`ConditionalZoneGrid`,
+`transform` needs a per-call `asof_col`/`cutoff_date` that a plain
+`transform(X)` call inside a `ColumnTransformer`/`Pipeline` has no way to
+carry — so this one does **not** drop into an automatic pipeline step the
+way those three do. Call `fit`/`transform` directly and merge the output
+columns onto `X` before handing the combined table to a `Pipeline` or
+model, as in the example above.
+
+**Deferred**: a single `entity_col` only — no multi-key entity joins (e.g.
+customer × product history). No automatic half-life selection — declare
+them explicitly, same as `max_zones`/`min_zone_frac` elsewhere. No
+integration into `ZoneBoostRegressor`/`ZoneBoostClassifier`'s own
+`fit`/`explain()`.
+
 ## LLM zone naming (optional)
 
 Every feature above is local, deterministic numpy/pandas math — this one
@@ -1522,6 +1586,23 @@ mean vector), `covariance_` (fitted, ridge-regularized covariance matrix).
 Fitted attributes: `segment_grids_` (`{segment_key: grid}` for every
 segment that met `min_segment_size`), `global_grid_` (the pooled fallback
 grid).
+
+## LaplaceHistoryTransformer parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `entity_col` | — | Column in `event_history`/`X` identifying an event's owner; required |
+| `time_col` | — | Column in `event_history` giving each event's timestamp; required. Datetime-like columns convert to days since the Unix epoch; numeric columns are used as-is and must already share `half_lives`' unit |
+| `half_lives` | — | Positive half-lives, in the same unit as `time_col`; required. One amount-decay column per `(value_column, half_life)` pair, plus one event-count-decay column per half-life |
+| `value_columns` | `None` | Numeric columns in `event_history` to amount-decay; `None`/`[]` still emits the decay-weighted event count, a pure recency/frequency signal |
+| `group_name` | `None` | Prefix on every emitted output column, disambiguating multiple instances (e.g. one per event log) used together; `None` uses `time_col` |
+| `random_state` | 42 | Accepted for interface consistency; fitting/transforming are fully deterministic given their inputs, so this is currently unused |
+
+`fit(X, y=None, event_history=None)` — `event_history` is required.
+`transform(X, asof_col=None, cutoff_date=None)` — exactly one of
+`asof_col`/`cutoff_date` is required; see "Laplace history transformer"
+above. No fitted attributes beyond `entity_col_`/`time_col_`/`value_columns_`
+— the per-entity event index is internal.
 
 ## LLMZoneNamer parameters
 

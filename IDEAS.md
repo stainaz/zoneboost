@@ -25,6 +25,7 @@ useful context on its own.
 | **ConditionalZoneGrid** | **Shipped** | Notebook page 1 (`a=1 & b=1` filtering) | `src/zoneboost/_conditional_grid.py` |
 | **Drift threshold/alert monitor** | **Shipped** | Notebook page 2 (red-ink date note) | `src/zoneboost/_drift_alert.py` (`flag_drift`) |
 | **LLM zone auto-naming (business language)** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_zone_namer.py` (`LLMZoneNamer`), gated behind the `zoneboost[llm]` extra |
+| **Laplace history transformer** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_laplace_history.py` (`LaplaceHistoryTransformer`) |
 
 ## Detail
 
@@ -144,3 +145,37 @@ list of dicts the caller builds from `ZoneProfileEncoder.zone_stats_`,
 parses out of `rounds_` itself. See `README.md` ("LLM zone naming
 (optional)"), `docs/how-it-works.html` (`#llm-zone-naming`),
 `docs/api-reference.html` (`#llm-zone-namer-parameters`).
+
+**Laplace history transformer.** `LaplaceHistoryTransformer(entity_col=,
+time_col=, half_lives=, value_columns=None, group_name=None)` gives a
+model memory of a per-entity event history (claims, purchases, fraud
+events, sensor readings) via exponential half-life decay, without a
+recurrent/attention architecture. Structurally unlike every other
+transformer above: those turn static columns of `X` into new columns of
+the same `X` with a plain `transform(X)` that composes automatically
+inside a `ColumnTransformer`/`Pipeline`; this one needs a second,
+long-format event log at `fit` (`fit(X, y=None, event_history=...)`, kept
+out of `__init__` to preserve sklearn's own `clone()`/`get_params()`
+convention) and a per-row asof cutoff at `transform`
+(`transform(X, asof_col=..., cutoff_date=...)`, exactly one required), so
+it's used standalone rather than dropped into an automatic pipeline step.
+The original proposal's API took one global `cutoff_date` applied to every
+row -- refined during scoping to a **per-row** `asof_col` instead, since a
+single shared cutoff is leakage-prone for a historical training set built
+from rows at many different past dates (it would either leak future
+events into early rows or go stale on recent ones); `cutoff_date` survives
+as a convenience that broadcasts one asof to every row for the
+single-shared-moment case (e.g. production batch scoring), still filtered
+through the identical per-row lookup. For each half-life, emits a
+decay-weighted sum per `value_columns` entry plus a decay-weighted event
+count (the amount and frequency halves of a standard RFM-style feature,
+sharing one computation -- added during scoping, not in the original
+proposal) and a `"..._had_history"` cold-start flag (`0` for an entity
+never seen in `event_history`, whose decay columns are then `0.0`, not
+`NaN`). Because the leakage guard (`time_col <= asof`) is enforced
+independently per output row, one fitted `event_history` -- which may
+contain events later than some rows' own asof -- is safe to reuse across
+an entire historical training set without slicing it per fold first. See
+`src/zoneboost/_laplace_history.py`, `README.md` ("Laplace history
+transformer"), `docs/how-it-works.html` (`#laplace-history-transformer`),
+`docs/api-reference.html` (`#laplace-history-parameters`).

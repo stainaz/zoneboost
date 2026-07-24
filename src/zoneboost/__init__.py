@@ -21,6 +21,7 @@ from ._conformal import ConformalizedQuantileRegressor
 from ._depth import DepthTransformer
 from ._drift import compare_models
 from ._drift_alert import flag_drift
+from ._laplace_history import LaplaceHistoryTransformer
 from ._sql_export import compile_to_sql
 from ._survival import ZoneBoostSurvival
 from ._version import __version__
@@ -38,6 +39,7 @@ __all__ = [
     "ZoneProfileEncoder",
     "DepthTransformer",
     "ConditionalZoneGrid",
+    "LaplaceHistoryTransformer",
     "LLMZoneNamer",
     "compare_models",
     "flag_drift",

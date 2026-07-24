@@ -254,6 +254,25 @@
       </tbody>
     </table>
 
+    <h2 id="laplace-history-parameters">LaplaceHistoryTransformer Parameters</h2>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>entity_col</code></td><td>—</td><td>Column in <code>event_history</code>/<code>X</code> identifying an event's owner; required</td></tr>
+        <tr><td><code>time_col</code></td><td>—</td><td>Column in <code>event_history</code> giving each event's timestamp; required. Datetime-like columns convert to days since the Unix epoch; numeric columns are used as-is and must already share <code>half_lives</code>' unit</td></tr>
+        <tr><td><code>half_lives</code></td><td>—</td><td>Positive half-lives, in the same unit as <code>time_col</code>; required. One amount-decay column per <code>(value_column, half_life)</code> pair, plus one event-count-decay column per half-life</td></tr>
+        <tr><td><code>value_columns</code></td><td><code>None</code></td><td>Numeric columns in <code>event_history</code> to amount-decay; <code>None</code>/<code>[]</code> still emits the decay-weighted event count, a pure recency/frequency signal</td></tr>
+        <tr><td><code>group_name</code></td><td><code>None</code></td><td>Prefix on every emitted output column, disambiguating multiple instances (e.g. one per event log) used together; <code>None</code> uses <code>time_col</code></td></tr>
+        <tr><td><code>random_state</code></td><td><code>42</code></td><td>Accepted for interface consistency; fitting/transforming are fully deterministic given their inputs, so this is currently unused</td></tr>
+      </tbody>
+    </table>
+    <p><code>fit(X, y=None, event_history=None)</code> — <code>event_history</code> is
+    required. <code>transform(X, asof_col=None, cutoff_date=None)</code> — exactly one of
+    <code>asof_col</code>/<code>cutoff_date</code> is required — see <a
+    href="how-it-works.html#laplace-history-transformer">Laplace History Transformer</a>. No
+    fitted attributes beyond <code>entity_col_</code>/<code>time_col_</code>/<code>value_columns_</code>
+    — the per-entity event index is internal.</p>
+
     <h2 id="llm-zone-namer-parameters">LLMZoneNamer Parameters</h2>
     <table>
       <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>

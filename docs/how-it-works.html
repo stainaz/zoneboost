@@ -1264,6 +1264,49 @@ sql = compile_to_sql(model, table_name="customers")
       grid's corresponding cell. A real future refinement, not built here.
     </div>
 
+    <h2 id="laplace-history-transformer">Laplace History Transformer</h2>
+    <p>Exponential (half-life) decay-weighted aggregation of a per-entity event history —
+    insurance claims, purchases, fraud events, sensor readings — giving a model memory of
+    "what happened before now" without a recurrent or attention architecture. Structurally
+    different from <a href="#zone-profile-encoder">Zone Profile Encoder</a>/<a
+    href="#depth-transformer">Depth Transformer</a>/<a href="#conditional-zone-grid">Conditional
+    Zone Grid</a> above: those three turn static columns of <code>X</code> into new columns of
+    the same <code>X</code>, with a plain <code>transform(X)</code> that composes automatically
+    inside a <code>ColumnTransformer</code>/<code>Pipeline</code>. This one needs a second,
+    long-format event log at <code>fit</code> (<code>fit(X, y=None, event_history=...)</code>,
+    kept out of <code>__init__</code> to stay within sklearn's own
+    <code>clone()</code>/<code>get_params()</code> convention that constructors hold
+    hyperparameters only) and a per-row asof cutoff at <code>transform</code>, so it's used
+    standalone: call <code>fit</code>/<code>transform</code> directly and merge the output
+    columns onto <code>X</code> before handing the combined table to a model.</p>
+    <p>The critical rule for any point-in-time feature: a row may only see events at or
+    before its own asof moment, never after, or future events leak into a training row.
+    <code>transform</code> takes a <strong>per-row</strong> <code>asof_col</code> rather than
+    one cutoff shared by every row — a historical training set has rows genuinely "as of"
+    many different past dates, and a single shared cutoff would either leak future events
+    into early rows or go stale on recent ones. A constant <code>cutoff_date</code> stays
+    available as a convenience for scoring a whole batch as of one shared moment (e.g.
+    production scoring); it's still filtered through the exact same per-row lookup, it just
+    gives every row the same one. Because the leakage guard is enforced independently per
+    row, the same fitted <code>event_history</code> — which may contain events later than
+    some rows' own asof — is safe to reuse across an entire historical training set without
+    slicing it per fold first.</p>
+    <p>For each half-life, emits a decay-weighted sum of every <code>value_columns</code>
+    entry (<code>"&lt;group&gt;__&lt;value_col&gt;__laplace_&lt;half_life&gt;d"</code>) plus a
+    decay-weighted event count (<code>"&lt;group&gt;__event_decay_count_&lt;half_life&gt;d"</code>)
+    — the amount and frequency halves of a standard RFM-style feature, sharing one
+    computation. <code>"&lt;group&gt;__had_history"</code> discloses whether the entity had
+    any qualifying event at all before its own asof — <code>0</code> for a cold-start entity
+    never seen in <code>event_history</code>, whose decay columns are then exactly
+    <code>0.0</code> (an empty sum), not <code>NaN</code>.</p>
+    <div class="note">
+      Single <code>entity_col</code> only — no multi-key entity joins (e.g. customer ×
+      product history). No automatic half-life selection — declare them explicitly, same as
+      <code>max_zones</code>/<code>min_zone_frac</code> elsewhere. No integration into
+      <code>ZoneBoostRegressor</code>/<code>ZoneBoostClassifier</code>'s own
+      <code>fit</code>/<code>explain()</code>.
+    </div>
+
     <h2 id="llm-zone-naming">LLM Zone Naming (Optional)</h2>
     <p>Every feature above is local, deterministic numpy/pandas math — this one isn't.
     <code>LLMZoneNamer</code> turns a zone's raw statistics into a short business-language
