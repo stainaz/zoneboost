@@ -26,6 +26,7 @@ useful context on its own.
 | **Drift threshold/alert monitor** | **Shipped** | Notebook page 2 (red-ink date note) | `src/zoneboost/_drift_alert.py` (`flag_drift`) |
 | **LLM zone auto-naming (business language)** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_zone_namer.py` (`LLMZoneNamer`), gated behind the `zoneboost[llm]` extra |
 | **Laplace history transformer** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_laplace_history.py` (`LaplaceHistoryTransformer`) |
+| **Depth crowd (wisdom-of-the-crowd aggregation)** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_depth_crowd.py` (`DepthCrowd`) |
 
 ## Detail
 
@@ -179,3 +180,43 @@ an entire historical training set without slicing it per fold first. See
 `src/zoneboost/_laplace_history.py`, `README.md` ("Laplace history
 transformer"), `docs/how-it-works.html` (`#laplace-history-transformer`),
 `docs/api-reference.html` (`#laplace-history-parameters`).
+
+**Depth crowd.** `DepthCrowd(columns=None, rank_normalize=True,
+vote_threshold=0.05, group_name="crowd")` aggregates several already-
+computed per-expert typicality scores (e.g. several `DepthTransformer`
+instances' `*__coreness` columns from a `FeatureUnion`, one per domain
+zone) into a crowd-level mean/median/std/min, a vote count/share, and
+which expert is driving an outlier for each row. Scoped down sharply from
+a much larger "wisdom of the crowd" pitch (bootstrap-covariance crowding,
+random-subspace zone generation, class-conditional centers, per-expert
+learned reliability weights, and a full stacked meta-model over
+probability outputs) after checking it against what's already free or
+already exists: multiple domain-zone experts are already achievable today
+via `DepthTransformer` + `FeatureUnion` with zero new code; supervised
+soft-voting/stacking is exactly scikit-learn's own
+`VotingClassifier`/`StackingClassifier`; bootstrap-covariance crowding
+duplicates `BootstrapStability`'s resampling machinery and was left as a
+distinct, separate future feature rather than folded in here. What
+survived scoping was the one real technical gap the original pitch
+flagged but never resolved: `DepthTransformer.coreness` is explicitly
+documented as not a calibrated percentile, so raw `coreness` values from
+differently-scoped experts (different column counts/covariance structure)
+aren't directly comparable. `rank_normalize` (default on) fixes this
+properly with a **fitted** reference distribution per expert column
+(stored at `fit`, looked up via `np.searchsorted` at `transform` -- the
+same technique `ConditionalZoneGrid`/`LaplaceHistoryTransformer` already
+use), rather than normalizing against whatever rows happen to be in the
+current `transform` call. Unlike `LaplaceHistoryTransformer`, this one
+fits the plain `fit(X, y=None)`/`transform(X)` shape every other
+transformer here uses (its input is a normal per-row feature table, not a
+second event-log table), so it composes automatically inside a `Pipeline`
+right after the `FeatureUnion` that produces its input.
+`crowd__most_atypical_expert` is a new pattern for this codebase -- a
+string label column (every prior transformer emits numeric-only output),
+disclosed as meant for human review/audit, droppable before feeding the
+rest into a model that needs purely numeric input; kept always-on rather
+than an opt-out flag, the same precedent `ConditionalZoneGrid`'s
+`used_segment_grid` disclosure column already sets. See
+`src/zoneboost/_depth_crowd.py`, `README.md` ("Depth crowd"),
+`docs/how-it-works.html` (`#depth-crowd`), `docs/api-reference.html`
+(`#depth-crowd-parameters`).

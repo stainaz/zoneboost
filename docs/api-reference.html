@@ -232,6 +232,23 @@
       </tbody>
     </table>
 
+    <h2 id="depth-crowd-parameters">DepthCrowd Parameters</h2>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>columns</code></td><td><code>None</code></td><td>Input columns to treat as crowd experts; <code>None</code> uses every numeric column of <code>X</code> (categorical columns auto-excluded; declaring one explicitly raises <code>ValueError</code>). At least 2 columns are required</td></tr>
+        <tr><td><code>rank_normalize</code></td><td><code>True</code></td><td>Convert each column to its percentile within that column's own fitted training distribution before aggregating; <code>False</code> uses raw input values directly — see <a href="how-it-works.html#depth-crowd">Depth Crowd</a></td></tr>
+        <tr><td><code>vote_threshold</code></td><td><code>0.05</code></td><td>An expert "votes" atypical when its (rank-normalized, if enabled) score is <code>&lt;= vote_threshold</code>; calibrated for <code>rank_normalize=True</code>, needs raising substantially otherwise</td></tr>
+        <tr><td><code>group_name</code></td><td><code>"crowd"</code></td><td>Prefix on every emitted output column</td></tr>
+      </tbody>
+    </table>
+    <p><code>DepthCrowd</code> fitted attributes:</p>
+    <table>
+      <tbody>
+        <tr><td><code>columns_</code></td><td>Columns actually treated as experts, in fitted order.</td></tr>
+      </tbody>
+    </table>
+
     <h2 id="conditional-grid-parameters">ConditionalZoneGrid Parameters</h2>
     <table>
       <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>

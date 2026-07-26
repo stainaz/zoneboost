@@ -1307,6 +1307,68 @@ group, same precedent as `ZoneProfileEncoder` above.
 with any downstream model, which can bin or threshold it itself if
 discrete regions are still wanted.
 
+## Depth crowd
+
+Aggregates several already-computed per-expert typicality scores — e.g.
+several `DepthTransformer` instances' `*__coreness` columns from a
+`FeatureUnion`, one per domain zone (viral load, immune markers, treatment
+history, ...) — into a single crowd signal: central tendency, disagreement,
+a vote count, and which expert is driving an outlier:
+
+```python
+from sklearn.pipeline import FeatureUnion, Pipeline
+from zoneboost import DepthTransformer, DepthCrowd
+
+experts = FeatureUnion([
+    ("viral", DepthTransformer(columns=["viral_load", "viral_load_6mo"], group_name="viral")),
+    ("immune", DepthTransformer(columns=["cd4", "cd4_nadir"], group_name="immune")),
+    ("treatment", DepthTransformer(columns=["duration", "adherence"], group_name="treatment")),
+]).set_output(transform="pandas")
+
+coreness_cols = [c for c in experts.fit_transform(X_train).columns if c.endswith("__coreness")]
+crowd = Pipeline([("experts", experts), ("crowd", DepthCrowd(columns=coreness_cols))])
+out = crowd.fit_transform(X_train)   # crowd__mean, crowd__median, crowd__std, crowd__min,
+                                      # crowd__vote_count, crowd__vote_share, crowd__most_atypical_expert
+```
+
+`DepthCrowd` doesn't know or care that its input columns came from
+`DepthTransformer` specifically — it treats them as an arbitrary set of
+comparable, bounded per-expert scores, the same decoupling precedent
+`LLMZoneNamer` set for `zone_summaries`. Unlike `LaplaceHistoryTransformer`,
+it fits the plain `fit(X, y=None)` / `transform(X)` shape every other
+transformer here uses, so it composes automatically inside a `Pipeline`
+right after the `FeatureUnion` that produces its input.
+
+`DepthTransformer.coreness` is explicitly documented as "not a calibrated
+percentile" — different `DepthTransformer` instances (different column
+counts, different covariance structure) produce `coreness` on different
+effective scales, so a raw cross-expert mean isn't apples-to-apples.
+`rank_normalize` (default `True`) fixes this: at `fit`, each input column's
+training values are stored; at `transform`, each value is converted to its
+percentile within *that column's own fitted training distribution* — a
+fitted reference, not a percentile computed against whatever rows happen
+to be in the current `transform` call, so it doesn't shift under a small or
+skewed scoring batch.
+
+`vote_threshold` (default `0.05`) flags an expert as "voting atypical" for
+a row when its (rank-normalized) score falls in the bottom 5% of that
+expert's own training distribution; `crowd__vote_count`/`crowd__vote_share`
+report how many/what fraction of experts agree. `crowd__most_atypical_expert`
+is a string column — the input column driving the lowest reading for that
+row — meant for human review/audit (the same "some outputs are for people,
+not the algorithm" precedent `LLMZoneNamer` set), droppable before feeding
+the rest into a model that needs purely numeric input.
+
+**Deferred**: no per-expert learned reliability weights — needs held-out
+performance labels, a materially separate feature. No supervised
+soft-voting/stacking over probability outputs — already solved by
+scikit-learn's `VotingClassifier`/`StackingClassifier`, not duplicated
+here. No bootstrap-covariance crowd (refitting one expert across
+resamples) — a distinct future feature in the shape of `BootstrapStability`,
+specifically around `DepthTransformer`. No random-subspace zone generator —
+build `DepthTransformer(columns=[...])` instances by hand or with your own
+random selection.
+
 ## Conditional zone grids
 
 A 2D zone grid over two continuous columns, fit **separately within each
@@ -1569,6 +1631,18 @@ and per-zone counts/means/variances, every value plain inspectable data),
 
 Fitted attributes: `columns_` (columns actually encoded), `mean_` (fitted
 mean vector), `covariance_` (fitted, ridge-regularized covariance matrix).
+
+## DepthCrowd parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `columns` | `None` | Input columns to treat as crowd experts; `None` uses every numeric column of `X` (categorical columns auto-excluded; declaring one explicitly raises `ValueError`). At least 2 columns are required |
+| `rank_normalize` | `True` | Convert each column to its percentile within that column's own fitted training distribution before aggregating; `False` uses raw input values directly — see "Depth crowd" above |
+| `vote_threshold` | `0.05` | An expert "votes" atypical when its (rank-normalized, if enabled) score is `<= vote_threshold`; calibrated for `rank_normalize=True`, needs raising substantially otherwise |
+| `group_name` | `"crowd"` | Prefix on every emitted output column |
+
+Fitted attributes: `columns_` (columns actually treated as experts, in
+fitted order).
 
 ## ConditionalZoneGrid parameters
 

@@ -19,6 +19,7 @@ from ._bootstrap import BootstrapStability
 from ._conditional_grid import ConditionalZoneGrid
 from ._conformal import ConformalizedQuantileRegressor
 from ._depth import DepthTransformer
+from ._depth_crowd import DepthCrowd
 from ._drift import compare_models
 from ._drift_alert import flag_drift
 from ._laplace_history import LaplaceHistoryTransformer
@@ -38,6 +39,7 @@ __all__ = [
     "ZoneBoostSurvival",
     "ZoneProfileEncoder",
     "DepthTransformer",
+    "DepthCrowd",
     "ConditionalZoneGrid",
     "LaplaceHistoryTransformer",
     "LLMZoneNamer",

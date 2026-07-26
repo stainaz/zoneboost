@@ -1236,6 +1236,49 @@ sql = compile_to_sql(model, table_name="customers")
       wanted.
     </div>
 
+    <h2 id="depth-crowd">Depth Crowd</h2>
+    <p>Aggregates several already-computed per-expert typicality scores — e.g. several <a
+    href="#depth-transformer">Depth Transformer</a> instances' <code>*__coreness</code>
+    columns from a <code>FeatureUnion</code>, one per domain zone (viral load, immune
+    markers, treatment history, ...) — into a single crowd signal: central tendency,
+    disagreement, a vote count, and which expert is driving an outlier. Doesn't know or
+    care that its input columns came from <code>DepthTransformer</code> specifically — it
+    treats them as an arbitrary set of comparable, bounded per-expert scores, the same
+    decoupling precedent <a href="#llm-zone-naming">LLM Zone Naming</a> set for
+    <code>zone_summaries</code>. Unlike <a href="#laplace-history-transformer">Laplace
+    History Transformer</a>, it fits the plain <code>fit(X, y=None)</code> /
+    <code>transform(X)</code> shape every other transformer here uses, so it composes
+    automatically inside a <code>Pipeline</code> right after the <code>FeatureUnion</code>
+    that produces its input.</p>
+    <p><code>DepthTransformer.coreness</code> is explicitly documented as "not a
+    calibrated percentile" — different <code>DepthTransformer</code> instances (different
+    column counts, different covariance structure) produce <code>coreness</code> on
+    different effective scales, so a raw cross-expert mean isn't apples-to-apples.
+    <code>rank_normalize</code> (default on) fixes this: at <code>fit</code>, each input
+    column's training values are stored; at <code>transform</code>, each value is
+    converted to its percentile within <em>that column's own fitted training
+    distribution</em> — a fitted reference, not a percentile computed against whatever
+    rows happen to be in the current <code>transform</code> call, so it doesn't shift
+    under a small or skewed scoring batch.</p>
+    <p><code>vote_threshold</code> (default <code>0.05</code>) flags an expert as "voting
+    atypical" for a row when its (rank-normalized) score falls in the bottom 5% of that
+    expert's own training distribution; <code>crowd__vote_count</code>/
+    <code>crowd__vote_share</code> report how many/what fraction of experts agree.
+    <code>crowd__most_atypical_expert</code> is a string column — the input column
+    driving the lowest reading for that row — meant for human review/audit, droppable
+    before feeding the rest into a model that needs purely numeric input.</p>
+    <div class="note">
+      No per-expert learned reliability weights — needs held-out performance labels, a
+      materially separate feature. No supervised soft-voting/stacking over probability
+      outputs — already solved by scikit-learn's <code>VotingClassifier</code>/
+      <code>StackingClassifier</code>, not duplicated here. No bootstrap-covariance crowd
+      (refitting one expert across resamples) — a distinct future feature in the shape of
+      <a href="explaining-predictions.html#bootstrap-stability">Bootstrap Stability</a>,
+      specifically around <code>DepthTransformer</code>. No random-subspace zone generator — build
+      <code>DepthTransformer(columns=[...])</code> instances by hand or with your own
+      random selection.
+    </div>
+
     <h2 id="conditional-zone-grid">Conditional Zone Grid</h2>
     <p>A 2D zone grid over two continuous columns, fit <strong>separately within each
     discrete segment</strong> — the notebook's own "keep filtering: (x,y) if a=1 & b=1 &
