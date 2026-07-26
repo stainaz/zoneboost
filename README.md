@@ -1369,6 +1369,55 @@ specifically around `DepthTransformer`. No random-subspace zone generator —
 build `DepthTransformer(columns=[...])` instances by hand or with your own
 random selection.
 
+## Categorical depth transformer
+
+`DepthTransformer`'s Mahalanobis-distance geometry assumes roughly
+continuous, elliptical structure: it explicitly rejects a declared
+categorical/`bool` column, and silently accepts an int-coded 0/1 column but
+produces a coarse, barely-discriminating `coreness` for it. `CategoricalDepthTransformer`
+is the discrete sibling — a typicality score for a categorical/binary zone,
+so a crowd can mix continuous and categorical experts together:
+
+```python
+from zoneboost import CategoricalDepthTransformer
+
+cat_depth = CategoricalDepthTransformer(columns=["treatment_type"]).fit(X_train)
+out = cat_depth.transform(X_test)   # "treatment_type__count", "treatment_type__coreness"
+```
+
+Reuses existing, already-tested primitives rather than inventing new
+categorical-bucketing logic: `categorical_zone_map`/`categorical_zone_index`
+already give each distinct value its own zone, with two separately-reserved
+fallback zones — missing (`NaN`/`None`) and unseen-but-real (present at
+`transform` time, not at `fit` time) — exactly the distinction this needs,
+for free. Multiple declared columns are combined into one joint cell index
+via mixed-radix encoding, the same `combined = za * n_b + zb` trick
+`ConditionalZoneGrid` already uses for 2 columns, generalized here to
+however many columns are declared. Emits the joint cell's raw training
+support count (`"<group>__count"`) and that count as a fraction of the
+training set (`"<group>__coreness"`, bounded in `[0, 1]`, higher = more
+typical) — the same raw-then-bounded disclosure pattern, polarity, and
+column-suffix convention `DepthTransformer` uses, so a caller building a
+`DepthCrowd` `columns=[...]` list doesn't need to remember two different
+naming schemes for a continuous expert vs. a categorical one.
+
+Unlike `DepthTransformer`, explicitly declaring a column here is always
+accepted regardless of dtype (including a `bool` or int-coded binary
+column) — treating a column as discrete-by-exact-value is this class's
+entire point, not something only some dtypes can support. No
+shrinkage/smoothing toward a prior: unlike `ConditionalZoneGrid`'s cell
+*mean of y*, which genuinely needs enough support to be a trustworthy
+estimate, a raw count is already an honest, correct answer even at `count
+= 1`.
+
+**Deferred**: no automatic cap or fallback for combinatorial sparsity
+(many columns, or high-cardinality columns, multiply out to a huge joint
+cell space with mostly singleton cells) — disclosed as a caveat (keep
+column groups small, 2-4 columns) rather than built around, since a raw
+count doesn't have the same "needs enough support to trust" problem a
+mean does. No Laplace/empirical-Bayes smoothing of the count itself. No
+ordinal awareness — every distinct combination is its own bucket.
+
 ## Conditional zone grids
 
 A 2D zone grid over two continuous columns, fit **separately within each
@@ -1643,6 +1692,16 @@ mean vector), `covariance_` (fitted, ridge-regularized covariance matrix).
 
 Fitted attributes: `columns_` (columns actually treated as experts, in
 fitted order).
+
+## CategoricalDepthTransformer parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `columns` | `None` | The categorical/binary zone; `None` uses every auto-detected categorical column of `X`. Explicitly declaring a column is always accepted regardless of dtype (including `bool`/int-coded binary). At least 1 column is required |
+| `group_name` | `None` | Name used in the two emitted output columns; `None` joins the encoded column names with `"_"` |
+| `random_state` | 42 | Accepted for interface consistency; fitting is fully deterministic given `X`, so this is currently unused |
+
+Fitted attributes: `columns_` (columns actually encoded, in fitted order).
 
 ## ConditionalZoneGrid parameters
 

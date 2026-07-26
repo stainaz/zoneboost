@@ -1279,6 +1279,45 @@ sql = compile_to_sql(model, table_name="customers")
       random selection.
     </div>
 
+    <h2 id="categorical-depth-transformer">Categorical Depth Transformer</h2>
+    <p><code>DepthTransformer</code>'s Mahalanobis-distance geometry assumes roughly
+    continuous, elliptical structure: it explicitly rejects a declared categorical/
+    <code>bool</code> column, and silently accepts an int-coded 0/1 column but produces a
+    coarse, barely-discriminating <code>coreness</code> for it.
+    <code>CategoricalDepthTransformer</code> is the discrete sibling — a typicality score
+    for a categorical/binary zone, so a crowd can mix continuous and categorical experts
+    together. Reuses existing, already-tested primitives rather than inventing new
+    categorical-bucketing logic: <code>categorical_zone_map</code>/<code>categorical_zone_index</code>
+    already give each distinct value its own zone, with two separately-reserved fallback
+    zones — missing (<code>NaN</code>/<code>None</code>) and unseen-but-real (present at
+    <code>transform</code> time, not at <code>fit</code> time) — exactly the distinction
+    this needs, for free. Multiple declared columns are combined into one joint cell index
+    via mixed-radix encoding, the same <code>combined = za * n_b + zb</code> trick <a
+    href="#conditional-zone-grid">Conditional Zone Grid</a> already uses for 2 columns,
+    generalized here to however many columns are declared.</p>
+    <p>Emits the joint cell's raw training support count
+    (<code>"&lt;group&gt;__count"</code>) and that count as a fraction of the training set
+    (<code>"&lt;group&gt;__coreness"</code>, bounded in <code>[0, 1]</code>, higher = more
+    typical) — the same raw-then-bounded disclosure pattern, polarity, and column-suffix
+    convention <a href="#depth-transformer">Depth Transformer</a> uses, so a caller
+    building a <a href="#depth-crowd">Depth Crowd</a> <code>columns=[...]</code> list
+    doesn't need to remember two different naming schemes for a continuous expert vs. a
+    categorical one. Unlike <code>DepthTransformer</code>, explicitly declaring a column
+    here is always accepted regardless of dtype (including a <code>bool</code> or
+    int-coded binary column) — treating a column as discrete-by-exact-value is this
+    class's entire point. No shrinkage/smoothing toward a prior: unlike
+    <code>ConditionalZoneGrid</code>'s cell <em>mean of y</em>, which genuinely needs
+    enough support to be a trustworthy estimate, a raw count is already an honest, correct
+    answer even at <code>count = 1</code>.</p>
+    <div class="note">
+      No automatic cap or fallback for combinatorial sparsity (many columns, or
+      high-cardinality columns, multiply out to a huge joint cell space with mostly
+      singleton cells) — disclosed as a caveat (keep column groups small, 2-4 columns)
+      rather than built around, since a raw count doesn't have the same "needs enough
+      support to trust" problem a mean does. No Laplace/empirical-Bayes smoothing of the
+      count itself. No ordinal awareness — every distinct combination is its own bucket.
+    </div>
+
     <h2 id="conditional-zone-grid">Conditional Zone Grid</h2>
     <p>A 2D zone grid over two continuous columns, fit <strong>separately within each
     discrete segment</strong> — the notebook's own "keep filtering: (x,y) if a=1 & b=1 &

@@ -249,6 +249,22 @@
       </tbody>
     </table>
 
+    <h2 id="categorical-depth-parameters">CategoricalDepthTransformer Parameters</h2>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>columns</code></td><td><code>None</code></td><td>The categorical/binary zone; <code>None</code> uses every auto-detected categorical column of <code>X</code>. Explicitly declaring a column is always accepted regardless of dtype (including <code>bool</code>/int-coded binary). At least 1 column is required</td></tr>
+        <tr><td><code>group_name</code></td><td><code>None</code></td><td>Name used in the two emitted output columns; <code>None</code> joins the encoded column names with <code>"_"</code></td></tr>
+        <tr><td><code>random_state</code></td><td><code>42</code></td><td>Accepted for interface consistency; fitting is fully deterministic given <code>X</code>, so this is currently unused</td></tr>
+      </tbody>
+    </table>
+    <p><code>CategoricalDepthTransformer</code> fitted attributes:</p>
+    <table>
+      <tbody>
+        <tr><td><code>columns_</code></td><td>Columns actually encoded, in fitted order.</td></tr>
+      </tbody>
+    </table>
+
     <h2 id="conditional-grid-parameters">ConditionalZoneGrid Parameters</h2>
     <table>
       <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>

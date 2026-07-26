@@ -27,6 +27,7 @@ useful context on its own.
 | **LLM zone auto-naming (business language)** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_zone_namer.py` (`LLMZoneNamer`), gated behind the `zoneboost[llm]` extra |
 | **Laplace history transformer** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_laplace_history.py` (`LaplaceHistoryTransformer`) |
 | **Depth crowd (wisdom-of-the-crowd aggregation)** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_depth_crowd.py` (`DepthCrowd`) |
+| **Categorical depth transformer** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_categorical_depth.py` (`CategoricalDepthTransformer`) |
 
 ## Detail
 
@@ -220,3 +221,38 @@ than an opt-out flag, the same precedent `ConditionalZoneGrid`'s
 `src/zoneboost/_depth_crowd.py`, `README.md` ("Depth crowd"),
 `docs/how-it-works.html` (`#depth-crowd`), `docs/api-reference.html`
 (`#depth-crowd-parameters`).
+
+**Categorical depth transformer.** `CategoricalDepthTransformer(columns=None,
+group_name=None)` is the discrete sibling of `DepthTransformer`, prompted
+by a direct question -- does `DepthCrowd`/`DepthTransformer` work well
+with binary or categorical data -- answered by testing rather than
+assuming: `DepthTransformer` explicitly rejects a declared categorical/
+`bool` column, and silently accepts an int-coded 0/1 column but produces a
+coarse, barely-discriminating `coreness` for it (confirmed: mixing one
+binary column collapsed 200 rows down to 185 distinct coreness values),
+because Mahalanobis distance's geometry assumes roughly continuous,
+elliptical structure a discrete variable doesn't have. Reuses existing,
+already-tested primitives rather than inventing new categorical-bucketing
+logic: `categorical_zone_map`/`categorical_zone_index`
+(`src/zoneboost/_zones.py`) already give each distinct value its own zone
+with two separately-reserved fallback zones (missing vs. unseen-but-real)
+for free; multiple declared columns combine into one joint cell index via
+mixed-radix encoding, the same `combined = za * n_b + zb` trick
+`ConditionalZoneGrid._fit_grid` already uses for 2 columns, generalized
+here to however many columns are declared. Emits the joint cell's raw
+training support count (`"<group>__count"`) and that count as a fraction
+of the training set (`"<group>__coreness"`, bounded `[0, 1]`, higher =
+more typical) -- deliberately matching `DepthTransformer`'s own
+raw-then-bounded disclosure pattern and column-suffix convention, so a
+caller building a `DepthCrowd` `columns=[...]` list doesn't need to
+remember two different naming schemes for a continuous expert vs. a
+categorical one. No shrinkage toward a prior, unlike `ConditionalZoneGrid`'s
+cell mean of y: a raw count is already an honest answer even at `count =
+1`, there's nothing to shrink toward. No automatic fallback for
+combinatorial sparsity either, a real, disclosed difference from
+`ConditionalZoneGrid`'s `min_segment_size` fallback -- that fallback
+exists because a *mean* needs enough support to trust, which doesn't apply
+to a raw count. See `src/zoneboost/_categorical_depth.py`, `README.md`
+("Categorical depth transformer"), `docs/how-it-works.html`
+(`#categorical-depth-transformer`), `docs/api-reference.html`
+(`#categorical-depth-parameters`).

@@ -16,6 +16,7 @@ parameter and attribute reference.
 """
 
 from ._bootstrap import BootstrapStability
+from ._categorical_depth import CategoricalDepthTransformer
 from ._conditional_grid import ConditionalZoneGrid
 from ._conformal import ConformalizedQuantileRegressor
 from ._depth import DepthTransformer
@@ -40,6 +41,7 @@ __all__ = [
     "ZoneProfileEncoder",
     "DepthTransformer",
     "DepthCrowd",
+    "CategoricalDepthTransformer",
     "ConditionalZoneGrid",
     "LaplaceHistoryTransformer",
     "LLMZoneNamer",
