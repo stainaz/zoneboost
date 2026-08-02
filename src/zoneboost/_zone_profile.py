@@ -100,6 +100,13 @@ class ZoneProfileEncoder(BaseEstimator, TransformerMixin):
         uses), so a sparse zone's emitted mean leans toward the grand mean
         instead of overfitting a handful of rows. ``False`` emits the raw,
         unshrunk zone mean.
+    split_criterion : {"variance", "correlation"}, default="variance"
+        Forwarded to :func:`zoneboost._zones.adaptive_zone_boundaries` for
+        every continuous column -- ``"variance"`` (default) reproduces
+        every prior release exactly; ``"correlation"`` prefers a cut
+        where the column's local relationship with ``y`` reverses sign
+        (a genuine regime change) over one that merely reduces variance.
+        See "Correlation-aware zone boundaries" in the docs.
     random_state : int, default=42
         Accepted for interface consistency with the rest of the package;
         fitting is fully deterministic given ``X``/``y``, so this is
@@ -136,6 +143,7 @@ class ZoneProfileEncoder(BaseEstimator, TransformerMixin):
         min_zone_frac: float = 0.02,
         min_zone_abs: int = 20,
         shrinkage: bool = True,
+        split_criterion: str = "variance",
         random_state: int = 42,
     ):
         self.columns = columns
@@ -144,6 +152,7 @@ class ZoneProfileEncoder(BaseEstimator, TransformerMixin):
         self.min_zone_frac = min_zone_frac
         self.min_zone_abs = min_zone_abs
         self.shrinkage = shrinkage
+        self.split_criterion = split_criterion
         self.random_state = random_state
 
     def fit(self, X, y, sample_weight=None):
@@ -189,7 +198,8 @@ class ZoneProfileEncoder(BaseEstimator, TransformerMixin):
                 entry = {"kind": "categorical", "category_map": category_map}
             else:
                 boundaries = adaptive_zone_boundaries(
-                    series, y_arr, self.max_zones, self.min_zone_frac, self.min_zone_abs, sample_weight=sw
+                    series, y_arr, self.max_zones, self.min_zone_frac, self.min_zone_abs, sample_weight=sw,
+                    split_criterion=self.split_criterion,
                 )
                 zone_idx = zone_index(series, boundaries)
                 n_zones = len(boundaries) + 2  # + missing

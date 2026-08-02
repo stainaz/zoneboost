@@ -1629,6 +1629,70 @@ transform — a fundamentally different signature, see below). Build either
 separately and combine with `ZoneFeatureSpace`'s own output via
 `FeatureUnion` if wanted.
 
+## Correlation-aware zone boundaries
+
+Every continuous column's zone boundaries are found by
+`adaptive_zone_boundaries` (`_zones.py`), which recursively cuts wherever
+a split most reduces `y`'s within-segment variance — the same criterion a
+regression tree split search uses. That criterion finds *level shifts*
+well, but has no notion of a *regime change*: a point where the
+relationship between the column and `y` genuinely reverses direction
+(a threshold effect, a U-shaped or inverted-U relationship's vertex).
+`split_criterion="correlation"` is an opt-in alternative that looks for
+exactly that instead.
+
+```python
+from zoneboost import ZoneProfileEncoder
+
+encoder = ZoneProfileEncoder(split_criterion="correlation").fit(X, y)
+```
+
+At every candidate cut, it computes the local OLS slope of `y` on the
+column, independently on each side (vectorized via running sums — the
+same complexity class as the default criterion, not asymptotically
+worse). A cut is a genuine reversal when the two slopes have opposite
+signs and neither is exactly zero; among those, the one where
+`min(|left_slope|, |right_slope|)` is largest wins — the weaker of the
+two reversed directions, so a reversal backed by two clearly-sloped sides
+outranks one where either side is barely distinguishable from flat.
+
+Every iteration of the recursive splitting loop scans *every* open
+segment for a genuine reversal first; only once **none** of them has one
+does the loop fall back to ordinary variance-reduction splitting for
+whatever segments remain. The two criteria's own gains are in different
+units (slope vs. sum-of-squares) and are never compared against each
+other directly — this lexicographic "prefer any reversal anywhere over
+any plain split" rule is how that's avoided, rather than blending two
+incommensurate numbers. A cut placed after the fallback kicks in is an
+ordinary level-shift cut, not a guaranteed reversal — disclosed plainly,
+not silently blended in.
+
+`split_criterion="variance"` (the default) reproduces every prior release
+exactly — verified bit-for-bit, not just argued. `"correlation"` is
+threaded through `ZoneProfileEncoder`, `ConditionalZoneGrid`, and
+`ZoneFeatureSpace` only; `ZoneBoostRegressor`'s own per-round split search
+(`_weak_learner.py`, called every round for every column — by far the
+highest-frequency call site) is **not** touched in this pass, the same
+precedent `ConditionalZoneGrid` itself set by shipping standalone before
+any boosting-loop integration. No significance test on the slope either
+(no t-statistic/p-value) — a cheap heuristic (the slope must come out
+exactly nonzero after a guarded division), not a calibrated test for
+whether a reversal is real versus sampling noise.
+
+**Measured, honestly**: on a sharp V-shape (`y = |x - 2| + noise`, a
+genuine abrupt regime switch, 2000 rows), `split_criterion="correlation"`
+placed its boundary at `2.13` — error `0.13` from the true kink at `x=2`
+— versus `-4.41` (error `6.41`) for plain variance-reduction. On a smooth
+parabola (`y = (x - 2)^2 + noise`, same size), where the local slope
+itself vanishes exactly at the true vertex, `"correlation"` landed at
+`4.07` (error `2.07`) versus `-5.76` (error `7.76`) for variance — clearly
+better than the variance-only alternative, but visibly less precise than
+the sharp-kink case, since near a smooth vertex both local slopes are
+close to zero and harder to sign-distinguish from noise. This is a real,
+disclosed characteristic, not a caveat to hide: `"correlation"` is at its
+best for abrupt/threshold-like reversals, and still a clear (if less
+tight) improvement over `"variance"` for smooth ones.
+
 ## Laplace history transformer
 
 Exponential (half-life) decay-weighted aggregation of a per-entity event
@@ -1857,6 +1921,7 @@ default upper query time for `predict_survival_function`/
 | `min_zone_frac` | 0.02 | Minimum row fraction required on each side of a zone split, for continuous columns |
 | `min_zone_abs` | 20 | Minimum absolute row count required on each side of a zone split, for continuous columns |
 | `shrinkage` | `True` | Empirical-Bayes-shrink each zone's raw mean toward the column's own grand mean; `False` emits the raw, unshrunk mean — see "Zone profile encoding" above |
+| `split_criterion` | `"variance"` | `"correlation"` prefers a cut where a column's local relationship with `y` reverses sign over one that merely reduces variance — see "Correlation-aware zone boundaries" above |
 | `random_state` | 42 | Accepted for interface consistency; fitting is fully deterministic given `X`/`y`, so this is currently unused |
 
 Fitted attributes: `zone_stats_` (per-column zone boundaries/category map
@@ -1908,6 +1973,7 @@ Fitted attributes: `columns_` (columns actually encoded, in fitted order).
 | `min_zone_abs` | 20 | Minimum absolute row count required on each side of a zone split |
 | `min_segment_size` | 50 | A segment with fewer training rows than this falls back to the global grid instead of fitting its own — see "Conditional zone grids" above |
 | `shrinkage` | `True` | Empirical-Bayes-shrink each grid's own cell means toward that grid's own grand mean; `False` emits raw, unshrunk cell means |
+| `split_criterion` | `"variance"` | `"correlation"` prefers a cut where a column's local relationship with `y` reverses sign over one that merely reduces variance — see "Correlation-aware zone boundaries" above |
 | `random_state` | 42 | Accepted for interface consistency; fitting is fully deterministic given `X`/`y`, so this is currently unused |
 
 Fitted attributes: `segment_grids_` (`{segment_key: grid}` for every
@@ -1928,6 +1994,7 @@ grid).
 | `min_zone_abs` | 20 | Forwarded to every internal `ZoneProfileEncoder`/`ConditionalZoneGrid` |
 | `min_segment_size` | 50 | Forwarded to every internal `ConditionalZoneGrid` |
 | `shrinkage` | `True` | Forwarded to every internal `ZoneProfileEncoder`/`ConditionalZoneGrid` |
+| `split_criterion` | `"variance"` | Forwarded to every internal `ZoneProfileEncoder`/`ConditionalZoneGrid` — see "Correlation-aware zone boundaries" above |
 | `depth_ridge` | 1e-6 | Forwarded to every internal `DepthTransformer` as its own `ridge` parameter |
 | `random_state` | 42 | Forwarded to every internal transformer |
 

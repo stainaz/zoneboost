@@ -123,6 +123,18 @@ def test_works_inside_pipeline_and_column_transformer_with_linear_model():
     assert preds.shape == (len(X), 2)
 
 
+def test_split_criterion_correlation_is_forwarded_and_default_unchanged():
+    X, y = _zone_signal_data()
+    default = ZoneProfileEncoder(max_zones=3).fit(X, y)
+    explicit = ZoneProfileEncoder(max_zones=3, split_criterion="variance").fit(X, y)
+    pd.testing.assert_frame_equal(default.transform(X), explicit.transform(X))
+
+    # just needs to run and produce a valid transform -- the criterion's
+    # own correctness is covered directly in test_zones.py.
+    corr = ZoneProfileEncoder(max_zones=3, split_criterion="correlation").fit(X, y)
+    corr.transform(X)
+
+
 def test_get_params_and_clone_work():
     model = ZoneProfileEncoder(max_zones=4, min_zone_abs=15, shrinkage=False, random_state=7)
     params = model.get_params()

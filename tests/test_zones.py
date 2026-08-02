@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from zoneboost._zones import (
     adaptive_zone_boundaries,
@@ -58,6 +59,59 @@ def test_adaptive_zone_boundaries_excludes_missing_values_from_split_search():
 
     bounds = adaptive_zone_boundaries(x_missing, y, max_zones=7)
     assert not np.isnan(bounds).any()
+
+
+def test_split_criterion_variance_default_is_bit_identical():
+    rng = np.random.default_rng(4)
+    x = rng.uniform(-10, 10, 800)
+    y = (x - 2.0) ** 2 + rng.normal(0, 0.5, 800)
+    default = adaptive_zone_boundaries(x, y, max_zones=5, min_zone_abs=10)
+    explicit = adaptive_zone_boundaries(x, y, max_zones=5, min_zone_abs=10, split_criterion="variance")
+    np.testing.assert_array_equal(default, explicit)
+
+
+def test_split_criterion_correlation_finds_sharp_regime_switch():
+    # A genuine sign reversal: slope is a step function, -1 then +1 -- an
+    # abrupt regime change, not a smooth vertex where the local slope
+    # itself vanishes at the true point (see the smooth-vertex test below
+    # for that harder case).
+    rng = np.random.default_rng(5)
+    x = rng.uniform(-10, 10, 2000)
+    y = np.abs(x - 2.0) + rng.normal(0, 0.3, 2000)
+    bounds = adaptive_zone_boundaries(x, y, max_zones=2, min_zone_abs=10, split_criterion="correlation")
+    assert len(bounds) == 1
+    assert abs(bounds[0] - 2.0) < 1.0
+
+
+def test_split_criterion_correlation_beats_variance_on_smooth_vertex():
+    # A smooth parabola's local slope vanishes exactly at the true vertex,
+    # so "correlation" mode can't land on it as precisely as it does for a
+    # sharp kink -- but it should still clearly outperform plain
+    # variance-reduction, which has no notion of a reversal at all.
+    rng = np.random.default_rng(6)
+    x = rng.uniform(-10, 10, 2000)
+    y = (x - 2.0) ** 2 + rng.normal(0, 0.5, 2000)
+    bounds_corr = adaptive_zone_boundaries(x, y, max_zones=2, min_zone_abs=10, split_criterion="correlation")
+    bounds_var = adaptive_zone_boundaries(x, y, max_zones=2, min_zone_abs=10, split_criterion="variance")
+    assert abs(bounds_corr[0] - 2.0) < abs(bounds_var[0] - 2.0)
+
+
+def test_split_criterion_correlation_falls_back_to_variance_on_monotonic_column():
+    # A purely monotonic relationship has no genuine sign reversal
+    # anywhere -- "correlation" mode must fall back to ordinary
+    # variance-reduction splits rather than stalling at zero zones.
+    rng = np.random.default_rng(7)
+    x = rng.uniform(0, 10, 2000)
+    y = 3.0 * x + rng.normal(0, 0.5, 2000)
+    bounds = adaptive_zone_boundaries(x, y, max_zones=4, min_zone_abs=10, split_criterion="correlation")
+    assert len(bounds) > 0
+
+
+def test_split_criterion_invalid_raises():
+    x = np.arange(100.0)
+    y = np.arange(100.0)
+    with pytest.raises(ValueError):
+        adaptive_zone_boundaries(x, y, split_criterion="bogus")
 
 
 def test_zone_index_missing_value_maps_to_dedicated_zone():

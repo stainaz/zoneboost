@@ -173,6 +173,16 @@ def test_suggest_interactions_requires_at_least_two_columns():
         space.suggest_interactions(X[["a"]], y)
 
 
+def test_split_criterion_correlation_is_forwarded_and_default_unchanged():
+    X, y = _mixed_data()
+    default = ZoneFeatureSpace(zone_profiles=["price"], random_state=0).fit(X, y)
+    explicit = ZoneFeatureSpace(zone_profiles=["price"], split_criterion="variance", random_state=0).fit(X, y)
+    pd.testing.assert_frame_equal(default.transform(X), explicit.transform(X))
+
+    corr = ZoneFeatureSpace(zone_profiles=["price"], split_criterion="correlation", random_state=0).fit(X, y)
+    corr.transform(X)
+
+
 def test_get_params_and_clone_work():
     space = ZoneFeatureSpace(zone_profiles=["price"], depth_scores=True, random_state=1)
     params = space.get_params()

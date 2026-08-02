@@ -103,6 +103,13 @@ class ZoneFeatureSpace(BaseEstimator, TransformerMixin):
     shrinkage : bool, default=True
         Forwarded to every internal ``ZoneProfileEncoder``/
         ``ConditionalZoneGrid``.
+    split_criterion : {"variance", "correlation"}, default="variance"
+        Forwarded to every internal ``ZoneProfileEncoder``/
+        ``ConditionalZoneGrid`` -- ``"variance"`` (default) reproduces
+        every prior release exactly; ``"correlation"`` prefers a cut
+        where a column's local relationship with ``y`` reverses sign
+        over one that merely reduces variance. See "Correlation-aware
+        zone boundaries" in the docs.
     depth_ridge : float, default=1e-6
         Forwarded to every internal ``DepthTransformer`` as its own
         ``ridge`` parameter.
@@ -146,6 +153,7 @@ class ZoneFeatureSpace(BaseEstimator, TransformerMixin):
         min_zone_abs: int = 20,
         min_segment_size: int = 50,
         shrinkage: bool = True,
+        split_criterion: str = "variance",
         depth_ridge: float = 1e-6,
         random_state: int = 42,
     ):
@@ -158,6 +166,7 @@ class ZoneFeatureSpace(BaseEstimator, TransformerMixin):
         self.min_zone_frac = min_zone_frac
         self.min_zone_abs = min_zone_abs
         self.min_segment_size = min_segment_size
+        self.split_criterion = split_criterion
         self.shrinkage = shrinkage
         self.depth_ridge = depth_ridge
         self.random_state = random_state
@@ -223,6 +232,7 @@ class ZoneFeatureSpace(BaseEstimator, TransformerMixin):
                 min_zone_frac=self.min_zone_frac,
                 min_zone_abs=self.min_zone_abs,
                 shrinkage=self.shrinkage,
+                split_criterion=self.split_criterion,
                 random_state=self.random_state,
             ).fit(X, y_arr, sample_weight=sample_weight)
             sources = {}
@@ -252,6 +262,7 @@ class ZoneFeatureSpace(BaseEstimator, TransformerMixin):
                 min_zone_abs=self.min_zone_abs,
                 min_segment_size=self.min_segment_size,
                 shrinkage=self.shrinkage,
+                split_criterion=self.split_criterion,
                 random_state=self.random_state,
             ).fit(X, y_arr, sample_weight=sample_weight)
             all_sources = tuple(grid.columns_) + tuple(grid.segment_columns_)

@@ -163,8 +163,84 @@ def _best_split(y_sorted_seg: np.ndarray, x_sorted_seg: np.ndarray, min_size: fl
     return best_i + 1, float(best_gain), float(cut_value)
 
 
+def _best_correlation_split(x_sorted_seg: np.ndarray, y_sorted_seg: np.ndarray, min_size, w_sorted_seg: np.ndarray = None):
+    """Vectorized search for a split where the local OLS slope of ``y``
+    on ``x`` **reverses sign** left vs. right of the cut -- a genuine
+    regime change, not just a level shift ``_best_split``'s variance-
+    reduction criterion would also happily place a cut for. Returns
+    ``(split_index, gain, cut_value)``, or ``(None, 0.0, None)`` if no
+    candidate in this segment shows a genuine sign reversal.
+
+    ``gain`` is ``min(|left_slope|, |right_slope|)`` -- the weaker of the
+    two reversed directions, so a reversal backed by two clearly-sloped
+    sides outranks one where either side is barely distinguishable from
+    flat. This is only ever compared against another correlation-mode
+    gain, **never** against ``_best_split``'s sum-of-squares gain (a
+    different unit entirely) -- see ``split_criterion`` on
+    :func:`adaptive_zone_boundaries` for how the two criteria are kept
+    from being mixed.
+
+    No significance test on the slope (no t-statistic/p-value) -- a cheap
+    heuristic (a slope must come out exactly nonzero after the guarded
+    division below), not a calibrated test for whether a reversal is
+    "real" versus sampling noise, disclosed as such.
+    """
+    n = len(y_sorted_seg)
+    if n < 4:  # need >= 2 points (so a slope is defined) on each side of a cut
+        return None, 0.0, None
+    w = w_sorted_seg if w_sorted_seg is not None else np.ones(n)
+    x, y = x_sorted_seg, y_sorted_seg
+
+    cum_w = np.cumsum(w)
+    cum_x = np.cumsum(w * x)
+    cum_y = np.cumsum(w * y)
+    cum_xx = np.cumsum(w * x * x)
+    cum_xy = np.cumsum(w * x * y)
+    total_w, total_x, total_y = cum_w[-1], cum_x[-1], cum_y[-1]
+    total_xx, total_xy = cum_xx[-1], cum_xy[-1]
+    if total_w < 2 * min_size:
+        return None, 0.0, None
+
+    m = n - 1
+    left_w, right_w = cum_w[:-1], total_w - cum_w[:-1]
+    left_x, right_x = cum_x[:-1], total_x - cum_x[:-1]
+    left_y, right_y = cum_y[:-1], total_y - cum_y[:-1]
+    left_xx, right_xx = cum_xx[:-1], total_xx - cum_xx[:-1]
+    left_xy, right_xy = cum_xy[:-1], total_xy - cum_xy[:-1]
+
+    # OLS slope from running sums: (n*Sxy - Sx*Sy) / (n*Sxx - Sx^2), each
+    # side computed independently -- guarded against a near-zero
+    # denominator (every x tied within that side, no slope is defined).
+    left_denom = left_w * left_xx - left_x**2
+    right_denom = right_w * right_xx - right_x**2
+    left_slope = np.divide(
+        left_w * left_xy - left_x * left_y, left_denom, out=np.zeros(m), where=left_denom > 1e-12
+    )
+    right_slope = np.divide(
+        right_w * right_xy - right_x * right_y, right_denom, out=np.zeros(m), where=right_denom > 1e-12
+    )
+
+    no_tie = x[:-1] != x[1:]
+    valid = (
+        (left_w >= min_size) & (right_w >= min_size) & no_tie
+        & (left_denom > 1e-12) & (right_denom > 1e-12)
+    )
+    sign_flip = (left_slope != 0) & (right_slope != 0) & (np.sign(left_slope) != np.sign(right_slope))
+    candidate = valid & sign_flip
+    if not candidate.any():
+        return None, 0.0, None
+
+    gain = np.minimum(np.abs(left_slope), np.abs(right_slope))
+    gain_masked = np.where(candidate, gain, -np.inf)
+    best_i = int(np.argmax(gain_masked))
+    best_gain = gain_masked[best_i]
+    cut_value = (x[best_i] + x[best_i + 1]) / 2.0
+    return best_i + 1, float(best_gain), float(cut_value)
+
+
 def adaptive_zone_boundaries(
-    x, y, max_zones: int = 7, min_zone_frac: float = 0.02, min_zone_abs: int = 20, sample_weight=None
+    x, y, max_zones: int = 7, min_zone_frac: float = 0.02, min_zone_abs: int = 20, sample_weight=None,
+    split_criterion: str = "variance",
 ) -> np.ndarray:
     """Variable-width zone boundaries for one continuous variable.
 
@@ -201,6 +277,25 @@ def adaptive_zone_boundaries(
         ``min_zone_frac``/``min_zone_abs`` guards are both computed
         against **weighted** sums (total evidence) rather than plain row
         counts -- see :func:`_best_split`.
+    split_criterion : {"variance", "correlation"}, default="variance"
+        ``"variance"`` (default) reproduces every prior release exactly:
+        each cut is the one that most reduces ``y``'s within-segment sum
+        of squares (:func:`_best_split`), the same criterion a regression
+        tree split search uses. ``"correlation"`` instead prefers a cut
+        where the local OLS slope of ``y`` on ``x`` **reverses sign**
+        left vs. right of it (:func:`_best_correlation_split`) -- a
+        genuine regime change (e.g. a U-shape's vertex), not just a level
+        shift. Every iteration of the recursive splitting loop scans
+        every open segment for a genuine sign-reversal candidate first;
+        only once **none** of them has one does the loop fall back to
+        ordinary variance-reduction splitting for whatever segments
+        remain -- a cut placed after the fallback kicks in is an ordinary
+        level-shift cut, not a guaranteed reversal, disclosed plainly
+        rather than silently blended (the two criteria's own gains are in
+        different units -- slope vs. sum-of-squares -- so they're never
+        compared against each other directly; this lexicographic
+        "prefer any reversal anywhere over any plain split" rule avoids
+        that). Raises ``ValueError`` if not one of these two strings.
 
     Returns
     -------
@@ -212,6 +307,8 @@ def adaptive_zone_boundaries(
         whichever segment's cumulative sums it lands in, including the cut
         *value* itself.
     """
+    if split_criterion not in ("variance", "correlation"):
+        raise ValueError(f"split_criterion must be 'variance' or 'correlation', got {split_criterion!r}")
     x_arr = np.asarray(x, dtype=float)
     y_arr = np.asarray(y, dtype=float)
     present = ~np.isnan(x_arr)
@@ -232,14 +329,33 @@ def adaptive_zone_boundaries(
 
     while len(segments) < max_zones:
         best_gain, best_seg_i, best_split, best_cut = 0.0, None, None, None
-        for seg_i, (start, end) in enumerate(segments):
-            w_seg = w_sorted[start:end] if w_sorted is not None else None
-            split, gain, cut = _best_split(y_sorted[start:end], x_sorted[start:end], min_size, w_seg)
-            if split is not None and gain > best_gain:
-                best_gain, best_seg_i, best_split, best_cut = gain, seg_i, split, cut
+
+        if split_criterion == "correlation":
+            # Phase 1: prefer a genuine sign-reversal split, if any open
+            # segment has one -- its own gain (a slope) is never compared
+            # against phase 2's sum-of-squares gain below, only against
+            # other segments' own correlation-mode gains.
+            for seg_i, (start, end) in enumerate(segments):
+                w_seg = w_sorted[start:end] if w_sorted is not None else None
+                split, gain, cut = _best_correlation_split(
+                    x_sorted[start:end], y_sorted[start:end], min_size, w_seg
+                )
+                if split is not None and gain > best_gain:
+                    best_gain, best_seg_i, best_split, best_cut = gain, seg_i, split, cut
 
         if best_seg_i is None:
-            break  # no segment has a beneficial split left
+            # split_criterion="variance", or "correlation" found no
+            # reversal anywhere this iteration -- ordinary variance-
+            # reduction splitting for whatever segments remain.
+            best_gain = 0.0
+            for seg_i, (start, end) in enumerate(segments):
+                w_seg = w_sorted[start:end] if w_sorted is not None else None
+                split, gain, cut = _best_split(y_sorted[start:end], x_sorted[start:end], min_size, w_seg)
+                if split is not None and gain > best_gain:
+                    best_gain, best_seg_i, best_split, best_cut = gain, seg_i, split, cut
+
+        if best_seg_i is None:
+            break  # no segment has a beneficial split left, under either criterion
 
         start, end = segments[best_seg_i]
         segments[best_seg_i : best_seg_i + 1] = [(start, start + best_split), (start + best_split, end)]

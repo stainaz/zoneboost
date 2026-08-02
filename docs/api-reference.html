@@ -223,6 +223,7 @@
         <tr><td><code>min_zone_frac</code></td><td><code>0.02</code></td><td>Minimum row fraction required on each side of a zone split, for continuous columns</td></tr>
         <tr><td><code>min_zone_abs</code></td><td><code>20</code></td><td>Minimum absolute row count required on each side of a zone split, for continuous columns</td></tr>
         <tr><td><code>shrinkage</code></td><td><code>True</code></td><td>Empirical-Bayes-shrink each zone's raw mean toward the column's own grand mean; <code>False</code> emits the raw, unshrunk mean — see <a href="how-it-works.html#zone-profile-encoder">Zone Profile Encoder</a></td></tr>
+        <tr><td><code>split_criterion</code></td><td><code>"variance"</code></td><td><code>"correlation"</code> prefers a cut where a column's local relationship with <code>y</code> reverses sign over one that merely reduces variance — see <a href="how-it-works.html#correlation-aware-zone-boundaries">Correlation-Aware Zone Boundaries</a></td></tr>
         <tr><td><code>random_state</code></td><td><code>42</code></td><td>Accepted for interface consistency; fitting is fully deterministic given <code>X</code>/<code>y</code>, so this is currently unused</td></tr>
       </tbody>
     </table>
@@ -297,6 +298,7 @@
         <tr><td><code>min_zone_abs</code></td><td><code>20</code></td><td>Minimum absolute row count required on each side of a zone split</td></tr>
         <tr><td><code>min_segment_size</code></td><td><code>50</code></td><td>A segment with fewer training rows than this falls back to the global grid instead of fitting its own — see <a href="how-it-works.html#conditional-zone-grid">Conditional Zone Grid</a></td></tr>
         <tr><td><code>shrinkage</code></td><td><code>True</code></td><td>Empirical-Bayes-shrink each grid's own cell means toward that grid's own grand mean; <code>False</code> emits raw, unshrunk cell means</td></tr>
+        <tr><td><code>split_criterion</code></td><td><code>"variance"</code></td><td><code>"correlation"</code> prefers a cut where a column's local relationship with <code>y</code> reverses sign over one that merely reduces variance — see <a href="how-it-works.html#correlation-aware-zone-boundaries">Correlation-Aware Zone Boundaries</a></td></tr>
         <tr><td><code>random_state</code></td><td><code>42</code></td><td>Accepted for interface consistency; fitting is fully deterministic given <code>X</code>/<code>y</code>, so this is currently unused</td></tr>
       </tbody>
     </table>
@@ -322,6 +324,7 @@
         <tr><td><code>min_zone_abs</code></td><td><code>20</code></td><td>Forwarded to every internal <code>ZoneProfileEncoder</code>/<code>ConditionalZoneGrid</code></td></tr>
         <tr><td><code>min_segment_size</code></td><td><code>50</code></td><td>Forwarded to every internal <code>ConditionalZoneGrid</code></td></tr>
         <tr><td><code>shrinkage</code></td><td><code>True</code></td><td>Forwarded to every internal <code>ZoneProfileEncoder</code>/<code>ConditionalZoneGrid</code></td></tr>
+        <tr><td><code>split_criterion</code></td><td><code>"variance"</code></td><td>Forwarded to every internal <code>ZoneProfileEncoder</code>/<code>ConditionalZoneGrid</code> — see <a href="how-it-works.html#correlation-aware-zone-boundaries">Correlation-Aware Zone Boundaries</a></td></tr>
         <tr><td><code>depth_ridge</code></td><td><code>1e-6</code></td><td>Forwarded to every internal <code>DepthTransformer</code> as its own <code>ridge</code> parameter</td></tr>
         <tr><td><code>random_state</code></td><td><code>42</code></td><td>Forwarded to every internal transformer</td></tr>
       </tbody>

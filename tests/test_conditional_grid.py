@@ -136,6 +136,20 @@ def test_unknown_segment_column_raises():
         ConditionalZoneGrid(columns=["x", "y"], segment_columns=["not_a_column"]).fit(X, target)
 
 
+def test_split_criterion_correlation_is_forwarded_and_default_unchanged():
+    X, target = _segment_flip_data()
+    default = ConditionalZoneGrid(columns=["x", "y"], segment_columns=["region"]).fit(X, target)
+    explicit = ConditionalZoneGrid(
+        columns=["x", "y"], segment_columns=["region"], split_criterion="variance"
+    ).fit(X, target)
+    pd.testing.assert_frame_equal(default.transform(X), explicit.transform(X))
+
+    corr = ConditionalZoneGrid(
+        columns=["x", "y"], segment_columns=["region"], split_criterion="correlation"
+    ).fit(X, target)
+    corr.transform(X)
+
+
 def test_works_inside_pipeline_and_column_transformer_with_linear_model():
     X, target = _segment_flip_data()
     ct = ColumnTransformer(

@@ -33,10 +33,12 @@ def _fit_grid(a: np.ndarray, b: np.ndarray, y: np.ndarray, sw: np.ndarray, param
     segment's own rows.
     """
     boundaries_a = adaptive_zone_boundaries(
-        a, y, params["max_zones"], params["min_zone_frac"], params["min_zone_abs"], sample_weight=sw
+        a, y, params["max_zones"], params["min_zone_frac"], params["min_zone_abs"], sample_weight=sw,
+        split_criterion=params["split_criterion"],
     )
     boundaries_b = adaptive_zone_boundaries(
-        b, y, params["max_zones"], params["min_zone_frac"], params["min_zone_abs"], sample_weight=sw
+        b, y, params["max_zones"], params["min_zone_frac"], params["min_zone_abs"], sample_weight=sw,
+        split_criterion=params["split_criterion"],
     )
     za = zone_index(a, boundaries_a)
     zb = zone_index(b, boundaries_b)
@@ -135,6 +137,13 @@ class ConditionalZoneGrid(BaseEstimator, TransformerMixin):
     shrinkage : bool, default=True
         Empirical-Bayes-shrink each grid's own cell means toward that
         grid's own grand mean. ``False`` emits raw, unshrunk cell means.
+    split_criterion : {"variance", "correlation"}, default="variance"
+        Forwarded to :func:`zoneboost._zones.adaptive_zone_boundaries` for
+        both ``columns`` -- ``"variance"`` (default) reproduces every
+        prior release exactly; ``"correlation"`` prefers a cut where a
+        column's local relationship with ``y`` reverses sign over one
+        that merely reduces variance. See "Correlation-aware zone
+        boundaries" in the docs.
     random_state : int, default=42
         Accepted for interface consistency; fitting is fully
         deterministic given ``X``/``y``, so this is currently unused.
@@ -172,6 +181,7 @@ class ConditionalZoneGrid(BaseEstimator, TransformerMixin):
         min_zone_abs: int = 20,
         min_segment_size: int = 50,
         shrinkage: bool = True,
+        split_criterion: str = "variance",
         random_state: int = 42,
     ):
         self.columns = columns
@@ -181,6 +191,7 @@ class ConditionalZoneGrid(BaseEstimator, TransformerMixin):
         self.min_zone_abs = min_zone_abs
         self.min_segment_size = min_segment_size
         self.shrinkage = shrinkage
+        self.split_criterion = split_criterion
         self.random_state = random_state
 
     def _resolve_names(self, X: pd.DataFrame, declared, label: str) -> list:
@@ -229,6 +240,7 @@ class ConditionalZoneGrid(BaseEstimator, TransformerMixin):
             "min_zone_frac": self.min_zone_frac,
             "min_zone_abs": self.min_zone_abs,
             "shrinkage": self.shrinkage,
+            "split_criterion": self.split_criterion,
         }
 
         self.global_grid_ = _fit_grid(a_vals, b_vals, y_arr, sw, params)

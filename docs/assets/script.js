@@ -122,6 +122,7 @@
     { title: "Depth Transformer", crumb: "How It Works", url: "how-it-works.html#depth-transformer" },
     { title: "Conditional Zone Grid", crumb: "How It Works", url: "how-it-works.html#conditional-zone-grid" },
     { title: "ZoneFeatureSpace", crumb: "How It Works", url: "how-it-works.html#zonefeaturespace" },
+    { title: "Correlation-Aware Zone Boundaries", crumb: "How It Works", url: "how-it-works.html#correlation-aware-zone-boundaries" },
     { title: "LLM Zone Naming (Optional)", crumb: "How It Works", url: "how-it-works.html#llm-zone-naming" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 

@@ -31,7 +31,7 @@ useful context on its own.
 | **ZoneForest** (bagged ensemble of shallow zone models) | Shipped | Notebook page 3 ("breaks down data to smaller samples & averages it out") | `src/zoneboost/_zone_forest.py` (`ZoneForest`) |
 | **Cythonize zone lookup/split search** | Proposed | Strategy discussion, not the notebook | Performance work inside `_zones.py`/`_weak_learner.py`'s existing lookup/split-search paths; no API change, no new opacity |
 | **ZoneFeatureSpace** (first-class transformer/feature-space API) | Shipped | Notebook page 2 ("1. the ado-transformer") | `src/zoneboost/_feature_space.py` (`ZoneFeatureSpace`) |
-| **Correlation-aware zone boundaries** | Proposed | Notebook page 2 ("correlation", "covariance") | Would extend `_zones.py`'s split search to also consider where a feature/residual correlation changes sign, not only where residual variance drops |
+| **Correlation-aware zone boundaries** | Shipped | Notebook page 2 ("correlation", "covariance") | `src/zoneboost/_zones.py` (`split_criterion="correlation"` on `adaptive_zone_boundaries`), threaded through `ZoneProfileEncoder`/`ConditionalZoneGrid`/`ZoneFeatureSpace` |
 | **zoneboost.eda** (`zone_boxplot`, `drift_dashboard`) | Proposed | Notebook page 2 ("compare outcome & variables boxplots") | Would live in a new `src/zoneboost/eda/` subpackage; visual, business-facing layer on top of the already-shipped `evidence_report()`/`compare_models()` |
 | **ZoneBoostTimeSeries** (native expanding/rolling/walk-forward fitting) | Proposed | Notebook page 3 ("sequential date pattern") | Would live in `src/zoneboost/_time_series.py`; fits one model per window and reuses `compare_models`/`flag_drift` across windows automatically |
 | **Signed contribution waterfall** (`plot_signed_contributions`) | Proposed | Notebook page 2 ("min-max scaler — direction included") | Would live alongside `_explain.py`; waterfall visualization of already-computed per-zone contributions, sign-colored rather than magnitude-only |
@@ -348,3 +348,59 @@ a per-row `asof_col` at transform -- a fundamentally different signature).
 See `src/zoneboost/_feature_space.py`, `README.md` ("ZoneFeatureSpace"),
 `docs/how-it-works.html` (`#zonefeaturespace`), `docs/api-reference.html`
 (`#feature-space-parameters`).
+
+**Correlation-aware zone boundaries.** `adaptive_zone_boundaries`
+(`_zones.py`) gains an opt-in `split_criterion="variance"|"correlation"`
+parameter. `"variance"` (the default, reproducing every prior release
+bit-for-bit -- verified, not just argued) is the existing regression-tree-
+style criterion: each cut most reduces `y`'s within-segment sum of
+squares. `"correlation"` instead prefers a cut where the local OLS slope
+of `y` on the column **reverses sign** left vs. right of it -- a genuine
+regime change (a threshold effect, a U-shape's vertex), not just a level
+shift, computed via the same vectorized running-sums technique
+`_best_split` already uses (three more cumulative sums: `Sx`, `Sxx`,
+`Sxy`), so it stays the same complexity class, not asymptotically worse.
+
+A design correction made *before* writing any code, not after: the
+naive version (per-segment, try a correlation split then fall back to a
+variance split) would have compared two genuinely incommensurate gain
+scales directly (slope units vs. sum-of-squares units) in the outer
+recursive loop's cross-segment "pick the single best gain" comparison --
+caught during scoping and fixed with a two-phase, lexicographic rule
+instead: each iteration first scans *every* open segment for a genuine
+sign-reversal candidate and, if any exists, splits the best one by its
+own correlation-mode gain; only once **no** open segment has a reversal
+candidate does the loop fall back to ordinary variance-reduction splits
+for whatever remains -- the two gain scales are never compared against
+each other, only ever against their own kind.
+
+Scoped down deliberately on two axes, both decided by asking rather than
+assuming: threaded through `ZoneProfileEncoder`/`ConditionalZoneGrid`/
+`ZoneFeatureSpace` only, **not** `ZoneBoostRegressor`'s own per-round
+split search (`_weak_learner.py`, called every round for every column --
+by far the highest-frequency, highest-blast-radius call site) -- the same
+precedent `ConditionalZoneGrid` itself set by shipping standalone before
+any boosting-loop integration; and a segment with no genuine reversal
+falls back to a plain variance split rather than leaving zero splits on a
+monotonic column, a real (disclosed) blend rather than a strict
+"every boundary here is a proven reversal" guarantee. No significance
+test on the slope (no t-statistic/p-value) -- a cheap heuristic (the
+slope must come out exactly nonzero after a guarded division), disclosed
+as such, not a calibrated test for whether a reversal is real versus
+sampling noise.
+
+Measured, not just argued, before documenting it: on a sharp V-shape
+(`y = |x - 2| + noise`, a genuine abrupt regime switch), `"correlation"`
+placed its boundary at `2.13` (error `0.13` from the true kink at `x=2`)
+versus `-4.41` (error `6.41`) for `"variance"`. On a smooth parabola
+(`y = (x - 2)^2 + noise`), where the local slope itself vanishes exactly
+at the true vertex, `"correlation"` landed at `4.07` (error `2.07`)
+versus `-5.76` (error `7.76`) for `"variance"` -- still clearly better,
+but visibly less precise than the sharp-kink case, an honest, disclosed
+characteristic (best for abrupt/threshold-like reversals) rather than a
+universal "finds the exact reversal point" claim. See
+`src/zoneboost/_zones.py`, `README.md` ("Correlation-aware zone
+boundaries"), `docs/how-it-works.html`
+(`#correlation-aware-zone-boundaries`), and the `split_criterion` row in
+the `ZoneProfileEncoder`/`ConditionalZoneGrid`/`ZoneFeatureSpace`
+parameter tables in both `README.md` and `docs/api-reference.html`.
