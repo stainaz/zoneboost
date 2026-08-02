@@ -27,6 +27,7 @@ from ._laplace_history import LaplaceHistoryTransformer
 from ._sql_export import compile_to_sql
 from ._survival import ZoneBoostSurvival
 from ._version import __version__
+from ._zone_forest import ZoneForest
 from ._zone_namer import LLMZoneNamer
 from ._zone_profile import ZoneProfileEncoder
 from .classifier import ZoneBoostClassifier
@@ -37,6 +38,7 @@ __all__ = [
     "ZoneBoostClassifier",
     "ConformalizedQuantileRegressor",
     "BootstrapStability",
+    "ZoneForest",
     "ZoneBoostSurvival",
     "ZoneProfileEncoder",
     "DepthTransformer",

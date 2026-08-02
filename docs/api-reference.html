@@ -173,6 +173,27 @@
     <code>bootstrap_models_</code> — the <code>n_bootstrap</code> fitted clones, in
     resampling order.</p>
 
+    <h2 id="zoneforest-parameters">ZoneForest Parameters</h2>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>base_estimator</code></td><td><code>None</code></td><td>Unfit template exposing <code>fit</code>/<code>predict</code>/<code>explain</code> (typically a <code>ZoneBoostRegressor</code>); <code>None</code> uses a plain <code>ZoneBoostRegressor()</code>. Cloned and refit once per estimator — only <code>random_state</code> is overridden per clone — see <a href="how-it-works.html#zoneforest">ZoneForest</a></td></tr>
+        <tr><td><code>n_estimators</code></td><td><code>100</code></td><td>Number of bootstrap resamples / fitted clones</td></tr>
+        <tr><td><code>max_samples</code></td><td><code>1.0</code></td><td>Bootstrap draw size as a fraction of the training set, rows drawn <strong>with replacement</strong> (<code>1.0</code> is the classic same-size bootstrap). Must be in <code>(0, 1]</code></td></tr>
+        <tr><td><code>max_features</code></td><td><code>1.0</code></td><td>Fraction of columns drawn <strong>without replacement</strong> for each estimator's own fixed column subset, drawn once at <code>fit</code> time. Must be in <code>(0, 1]</code>; <code>base_estimator.group_col</code>/<code>mondrian_col</code> are force-included regardless of this draw</td></tr>
+        <tr><td><code>n_jobs</code></td><td><code>None</code></td><td>Passed to <code>joblib.Parallel</code> — <code>None</code> is sequential, <code>-1</code> uses every core</td></tr>
+        <tr><td><code>random_state</code></td><td><code>42</code></td><td>Seed for every bootstrap/column draw and each clone's own derived seed</td></tr>
+      </tbody>
+    </table>
+    <p><code>ZoneForest</code> fitted attributes:</p>
+    <table>
+      <tbody>
+        <tr><td><code>estimators_</code></td><td>The <code>n_estimators</code> fitted clones, in resampling order.</td></tr>
+        <tr><td><code>estimators_samples_</code></td><td>Each estimator's own bootstrap row indices (into the original training <code>X</code>), same order as <code>estimators_</code>.</td></tr>
+        <tr><td><code>estimators_features_</code></td><td>Each estimator's own column subset (as column names), same order as <code>estimators_</code>.</td></tr>
+      </tbody>
+    </table>
+
     <h2 id="survival-parameters">ZoneBoostSurvival Parameters</h2>
     <table>
       <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>

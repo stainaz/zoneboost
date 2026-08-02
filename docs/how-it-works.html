@@ -991,6 +991,103 @@ lower, upper = cqr.predict_interval(X)</code></pre>
     changes output on data where crossing didn't occur (verified directly, not just
     argued).</p>
 
+    <h2 id="zoneforest">ZoneForest</h2>
+    <p>The notebook pages behind zoneboost describe fitting on many small samples and
+    averaging the results — a different paradigm from the sequential boosting
+    <code>ZoneBoostRegressor</code> performs on one sample. <code>ZoneForest</code> is
+    that averaging paradigm: Random Forest's bootstrap-aggregating formula, with
+    interaction-aware, fully explainable zone-based estimators standing in for opaque
+    trees.</p>
+    <pre><code>from zoneboost import ZoneForest, ZoneBoostRegressor
+
+model = ZoneForest(
+    base_estimator=ZoneBoostRegressor(n_rounds=20),  # shallow, transparent
+    n_estimators=100,        # 100 bootstrap resamples
+    max_samples=0.7,         # smaller samples per fit
+    max_features=0.7,        # column subsampling
+    n_jobs=-1,               # embarrassingly parallel
+    random_state=0,
+).fit(X, y)
+
+model.predict(X)
+model.explain(X)              # mean per-term contribution across the ensemble
+model.feature_importance(X)</code></pre>
+    <p>Each of <code>n_estimators</code> clones is fit on its own bootstrap resample (rows
+    drawn <strong>with replacement</strong>, the standard nonparametric bootstrap — same
+    convention as <code>BootstrapStability</code>) and its own fixed column subset (drawn
+    once per estimator, without replacement) — <code>max_samples</code>/
+    <code>max_features</code> control the size of each. <code>base_estimator</code>'s own
+    internal <code>row_subsample</code>/<code>col_subsample</code> then apply <em>on top
+    of</em> that already-reduced view every boosting round, the same way Random Forest's
+    per-split feature sampling compounds with each tree's own bootstrap sample.</p>
+    <p>Fits are dispatched via <code>joblib.Parallel</code> — embarrassingly parallel,
+    unlike <code>ZoneBoostRegressor</code>'s inherently sequential boosting rounds. All
+    resampling draws (bootstrap indices, column subsets, per-estimator seeds) are made
+    sequentially from one <code>rng</code> <em>before</em> dispatch, so the fitted
+    ensemble is identical regardless of <code>n_jobs</code>.</p>
+    <p><code>predict(X)</code> is the plain mean of every estimator's own
+    <code>predict(X)</code>. <code>explain(X)</code> is the plain mean of every
+    estimator's own <code>explain(X)</code>, aligned by term name — a term some
+    estimators never fit (their column subset excluded a constituent column, or that
+    round's own screening dropped it) contributes exactly <code>0</code> for those
+    estimators, not a re-normalized share, so <code>explain(X)</code> still sums to
+    <code>predict(X)</code> exactly.</p>
+    <p><code>base_estimator.group_col</code>/<code>mondrian_col</code> (when set) are
+    force-included in every estimator's column subset regardless of the
+    <code>max_features</code> draw — those two params raise <code>ValueError</code> from
+    the base estimator's own <code>fit</code> if the declared column is simply absent
+    from its view of <code>X</code>, the same "never subsampled away" guarantee
+    <code>ZoneBoostRegressor.group_col</code> already makes against its own internal
+    <code>col_subsample</code>. Every other column-selecting parameter
+    (<code>categorical_features</code>, <code>monotonic_constraints</code>,
+    <code>forbidden_interactions</code>, ...) degrades silently instead — that
+    estimator's own resolution logic already treats a declared-but-absent column as a
+    harmless no-op.</p>
+    <p><strong>Measured, honestly</strong>, on synthetic data with a genuine
+    <code>2*x1 + 1.5*sin(x2) + 0.8*x1*x3</code> relationship plus 5 pure-noise columns
+    (6000 rows, 70/30 train/test split): a single <code>ZoneBoostRegressor(n_rounds=300)</code>
+    achieved held-out RMSE <strong>1.039</strong> (11.6s to fit). A single
+    <em>matched-capacity</em> <code>ZoneBoostRegressor(n_rounds=30)</code> — the same base
+    estimator <code>ZoneForest</code> below bags, fit alone — scored <strong>1.431</strong>.
+    <code>ZoneForest(ZoneBoostRegressor(n_rounds=30), n_estimators=50, max_samples=0.8,
+    max_features=1.0)</code> (row bagging only) recovered most of that gap at
+    <strong>1.546</strong>, close to the matched single fit — confirming bagging a shallow
+    learner reduces <em>variance</em>, not the <em>bias</em> lost from fewer boosting
+    rounds. Adding <code>max_features=0.8</code> on top made RMSE meaningfully
+    <strong>worse</strong> (<strong>2.195</strong>): with a genuine <code>x1 x x3</code>
+    interaction, any member whose random column draw excludes either <code>x1</code> or
+    <code>x3</code> can't see that interaction at all — column subsampling traded real
+    accuracy for diversity here, worth knowing before defaulting to it on interaction-heavy
+    data (a lower <code>max_features</code> earns its keep more clearly where
+    <em>noise</em> columns, not genuine interactions, are what needs decorrelating across
+    members).</p>
+    <p>Where <code>ZoneForest</code> clearly won: refit-to-refit stability. Refitting each
+    config 10 times at different <code>random_state</code>s, the mean per-row prediction
+    standard deviation across refits was <strong>0.271</strong> for the single shallow
+    model (<code>n_rounds=30</code>) versus <strong>0.165</strong> for
+    <code>ZoneForest(max_samples=0.8, max_features=0.8)</code> — a real variance
+    reduction, the bagging effect the sketches described. <code>n_jobs=-1</code> also cut
+    <code>ZoneForest</code>'s own fit time from <strong>40.5s</strong> (sequential) to
+    <strong>18.2s</strong> on this machine — parallel bagging beat sequential boosting on
+    wall clock even though this bagged config used far more total boosting rounds
+    (50 x 30 = 1500) than the single deep fit's 300. The headline, honest takeaway:
+    bagging shallow zone models is a genuine variance-reduction and parallelism win, not a
+    drop-in accuracy replacement for a deeper sequential fit — pick <code>ZoneForest</code>
+    for stability and speed, not to beat a well-tuned <code>ZoneBoostRegressor</code> on
+    raw RMSE.</p>
+    <div class="note">
+      <strong>Scope:</strong> regressor-only in this pass — a
+      <code>ZoneBoostClassifier</code> <code>base_estimator</code> (majority vote or
+      averaged <code>predict_proba</code>) is deferred, a separate, larger change to
+      aggregation. No native prediction-interval/spread method either: uncertainty stays
+      <code>BootstrapStability</code>'s job (compose the two,
+      <code>BootstrapStability(ZoneForest(...))</code>, if both are wanted) rather than
+      adding a second, overlapping API for the same kind of question. No memmapping
+      optimization — with process-based parallelism (<code>n_jobs != None</code>), each
+      worker receives its own copy of <code>X</code>/<code>y</code>, a real memory cost
+      on large datasets, disclosed rather than optimized around here.
+    </div>
+
     <h2 id="global-shape-constraints">Global Shape Constraints</h2>
     <p>Four related mechanisms for declaring shape knowledge the model has no way to
     infer on its own — all <strong>opt-in</strong>, all main-effects-focused, all reusing

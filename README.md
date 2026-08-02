@@ -1162,6 +1162,110 @@ rearrangement never increases estimation risk, and is a no-op wherever a
 row was already ordered, so this never changes output on data where
 crossing didn't occur (verified directly, not just argued).
 
+### ZoneForest
+
+The notebook pages behind zoneboost describe fitting on many small samples
+and averaging the results — a different paradigm from the sequential
+boosting `ZoneBoostRegressor` performs on one sample. `ZoneForest` is that
+averaging paradigm: Random Forest's bootstrap-aggregating formula, with
+interaction-aware, fully explainable zone-based estimators standing in for
+opaque trees.
+
+```python
+from zoneboost import ZoneForest, ZoneBoostRegressor
+
+model = ZoneForest(
+    base_estimator=ZoneBoostRegressor(n_rounds=20),  # shallow, transparent
+    n_estimators=100,        # 100 bootstrap resamples
+    max_samples=0.7,         # smaller samples per fit
+    max_features=0.7,        # column subsampling
+    n_jobs=-1,               # embarrassingly parallel
+    random_state=0,
+).fit(X, y)
+
+model.predict(X)
+model.explain(X)              # mean per-term contribution across the ensemble
+model.feature_importance(X)
+```
+
+Each of `n_estimators` clones is fit on its own bootstrap resample (rows
+drawn **with replacement**, the standard nonparametric bootstrap — same
+convention as `BootstrapStability`) and its own fixed column subset (drawn
+once per estimator, without replacement) — `max_samples`/`max_features`
+control the size of each. `base_estimator`'s own internal `row_subsample`/
+`col_subsample` then apply *on top of* that already-reduced view every
+boosting round, the same way Random Forest's per-split feature sampling
+compounds with each tree's own bootstrap sample.
+
+Fits are dispatched via `joblib.Parallel` — embarrassingly parallel,
+unlike `ZoneBoostRegressor`'s inherently sequential boosting rounds. All
+resampling draws (bootstrap indices, column subsets, per-estimator seeds)
+are made sequentially from one `rng` *before* dispatch, so the fitted
+ensemble is identical regardless of `n_jobs`.
+
+`predict(X)` is the plain mean of every estimator's own `predict(X)`.
+`explain(X)` is the plain mean of every estimator's own `explain(X)`,
+aligned by term name — a term some estimators never fit (their column
+subset excluded a constituent column, or that round's own screening
+dropped it) contributes exactly `0` for those estimators, not a
+re-normalized share, so `explain(X)` still sums to `predict(X)` exactly.
+
+`base_estimator.group_col`/`mondrian_col` (when set) are force-included in
+every estimator's column subset regardless of the `max_features` draw —
+those two params raise `ValueError` from the base estimator's own `fit` if
+the declared column is simply absent from its view of `X`, the same
+"never subsampled away" guarantee `ZoneBoostRegressor.group_col` already
+makes against its own internal `col_subsample`. Every other
+column-selecting parameter (`categorical_features`,
+`monotonic_constraints`, `forbidden_interactions`, ...) degrades silently
+instead — that estimator's own resolution logic already treats a
+declared-but-absent column as a harmless no-op.
+
+**Measured, honestly**, on synthetic data with a genuine `2*x1 + 1.5*sin(x2)
++ 0.8*x1*x3` relationship plus 5 pure-noise columns (6000 rows, 70/30
+train/test split): a single `ZoneBoostRegressor(n_rounds=300)` achieved
+held-out RMSE **1.039** (11.6s to fit). A single *matched-capacity*
+`ZoneBoostRegressor(n_rounds=30)` — the same base estimator `ZoneForest`
+below bags, fit alone — scored **1.431**.
+`ZoneForest(ZoneBoostRegressor(n_rounds=30), n_estimators=50,
+max_samples=0.8, max_features=1.0)` (row bagging only) recovered most of
+that gap at **1.546**, close to the matched single fit — confirming
+bagging a shallow learner reduces *variance*, not the *bias* lost from
+fewer boosting rounds. Adding `max_features=0.8` on top made RMSE
+meaningfully **worse** (**2.195**): with a genuine `x1 x x3` interaction,
+any member whose random column draw excludes either `x1` or `x3` can't
+see that interaction at all — column subsampling traded real accuracy for
+diversity here, worth knowing before defaulting to it on interaction-heavy
+data (a lower `max_features` earns its keep more clearly where *noise*
+columns, not genuine interactions, are what needs decorrelating across
+members).
+
+Where `ZoneForest` clearly won: refit-to-refit stability. Refitting each
+config 10 times at different `random_state`s, the mean per-row prediction
+standard deviation across refits was **0.271** for the single shallow
+model (`n_rounds=30`) versus **0.165** for
+`ZoneForest(max_samples=0.8, max_features=0.8)` — a real variance
+reduction, the bagging effect the sketches described. `n_jobs=-1` also cut
+`ZoneForest`'s own fit time from **40.5s** (sequential) to **18.2s** on
+this machine — parallel bagging beat sequential boosting on wall clock
+even though this bagged config used far more total boosting rounds
+(50 x 30 = 1500) than the single deep fit's 300. The headline, honest
+takeaway: bagging shallow zone models is a genuine variance-reduction and
+parallelism win, not a drop-in accuracy replacement for a deeper
+sequential fit — pick `ZoneForest` for stability and speed, not to beat a
+well-tuned `ZoneBoostRegressor` on raw RMSE.
+
+**Scope**: regressor-only in this pass — a `ZoneBoostClassifier`
+`base_estimator` (majority vote or averaged `predict_proba`) is deferred,
+a separate, larger change to aggregation. No native prediction-interval/
+spread method either: uncertainty stays `BootstrapStability`'s job
+(compose the two, `BootstrapStability(ZoneForest(...))`, if both are
+wanted) rather than adding a second, overlapping API for the same kind of
+question. No memmapping optimization — with process-based parallelism
+(`n_jobs != None`), each worker receives its own copy of `X`/`y`, a real
+memory cost on large datasets, disclosed rather than optimized around
+here.
+
 ### Compile to SQL scorecard
 
 `compile_to_sql(model)` compiles a fitted `ZoneBoostRegressor` to a
@@ -1636,6 +1740,22 @@ scores on the calibration split — the margin `predict_interval` draws from).
 
 Fitted attribute: `bootstrap_models_` — the `n_bootstrap` fitted clones, in
 resampling order.
+
+## ZoneForest parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `base_estimator` | `None` | Unfit template exposing `fit`/`predict`/`explain` (typically a `ZoneBoostRegressor`); `None` uses a plain `ZoneBoostRegressor()`. Cloned and refit once per estimator — only `random_state` is overridden per clone. See "ZoneForest" above |
+| `n_estimators` | 100 | Number of bootstrap resamples / fitted clones |
+| `max_samples` | 1.0 | Bootstrap draw size as a fraction of the training set, rows drawn **with replacement** (`1.0` is the classic same-size bootstrap). Must be in `(0, 1]` |
+| `max_features` | 1.0 | Fraction of columns drawn **without replacement** for each estimator's own fixed column subset, drawn once at `fit` time. Must be in `(0, 1]`; `base_estimator.group_col`/`mondrian_col` are force-included regardless of this draw |
+| `n_jobs` | `None` | Passed to `joblib.Parallel` — `None` is sequential, `-1` uses every core |
+| `random_state` | 42 | Seed for every bootstrap/column draw and each clone's own derived seed |
+
+Fitted attributes: `estimators_` (the `n_estimators` fitted clones, in
+resampling order), `estimators_samples_` (each estimator's own bootstrap
+row indices), `estimators_features_` (each estimator's own column subset,
+as column names).
 
 ## ZoneBoostSurvival parameters
 

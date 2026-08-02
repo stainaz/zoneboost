@@ -28,6 +28,14 @@ useful context on its own.
 | **Laplace history transformer** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_laplace_history.py` (`LaplaceHistoryTransformer`) |
 | **Depth crowd (wisdom-of-the-crowd aggregation)** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_depth_crowd.py` (`DepthCrowd`) |
 | **Categorical depth transformer** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_categorical_depth.py` (`CategoricalDepthTransformer`) |
+| **ZoneForest** (bagged ensemble of shallow zone models) | Shipped | Notebook page 3 ("breaks down data to smaller samples & averages it out") | `src/zoneboost/_zone_forest.py` (`ZoneForest`) |
+| **Cythonize zone lookup/split search** | Proposed | Strategy discussion, not the notebook | Performance work inside `_zones.py`/`_weak_learner.py`'s existing lookup/split-search paths; no API change, no new opacity |
+| **ZoneFeatureSpace** (first-class transformer/feature-space API) | Proposed | Notebook page 2 ("1. the ado-transformer") | Would live in `src/zoneboost/_feature_space.py`; wraps `ZoneProfileEncoder`/`DepthTransformer`/`ConditionalZoneGrid` behind one `fit_transform`/`explain` entry point usable ahead of any downstream model |
+| **Correlation-aware zone boundaries** | Proposed | Notebook page 2 ("correlation", "covariance") | Would extend `_zones.py`'s split search to also consider where a feature/residual correlation changes sign, not only where residual variance drops |
+| **zoneboost.eda** (`zone_boxplot`, `drift_dashboard`) | Proposed | Notebook page 2 ("compare outcome & variables boxplots") | Would live in a new `src/zoneboost/eda/` subpackage; visual, business-facing layer on top of the already-shipped `evidence_report()`/`compare_models()` |
+| **ZoneBoostTimeSeries** (native expanding/rolling/walk-forward fitting) | Proposed | Notebook page 3 ("sequential date pattern") | Would live in `src/zoneboost/_time_series.py`; fits one model per window and reuses `compare_models`/`flag_drift` across windows automatically |
+| **Signed contribution waterfall** (`plot_signed_contributions`) | Proposed | Notebook page 2 ("min-max scaler — direction included") | Would live alongside `_explain.py`; waterfall visualization of already-computed per-zone contributions, sign-colored rather than magnitude-only |
+| **Spline zones** (bounded linear trend within a zone) | Proposed | Notebook page 1 ("genuinely continuous relationship") | Would extend `_weak_learner.py`'s per-zone constant mean to an optional per-zone linear fit, still bounded by zone edges — not a recursive split |
 
 ## Detail
 
@@ -256,3 +264,43 @@ to a raw count. See `src/zoneboost/_categorical_depth.py`, `README.md`
 ("Categorical depth transformer"), `docs/how-it-works.html`
 (`#categorical-depth-transformer`), `docs/api-reference.html`
 (`#categorical-depth-parameters`).
+
+**ZoneForest.** `ZoneForest(base_estimator=None, n_estimators=100,
+max_samples=1.0, max_features=1.0, n_jobs=None, random_state=42)` is the
+"averaging" paradigm the notebook describes, distinct from
+`ZoneBoostRegressor`'s sequential-boosting-on-one-sample paradigm: bags
+`n_estimators` clones of `base_estimator` (default a plain
+`ZoneBoostRegressor()`), each fit on its own bootstrap resample (rows with
+replacement -- same convention as `BootstrapStability`) and its own fixed
+column subset (drawn once per estimator, without replacement), dispatched
+via `joblib.Parallel`. `predict`/`explain`/`feature_importance` all reduce
+to plain means across the ensemble -- `explain(X)` still sums exactly to
+`predict(X)` (a term some estimators never fit, because column
+subsampling excluded a constituent column, contributes exactly `0` for
+those estimators, not a re-normalized share -- linearity of the mean
+preserves the exact-sum guarantee). `base_estimator.group_col`/
+`mondrian_col` are force-included in every estimator's column subset
+regardless of `max_features`, the same "never subsampled away" precedent
+`ZoneBoostRegressor.group_col` already sets against its own internal
+`col_subsample` -- those two params are the only ones that would otherwise
+raise `ValueError` from a base estimator whose own view of `X` is simply
+missing a declared column; every other column-selecting param (
+`categorical_features`, `monotonic_constraints`, ...) already degrades
+silently when a declared column is absent, so isn't specially handled.
+Measured honestly rather than assumed: bagging shallow learners here
+turned out to be a genuine variance-reduction and parallel-speed win, not
+an accuracy win over a single well-tuned deep `ZoneBoostRegressor` fit --
+worse still, `max_features < 1.0` measurably hurt RMSE on data with a
+genuine interaction (a bagged member missing either of an interaction's
+two constituent columns can't see that interaction at all), a real,
+disclosed bias/diversity tradeoff rather than a free regularization.
+Scoped down from the original pitch to regressor-only (a
+`ZoneBoostClassifier` `base_estimator` -- majority vote or averaged
+`predict_proba` -- is a separate, larger aggregation change, deferred)
+and with no native prediction-interval/spread method of its own
+(uncertainty stays `BootstrapStability`'s job; compose the two,
+`BootstrapStability(ZoneForest(...))`, if both are wanted, rather than a
+second overlapping API for the same kind of question). See
+`src/zoneboost/_zone_forest.py`, `README.md` ("ZoneForest"),
+`docs/how-it-works.html` (`#zoneforest`), `docs/api-reference.html`
+(`#zoneforest-parameters`).
