@@ -1555,6 +1555,80 @@ via `ColumnTransformer`/`FeatureUnion` for more.
 grid's grand mean) — no second, hierarchical level additionally pulling a
 segment's cell toward the global grid's corresponding cell.
 
+## ZoneFeatureSpace
+
+The notebook pages list "the ado-transformer" as step one, ahead of any
+modeling — feature engineering first. `ZoneProfileEncoder`,
+`DepthTransformer`, `CategoricalDepthTransformer`, and
+`ConditionalZoneGrid` are already `sklearn` `TransformerMixin`s, composable
+via a plain `FeatureUnion` today with zero new code. `ZoneFeatureSpace`
+doesn't reinvent that — it's a thin, convenience-first orchestrator over
+the same four, plus two things a bare `FeatureUnion` doesn't give you:
+rolling a downstream model's coefficients/importances back to each
+*original* raw column, and a cheap candidate-pair suggester for
+`ConditionalZoneGrid`.
+
+```python
+from zoneboost import ZoneFeatureSpace
+from sklearn.linear_model import LogisticRegression
+
+space = ZoneFeatureSpace(
+    zone_profiles=True,                              # ZoneProfileEncoder over every column
+    depth_scores=[("financial", ["debt", "income"])], # one named DepthTransformer group
+    categorical_depth_scores=True,                    # CategoricalDepthTransformer over every categorical column
+    conditional_grids=[("price", "sqft", ["region"])],# one ConditionalZoneGrid
+)
+X_zoned = space.fit_transform(X, y)
+
+model = LogisticRegression().fit(X_zoned, y)
+space.explain(model.coef_[0])   # Series indexed by ORIGINAL raw column, rolled up
+```
+
+`depth_scores`/`categorical_depth_scores` accept `True` (one instance over
+every numeric/categorical column, matching that transformer's own
+default), or a list where each entry is either a plain `list` of columns
+(auto-named) or a `(name, columns)` tuple — list-vs-tuple is the
+disambiguator. `conditional_grids` is a list of `(col_a, col_b,
+segment_columns)` triples, always explicit — never auto-discovered (see
+`suggest_interactions` below for a suggestion helper, not an auto-builder).
+`zone_profiles`/`conditional_grids` are supervised and require `y` at
+`fit`; `depth_scores`/`categorical_depth_scores` are unsupervised and
+ignore it.
+
+**`explain(values)`** is the standout new capability. At `fit` time,
+`ZoneFeatureSpace` records — directly off each sub-transformer's own
+`columns_`/`segment_columns_` attributes, **not** parsed from the output
+column name string (a raw column like `"annual_income"` would make
+name-parsing ambiguous) — which original raw column(s) fed every output
+column it builds. `explain(values)` then takes any downstream model's
+`coef_`/`feature_importances_` (aligned to `get_feature_names_out()`) and
+sums `abs(value)` back to each raw column. An output column with more than
+one source (an interaction, or a joint depth/grid group) contributes its
+**full**, undivided magnitude to *every* one of its source columns — never
+split between them, the same "never divided back between parent
+variables" rule `ZoneBoostRegressor.explain()` itself follows.
+
+**`suggest_interactions(X, y, top_k=10)`** is the scoped-down version of
+"auto" interaction discovery. For every candidate continuous pair, it fits
+`y ~ a + b` by plain least squares and scores the pair by the absolute
+correlation between that fit's residual and the centered product `(a -
+mean(a)) * (b - mean(b))` — a cheap proxy for "is there multiplicative
+interaction signal left over after each column's own additive effect is
+removed." Returns ranked `(col_a, col_b)` tuples **to review**, never
+auto-fits a grid, and never guesses `segment_columns` (a materially harder,
+separate problem left to you). This is a real, disclosed step down from
+`ZoneBoostRegressor`'s own cross-fitted, zone-based pair screening
+(`max_pair_interactions`) — not a replacement for it, just cheap enough to
+run before any model exists at all.
+
+**Deferred, disclosed**: `DepthCrowd` (aggregates *already-built* depth
+outputs — an aggregator-of-aggregators, not a `columns -> features` step
+this class's flat toggles can represent) and `LaplaceHistoryTransformer`
+(needs a second `event_history` table and a per-row `asof_col` at
+transform — a fundamentally different signature, see below). Build either
+separately and combine with `ZoneFeatureSpace`'s own output via
+`FeatureUnion` if wanted.
+
 ## Laplace history transformer
 
 Exponential (half-life) decay-weighted aggregation of a per-entity event
@@ -1839,6 +1913,28 @@ Fitted attributes: `columns_` (columns actually encoded, in fitted order).
 Fitted attributes: `segment_grids_` (`{segment_key: grid}` for every
 segment that met `min_segment_size`), `global_grid_` (the pooled fallback
 grid).
+
+## ZoneFeatureSpace parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `zone_profiles` | `True` | `True` fits one `ZoneProfileEncoder` over every column of `X`; a list encodes only those columns; `False` disables it. Supervised — requires `y` at `fit` whenever enabled |
+| `categorical_features` | `None` | Forwarded to the internal `ZoneProfileEncoder` only |
+| `depth_scores` | `False` | `True` fits one `DepthTransformer` over every numeric column; a list declares explicit groups (`list` of columns = auto-named, `(name, columns)` tuple = named); `False` disables it. Unsupervised |
+| `categorical_depth_scores` | `False` | Same shape as `depth_scores`, but `CategoricalDepthTransformer` over categorical/binary columns. Unsupervised |
+| `conditional_grids` | `None` | List of `(col_a, col_b, segment_columns)` triples, one `ConditionalZoneGrid` per triple — explicit only, never auto-discovered (see `suggest_interactions`). Supervised — requires `y` at `fit` whenever non-empty |
+| `max_zones` | 7 | Forwarded to every internal `ZoneProfileEncoder`/`ConditionalZoneGrid` |
+| `min_zone_frac` | 0.02 | Forwarded to every internal `ZoneProfileEncoder`/`ConditionalZoneGrid` |
+| `min_zone_abs` | 20 | Forwarded to every internal `ZoneProfileEncoder`/`ConditionalZoneGrid` |
+| `min_segment_size` | 50 | Forwarded to every internal `ConditionalZoneGrid` |
+| `shrinkage` | `True` | Forwarded to every internal `ZoneProfileEncoder`/`ConditionalZoneGrid` |
+| `depth_ridge` | 1e-6 | Forwarded to every internal `DepthTransformer` as its own `ridge` parameter |
+| `random_state` | 42 | Forwarded to every internal transformer |
+
+Fitted attributes: `transformers_` (the fitted sub-transformer instances,
+in output order). Methods beyond `fit`/`transform`: `explain(values)` and
+`suggest_interactions(X, y, columns=None, top_k=10)` — see "ZoneFeatureSpace"
+above.
 
 ## LaplaceHistoryTransformer parameters
 

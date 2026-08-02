@@ -30,7 +30,7 @@ useful context on its own.
 | **Categorical depth transformer** | **Shipped** | Strategy discussion, not the notebook | `src/zoneboost/_categorical_depth.py` (`CategoricalDepthTransformer`) |
 | **ZoneForest** (bagged ensemble of shallow zone models) | Shipped | Notebook page 3 ("breaks down data to smaller samples & averages it out") | `src/zoneboost/_zone_forest.py` (`ZoneForest`) |
 | **Cythonize zone lookup/split search** | Proposed | Strategy discussion, not the notebook | Performance work inside `_zones.py`/`_weak_learner.py`'s existing lookup/split-search paths; no API change, no new opacity |
-| **ZoneFeatureSpace** (first-class transformer/feature-space API) | Proposed | Notebook page 2 ("1. the ado-transformer") | Would live in `src/zoneboost/_feature_space.py`; wraps `ZoneProfileEncoder`/`DepthTransformer`/`ConditionalZoneGrid` behind one `fit_transform`/`explain` entry point usable ahead of any downstream model |
+| **ZoneFeatureSpace** (first-class transformer/feature-space API) | Shipped | Notebook page 2 ("1. the ado-transformer") | `src/zoneboost/_feature_space.py` (`ZoneFeatureSpace`) |
 | **Correlation-aware zone boundaries** | Proposed | Notebook page 2 ("correlation", "covariance") | Would extend `_zones.py`'s split search to also consider where a feature/residual correlation changes sign, not only where residual variance drops |
 | **zoneboost.eda** (`zone_boxplot`, `drift_dashboard`) | Proposed | Notebook page 2 ("compare outcome & variables boxplots") | Would live in a new `src/zoneboost/eda/` subpackage; visual, business-facing layer on top of the already-shipped `evidence_report()`/`compare_models()` |
 | **ZoneBoostTimeSeries** (native expanding/rolling/walk-forward fitting) | Proposed | Notebook page 3 ("sequential date pattern") | Would live in `src/zoneboost/_time_series.py`; fits one model per window and reuses `compare_models`/`flag_drift` across windows automatically |
@@ -304,3 +304,47 @@ second overlapping API for the same kind of question). See
 `src/zoneboost/_zone_forest.py`, `README.md` ("ZoneForest"),
 `docs/how-it-works.html` (`#zoneforest`), `docs/api-reference.html`
 (`#zoneforest-parameters`).
+
+**ZoneFeatureSpace.** `ZoneFeatureSpace(zone_profiles=True,
+categorical_features=None, depth_scores=False,
+categorical_depth_scores=False, conditional_grids=None, ...)` is a thin,
+convenience-first orchestrator over transformers that were already
+`sklearn` `TransformerMixin`s composable via a plain `FeatureUnion` with
+zero new code (`ZoneProfileEncoder`, `DepthTransformer`,
+`CategoricalDepthTransformer`, `ConditionalZoneGrid`) -- checked against
+"what's already free" before building new API surface, the same
+discipline `DepthCrowd`'s own scoping applied. What survived that check as
+genuinely new: `explain(values)`, which rolls a downstream model's
+`coef_`/`feature_importances_` (aligned to `get_feature_names_out()`)
+back to each **original raw column**, tracked via each sub-transformer's
+own `columns_`/`segment_columns_` attributes at `fit` time rather than
+parsed from the output column name string (a raw column like
+`"annual_income"` would make name-parsing genuinely ambiguous against the
+`__` suffix convention every transformer here shares) -- an output column
+with more than one source contributes its full, undivided magnitude to
+every one of its source columns, the same "never divided back between
+parent variables" rule `ZoneBoostRegressor.explain()` itself follows. Also
+new: `suggest_interactions(X, y, columns=None, top_k=10)`, a deliberately
+scoped-down answer to the original pitch's `interaction_candidates="auto"`
+-- checked whether `_weak_learner.py`'s own cross-fitted pair-screening
+proxy (`_pair_interaction_score`) could be reused directly, and it
+couldn't cleanly: it's entangled with a boosting round's own zone
+construction, cross-fitting folds, and residual, so exposing it standalone
+would mean either duplicating real internal machinery or building a
+cruder heuristic and disclosing that it's cruder. Chose the latter,
+honestly: scores each candidate pair by the absolute correlation between
+an OLS `y ~ a + b` fit's residual and the centered product `(a - mean(a))
+* (b - mean(b))`, returns ranked tuples **to review**, never auto-fits a
+grid, never guesses `segment_columns` (a separate, harder problem).
+`depth_scores`/`categorical_depth_scores` accept `True` (one instance,
+matching that transformer's own single-joint-group default) or a list
+where a plain `list` entry is an auto-named group and a `(name, columns)`
+tuple is an explicitly named one -- list-vs-tuple as the disambiguator,
+chosen over type-sniffing column contents. Deferred, disclosed: `DepthCrowd`
+(aggregates *already-built* depth outputs -- an aggregator-of-aggregators,
+not a `columns -> features` step this class's flat toggles can represent)
+and `LaplaceHistoryTransformer` (needs a second `event_history` table and
+a per-row `asof_col` at transform -- a fundamentally different signature).
+See `src/zoneboost/_feature_space.py`, `README.md` ("ZoneFeatureSpace"),
+`docs/how-it-works.html` (`#zonefeaturespace`), `docs/api-reference.html`
+(`#feature-space-parameters`).

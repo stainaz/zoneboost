@@ -121,6 +121,7 @@
     { title: "Zone Profile Encoder", crumb: "How It Works", url: "how-it-works.html#zone-profile-encoder" },
     { title: "Depth Transformer", crumb: "How It Works", url: "how-it-works.html#depth-transformer" },
     { title: "Conditional Zone Grid", crumb: "How It Works", url: "how-it-works.html#conditional-zone-grid" },
+    { title: "ZoneFeatureSpace", crumb: "How It Works", url: "how-it-works.html#zonefeaturespace" },
     { title: "LLM Zone Naming (Optional)", crumb: "How It Works", url: "how-it-works.html#llm-zone-naming" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
@@ -135,6 +136,7 @@
     { title: "ZoneProfileEncoder Parameters", crumb: "API Reference", url: "api-reference.html#zone-profile-parameters" },
     { title: "DepthTransformer Parameters", crumb: "API Reference", url: "api-reference.html#depth-parameters" },
     { title: "ConditionalZoneGrid Parameters", crumb: "API Reference", url: "api-reference.html#conditional-grid-parameters" },
+    { title: "ZoneFeatureSpace Parameters", crumb: "API Reference", url: "api-reference.html#feature-space-parameters" },
     { title: "LLMZoneNamer Parameters", crumb: "API Reference", url: "api-reference.html#llm-zone-namer-parameters" },
     { title: "compare_models Signature", crumb: "API Reference", url: "api-reference.html#compare-models-signature" },
     { title: "flag_drift Signature", crumb: "API Reference", url: "api-reference.html#flag-drift-signature" },

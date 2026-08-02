@@ -308,6 +308,30 @@
       </tbody>
     </table>
 
+    <h2 id="feature-space-parameters">ZoneFeatureSpace Parameters</h2>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>zone_profiles</code></td><td><code>True</code></td><td><code>True</code> fits one <code>ZoneProfileEncoder</code> over every column of <code>X</code>; a list encodes only those columns; <code>False</code> disables it. Supervised — requires <code>y</code> at <code>fit</code> whenever enabled — see <a href="how-it-works.html#zonefeaturespace">ZoneFeatureSpace</a></td></tr>
+        <tr><td><code>categorical_features</code></td><td><code>None</code></td><td>Forwarded to the internal <code>ZoneProfileEncoder</code> only</td></tr>
+        <tr><td><code>depth_scores</code></td><td><code>False</code></td><td><code>True</code> fits one <code>DepthTransformer</code> over every numeric column; a list declares explicit groups (a plain <code>list</code> of columns = auto-named, a <code>(name, columns)</code> tuple = named); <code>False</code> disables it. Unsupervised</td></tr>
+        <tr><td><code>categorical_depth_scores</code></td><td><code>False</code></td><td>Same shape as <code>depth_scores</code>, but <code>CategoricalDepthTransformer</code> over categorical/binary columns. Unsupervised</td></tr>
+        <tr><td><code>conditional_grids</code></td><td><code>None</code></td><td>List of <code>(col_a, col_b, segment_columns)</code> triples, one <code>ConditionalZoneGrid</code> per triple — explicit only, never auto-discovered (see <code>suggest_interactions</code>). Supervised — requires <code>y</code> at <code>fit</code> whenever non-empty</td></tr>
+        <tr><td><code>max_zones</code></td><td><code>7</code></td><td>Forwarded to every internal <code>ZoneProfileEncoder</code>/<code>ConditionalZoneGrid</code></td></tr>
+        <tr><td><code>min_zone_frac</code></td><td><code>0.02</code></td><td>Forwarded to every internal <code>ZoneProfileEncoder</code>/<code>ConditionalZoneGrid</code></td></tr>
+        <tr><td><code>min_zone_abs</code></td><td><code>20</code></td><td>Forwarded to every internal <code>ZoneProfileEncoder</code>/<code>ConditionalZoneGrid</code></td></tr>
+        <tr><td><code>min_segment_size</code></td><td><code>50</code></td><td>Forwarded to every internal <code>ConditionalZoneGrid</code></td></tr>
+        <tr><td><code>shrinkage</code></td><td><code>True</code></td><td>Forwarded to every internal <code>ZoneProfileEncoder</code>/<code>ConditionalZoneGrid</code></td></tr>
+        <tr><td><code>depth_ridge</code></td><td><code>1e-6</code></td><td>Forwarded to every internal <code>DepthTransformer</code> as its own <code>ridge</code> parameter</td></tr>
+        <tr><td><code>random_state</code></td><td><code>42</code></td><td>Forwarded to every internal transformer</td></tr>
+      </tbody>
+    </table>
+    <p><code>ZoneFeatureSpace</code> fitted attribute: <code>transformers_</code> (the
+    fitted sub-transformer instances, in output order). Methods beyond
+    <code>fit</code>/<code>transform</code>: <code>explain(values)</code> and
+    <code>suggest_interactions(X, y, columns=None, top_k=10)</code> — see
+    <a href="how-it-works.html#zonefeaturespace">ZoneFeatureSpace</a>.</p>
+
     <h2 id="laplace-history-parameters">LaplaceHistoryTransformer Parameters</h2>
     <table>
       <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>

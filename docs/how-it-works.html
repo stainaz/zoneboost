@@ -1443,6 +1443,76 @@ sql = compile_to_sql(model, table_name="customers")
       grid's corresponding cell. A real future refinement, not built here.
     </div>
 
+    <h2 id="zonefeaturespace">ZoneFeatureSpace</h2>
+    <p>The notebook pages list "the ado-transformer" as step one, ahead of any modeling —
+    feature engineering first. <a href="#zone-profile-encoder">Zone Profile
+    Encoder</a>, <a href="#depth-transformer">Depth Transformer</a>,
+    <a href="#categorical-depth-transformer">Categorical Depth Transformer</a>, and
+    <a href="#conditional-zone-grid">Conditional Zone Grid</a> are already
+    <code>sklearn</code> <code>TransformerMixin</code>s, composable via a plain
+    <code>FeatureUnion</code> today with zero new code. <code>ZoneFeatureSpace</code>
+    doesn't reinvent that — it's a thin, convenience-first orchestrator over the same
+    four, plus two things a bare <code>FeatureUnion</code> doesn't give you: rolling a
+    downstream model's coefficients/importances back to each <em>original</em> raw
+    column, and a cheap candidate-pair suggester for <code>ConditionalZoneGrid</code>.</p>
+    <pre><code>from zoneboost import ZoneFeatureSpace
+from sklearn.linear_model import LogisticRegression
+
+space = ZoneFeatureSpace(
+    zone_profiles=True,                              # ZoneProfileEncoder over every column
+    depth_scores=[("financial", ["debt", "income"])], # one named DepthTransformer group
+    categorical_depth_scores=True,                    # CategoricalDepthTransformer over every categorical column
+    conditional_grids=[("price", "sqft", ["region"])],# one ConditionalZoneGrid
+)
+X_zoned = space.fit_transform(X, y)
+
+model = LogisticRegression().fit(X_zoned, y)
+space.explain(model.coef_[0])   # Series indexed by ORIGINAL raw column, rolled up</code></pre>
+    <p><code>depth_scores</code>/<code>categorical_depth_scores</code> accept
+    <code>True</code> (one instance over every numeric/categorical column, matching that
+    transformer's own default), or a list where each entry is either a plain
+    <code>list</code> of columns (auto-named) or a <code>(name, columns)</code> tuple —
+    list-vs-tuple is the disambiguator. <code>conditional_grids</code> is a list of
+    <code>(col_a, col_b, segment_columns)</code> triples, always explicit — never
+    auto-discovered (see <code>suggest_interactions</code> below). <code>zone_profiles</code>/
+    <code>conditional_grids</code> are supervised and require <code>y</code> at
+    <code>fit</code>; <code>depth_scores</code>/<code>categorical_depth_scores</code> are
+    unsupervised and ignore it.</p>
+    <p><strong><code>explain(values)</code></strong> is the standout new capability. At
+    <code>fit</code> time, <code>ZoneFeatureSpace</code> records — directly off each
+    sub-transformer's own <code>columns_</code>/<code>segment_columns_</code> attributes,
+    <strong>not</strong> parsed from the output column name string (a raw column like
+    <code>"annual_income"</code> would make name-parsing ambiguous) — which original raw
+    column(s) fed every output column it builds. <code>explain(values)</code> then takes
+    any downstream model's <code>coef_</code>/<code>feature_importances_</code> (aligned
+    to <code>get_feature_names_out()</code>) and sums <code>abs(value)</code> back to each
+    raw column. An output column with more than one source (an interaction, or a joint
+    depth/grid group) contributes its <strong>full</strong>, undivided magnitude to
+    <em>every</em> one of its source columns — never split between them, the same "never
+    divided back between parent variables" rule <code>ZoneBoostRegressor.explain()</code>
+    itself follows.</p>
+    <p><strong><code>suggest_interactions(X, y, top_k=10)</code></strong> is the
+    scoped-down version of "auto" interaction discovery. For every candidate continuous
+    pair, it fits <code>y ~ a + b</code> by plain least squares and scores the pair by the
+    absolute correlation between that fit's residual and the centered product
+    <code>(a - mean(a)) * (b - mean(b))</code> — a cheap proxy for "is there
+    multiplicative interaction signal left over after each column's own additive effect is
+    removed." Returns ranked <code>(col_a, col_b)</code> tuples <strong>to review</strong>,
+    never auto-fits a grid, and never guesses <code>segment_columns</code> (a materially
+    harder, separate problem left to you). This is a real, disclosed step down from
+    <code>ZoneBoostRegressor</code>'s own cross-fitted, zone-based pair screening
+    (<code>max_pair_interactions</code>) — not a replacement for it, just cheap enough to
+    run before any model exists at all.</p>
+    <div class="note">
+      <strong>Deferred, disclosed:</strong> <code>DepthCrowd</code> (aggregates
+      <em>already-built</em> depth outputs — an aggregator-of-aggregators, not a
+      <code>columns -&gt; features</code> step this class's flat toggles can represent)
+      and <code>LaplaceHistoryTransformer</code> (needs a second <code>event_history</code>
+      table and a per-row <code>asof_col</code> at transform — a fundamentally different
+      signature, see below). Build either separately and combine with
+      <code>ZoneFeatureSpace</code>'s own output via <code>FeatureUnion</code> if wanted.
+    </div>
+
     <h2 id="laplace-history-transformer">Laplace History Transformer</h2>
     <p>Exponential (half-life) decay-weighted aggregation of a per-entity event history —
     insurance claims, purchases, fraud events, sensor readings — giving a model memory of
