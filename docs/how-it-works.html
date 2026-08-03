@@ -1720,10 +1720,12 @@ encoder = ZoneProfileEncoder(split_criterion="correlation").fit(X, y)</code></pr
     <code>zoneboost</code> namespace, since it's the first feature needing
     <code>matplotlib</code> (gated behind its own <code>zoneboost[eda]</code> extra, the
     same precedent <code>LLMZoneNamer</code> set for <code>anthropic</code>).</p>
-    <pre><code>from zoneboost.eda import zone_boxplot, drift_dashboard
+    <pre><code>from zoneboost.eda import zone_boxplot, drift_dashboard, prediction_waterfall, signed_contribution_profile
 
 stats, ax = zone_boxplot(X, y, column="income", n_zones=5, valid_range=(0, 500_000))
-data, fig = drift_dashboard(model_q1, model_q2, X_eval)</code></pre>
+data, fig = drift_dashboard(model_q1, model_q2, X_eval)
+table, ax = prediction_waterfall(model, X, index=0)
+profile, ax = signed_contribution_profile(model, X, feature="income")</code></pre>
     <p><strong><code>zone_boxplot(X, y, column, ...)</code></strong> bins <code>column</code>
     into zones using the <em>exact same</em> construction <code>ZoneProfileEncoder</code>
     already uses (adaptive variance/correlation-reducing boundaries for a continuous column
@@ -1758,13 +1760,40 @@ data, fig = drift_dashboard(model_q1, model_q2, X_eval)</code></pre>
     histogram (the one panel that needs more than <code>compare_models</code>'s own
     <code>{"mean", "std"}</code> summary, so it recomputes the raw per-row
     <code>predict</code> diff directly, disclosed as such).</p>
+    <p><strong><code>prediction_waterfall(model, X, index=0, max_terms=None,
+    purify=False, ...)</code></strong> answers the notebook's own "direction included"
+    ask at the level of <em>one prediction</em>: every term's own contribution to row
+    <code>index</code>'s prediction, sorted by <code>|contribution|</code> descending,
+    stacked from <code>baseline</code> to the final predicted value — "income adds +1.2,
+    but age x region subtracts 0.45." Pure rendering over
+    <code>explain(X.iloc[[index]])</code>, already exact — no new modeling math.
+    <code>max_terms</code> folds the smallest-magnitude excess terms into a single
+    <code>"other"</code> row (summed) rather than dropping them, so the waterfall still
+    sums exactly to the prediction either way. Not supported for a multiclass classifier
+    (<code>explain</code> returns a <code>{class_label: DataFrame}</code> dict there, not
+    the single flat table this needs) — raises <code>ValueError</code>.</p>
+    <p><strong><code>signed_contribution_profile(model, X, feature,
+    ...)</code></strong> answers the same "direction included" ask at the level of
+    <em>one feature</em>: how does <code>feature</code>'s own main-effect contribution
+    rise or fall across its range, zone by zone — "income subtracts below $20k, adds
+    above $90k." Reuses the <em>exact same</em> zone construction <code>zone_boxplot</code>
+    does, this time binning against <code>feature</code>'s own already-computed
+    contribution column from <code>explain(X)</code> rather than the real target
+    <code>y</code> — no new modeling math, a different "y" fed through identical
+    machinery. Requires <code>feature</code> to have appeared as its own main-effect term
+    in <code>explain(X)</code> — raises <code>ValueError</code> otherwise (a column only
+    ever fit inside an interaction has no own contribution column to fold a profile
+    from). Also not supported for a multiclass classifier, for the same reason as
+    <code>prediction_waterfall</code>.</p>
     <div class="note">
-      <strong>Scope:</strong> neither function invents new modeling math —
+      <strong>Scope:</strong> no function here invents new modeling math —
       <code>zone_boxplot</code> reuses <code>adaptive_zone_boundaries</code>/
       <code>zone_index</code>/<code>categorical_zone_index</code> directly,
-      <code>drift_dashboard</code> reuses <code>compare_models</code> directly. Static
-      <code>matplotlib</code> figures only (no interactive/HTML charting backend); no
-      automatic light/dark theming (a single rendered image, not a themed report).
+      <code>drift_dashboard</code> reuses <code>compare_models</code> directly,
+      <code>prediction_waterfall</code>/<code>signed_contribution_profile</code> reuse
+      <code>explain(X)</code> directly. Static <code>matplotlib</code> figures only (no
+      interactive/HTML charting backend); no automatic light/dark theming (a single
+      rendered image, not a themed report).
     </div>
 
     <h2 id="how-it-compares">How It Compares</h2>

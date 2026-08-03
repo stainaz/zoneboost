@@ -487,6 +487,56 @@
     <p>Returns <code>data</code> (exactly <code>compare_models</code>'s own dict), or the
     tuple <code>(data, fig)</code> when <code>plot=True</code>.</p>
 
+    <h2 id="prediction-waterfall-signature">prediction_waterfall Signature</h2>
+    <p><code>zoneboost.eda.prediction_waterfall(model, X, index=0, max_terms=None,
+    purify=False, plot=True, ax=None)</code> — a top-level function in the separate
+    <code>zoneboost.eda</code> subpackage, not a method. See
+    <a href="how-it-works.html#zoneboost-eda">zoneboost.eda (Optional)</a> for the full
+    design.</p>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>model</code></td><td>—</td><td>Already-fitted <code>ZoneBoostRegressor</code> or binary <code>ZoneBoostClassifier</code>. Raises <code>ValueError</code> for a multiclass classifier</td></tr>
+        <tr><td><code>X</code></td><td>—</td><td>DataFrame or array-like of shape (n_samples, n_features); may hold more than one row — only row <code>index</code> is explained</td></tr>
+        <tr><td><code>index</code></td><td><code>0</code></td><td>Positional row of <code>X</code> to explain</td></tr>
+        <tr><td><code>max_terms</code></td><td><code>None</code></td><td>Cap on individual terms shown; <code>None</code> shows every term. When set, the smallest-magnitude excess terms fold into a single <code>"other"</code> row (summed) rather than being dropped — the waterfall still sums exactly to the prediction either way</td></tr>
+        <tr><td><code>purify</code></td><td><code>False</code></td><td>Forwarded to <code>model.explain(X, purify=purify)</code> when the model's own <code>explain</code> accepts it (regressor only) — see <a href="explaining-predictions.html#functional-anova-purification">Functional-ANOVA Purification</a></td></tr>
+        <tr><td><code>plot</code></td><td><code>True</code></td><td>If <code>True</code>, also draws the waterfall via <code>matplotlib</code> and returns <code>(table, ax)</code>; if <code>False</code>, returns only <code>table</code></td></tr>
+        <tr><td><code>ax</code></td><td><code>None</code></td><td>Draw onto this existing <code>matplotlib.axes.Axes</code> instead of creating a new figure; ignored if <code>plot=False</code></td></tr>
+      </tbody>
+    </table>
+    <p>Returns <code>table</code> (one row per bar in waterfall order — <code>"baseline"</code>
+    first, every term sorted by <code>|contribution|</code> descending, an optional
+    <code>"other"</code> row, then <code>"total"</code> — columns <code>contribution</code>,
+    <code>cumulative_start</code>, <code>cumulative_end</code>), or the tuple
+    <code>(table, ax)</code> when <code>plot=True</code>.</p>
+
+    <h2 id="signed-contribution-profile-signature">signed_contribution_profile Signature</h2>
+    <p><code>zoneboost.eda.signed_contribution_profile(model, X, feature, n_zones=7,
+    min_zone_frac=0.02, min_zone_abs=20, split_criterion="variance", purify=False,
+    plot=True, ax=None)</code> — a top-level function in the separate
+    <code>zoneboost.eda</code> subpackage. See
+    <a href="how-it-works.html#zoneboost-eda">zoneboost.eda (Optional)</a> for the full
+    design.</p>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>model</code></td><td>—</td><td>Already-fitted <code>ZoneBoostRegressor</code> or binary <code>ZoneBoostClassifier</code>. Raises <code>ValueError</code> for a multiclass classifier</td></tr>
+        <tr><td><code>X</code></td><td>—</td><td>DataFrame or array-like of shape (n_samples, n_features)</td></tr>
+        <tr><td><code>feature</code></td><td>—</td><td>The column (name, or index if <code>X</code> isn't a DataFrame) to profile. Must have appeared as its own main-effect term in <code>explain(X)</code> — raises <code>ValueError</code> otherwise</td></tr>
+        <tr><td><code>n_zones</code></td><td><code>7</code></td><td>Forwarded as <code>max_zones</code> to <code>adaptive_zone_boundaries</code>; ignored for a categorical column</td></tr>
+        <tr><td><code>min_zone_frac</code></td><td><code>0.02</code></td><td>Forwarded to <code>adaptive_zone_boundaries</code>; ignored for a categorical column</td></tr>
+        <tr><td><code>min_zone_abs</code></td><td><code>20</code></td><td>Forwarded to <code>adaptive_zone_boundaries</code>; ignored for a categorical column</td></tr>
+        <tr><td><code>split_criterion</code></td><td><code>"variance"</code></td><td>Forwarded to <code>adaptive_zone_boundaries</code> — see <a href="how-it-works.html#correlation-aware-zone-boundaries">Correlation-Aware Zone Boundaries</a>; ignored for a categorical column</td></tr>
+        <tr><td><code>purify</code></td><td><code>False</code></td><td>Forwarded to <code>model.explain(X, purify=purify)</code> when the model's own <code>explain</code> accepts it (regressor only), before extracting <code>feature</code>'s own contribution column</td></tr>
+        <tr><td><code>plot</code></td><td><code>True</code></td><td>If <code>True</code>, also draws a bar chart via <code>matplotlib</code> and returns <code>(table, ax)</code>; if <code>False</code>, returns only <code>table</code></td></tr>
+        <tr><td><code>ax</code></td><td><code>None</code></td><td>Draw onto this existing <code>matplotlib.axes.Axes</code> instead of creating a new figure; ignored if <code>plot=False</code></td></tr>
+      </tbody>
+    </table>
+    <p>Returns <code>table</code> (indexed by zone label in natural — not magnitude —
+    order, columns <code>count</code> and <code>mean_contribution</code>), or the tuple
+    <code>(table, ax)</code> when <code>plot=True</code>.</p>
+
     <h2 id="purify-parameters">explain / feature_importance purify Parameters</h2>
     <p><code>purify</code>/<code>purify_n_bins</code> are parameters of the existing
     <code>explain</code>/<code>feature_importance</code> methods, not a new function.

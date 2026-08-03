@@ -1892,10 +1892,12 @@ pip install "zoneboost[eda]"
 ```
 
 ```python
-from zoneboost.eda import zone_boxplot, drift_dashboard
+from zoneboost.eda import zone_boxplot, drift_dashboard, prediction_waterfall, signed_contribution_profile
 
 stats, ax = zone_boxplot(X, y, column="income", n_zones=5, valid_range=(0, 500_000))
 data, fig = drift_dashboard(model_q1, model_q2, X_eval)
+table, ax = prediction_waterfall(model, X, index=0)
+profile, ax = signed_contribution_profile(model, X, feature="income")
 ```
 
 **`zone_boxplot(X, y, column, ...)`** bins `column` into zones using the
@@ -1934,12 +1936,39 @@ one panel that needs more than `compare_models`'s own `{"mean", "std"}`
 summary, so it recomputes the raw per-row `predict` diff directly,
 disclosed as such).
 
-**Scope**: neither function invents new modeling math — `zone_boxplot`
+**`prediction_waterfall(model, X, index=0, max_terms=None, purify=False,
+...)`** answers the notebook's own "direction included" ask at the level
+of *one prediction*: every term's own contribution to row `index`'s
+prediction, sorted by `|contribution|` descending, stacked from
+`baseline` to the final predicted value — "income adds +1.2, but
+age x region subtracts 0.45." Pure rendering over `explain(X.iloc[[index]])`,
+already exact — no new modeling math. `max_terms` folds the
+smallest-magnitude excess terms into a single `"other"` row (summed)
+rather than dropping them, so the waterfall still sums exactly to the
+prediction either way. Not supported for a multiclass classifier (`explain`
+returns a `{class_label: DataFrame}` dict there, not the single flat table
+this needs) — raises `ValueError`.
+
+**`signed_contribution_profile(model, X, feature, ...)`** answers the
+same "direction included" ask at the level of *one feature*: how does
+`feature`'s own main-effect contribution rise or fall across its range,
+zone by zone — "income subtracts below $20k, adds above $90k." Reuses
+the *exact same* zone construction `zone_boxplot` does, this time binning
+against `feature`'s own already-computed contribution column from
+`explain(X)` rather than the real target `y` — no new modeling math, a
+different "y" fed through identical machinery. Requires `feature` to have
+appeared as its own main-effect term in `explain(X)` — raises
+`ValueError` otherwise (a column only ever fit inside an interaction has
+no own contribution column to fold a profile from). Also not supported
+for a multiclass classifier, for the same reason as `prediction_waterfall`.
+
+**Scope**: no function here invents new modeling math — `zone_boxplot`
 reuses `adaptive_zone_boundaries`/`zone_index`/`categorical_zone_index`
-directly, `drift_dashboard` reuses `compare_models` directly. Static
-`matplotlib` figures only (no interactive/HTML charting backend); no
-automatic light/dark theming (a single rendered image, not a themed
-report).
+directly, `drift_dashboard` reuses `compare_models` directly,
+`prediction_waterfall`/`signed_contribution_profile` reuse `explain(X)`
+directly. Static `matplotlib` figures only (no interactive/HTML charting
+backend); no automatic light/dark theming (a single rendered image, not a
+themed report).
 
 ## Parameters
 

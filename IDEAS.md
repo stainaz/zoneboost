@@ -34,7 +34,7 @@ useful context on its own.
 | **Correlation-aware zone boundaries** | Shipped | Notebook page 2 ("correlation", "covariance") | `src/zoneboost/_zones.py` (`split_criterion="correlation"` on `adaptive_zone_boundaries`), threaded through `ZoneProfileEncoder`/`ConditionalZoneGrid`/`ZoneFeatureSpace` |
 | **zoneboost.eda** (`zone_boxplot`, `drift_dashboard`) | Shipped | Notebook page 2 ("compare outcome & variables boxplots") | `src/zoneboost/eda/` (`zone_boxplot`, `drift_dashboard`), gated behind the `zoneboost[eda]` extra |
 | **ZoneBoostTimeSeries** (native expanding/rolling walk-forward fitting) | Shipped | Notebook page 3 ("sequential date pattern") | `src/zoneboost/_time_series.py` (`ZoneBoostTimeSeries`); fits one model per period and reuses `compare_models`/`flag_drift` across consecutive periods automatically |
-| **Signed contribution waterfall** (`plot_signed_contributions`) | Proposed | Notebook page 2 ("min-max scaler — direction included") | Would live alongside `_explain.py`; waterfall visualization of already-computed per-zone contributions, sign-colored rather than magnitude-only |
+| **Signed contribution waterfall** (`prediction_waterfall`, `signed_contribution_profile`) | Shipped | Notebook page 2 ("min-max scaler — direction included") | `src/zoneboost/eda/_prediction_waterfall.py`, `src/zoneboost/eda/_signed_contribution_profile.py` |
 | **Spline zones** (bounded linear trend within a zone) | Proposed | Notebook page 1 ("genuinely continuous relationship") | Would extend `_weak_learner.py`'s per-zone constant mean to an optional per-zone linear fit, still bounded by zone edges — not a recursive split |
 
 ## Detail
@@ -549,3 +549,57 @@ second, ZoneBoostTimeSeries-specific plotting entry point on top of
 `src/zoneboost/_time_series.py`, `README.md` ("ZoneBoostTimeSeries"),
 `docs/how-it-works.html` (`#zoneboosttimeseries`),
 `docs/api-reference.html` (`#time-series-parameters`).
+
+**Signed contribution waterfall.** The original pitch's own single
+function name (`plot_signed_contributions(X, feature="income")`) turned
+out to describe two genuinely different charts once its own illustrative
+text was read closely -- its example ("high income adds +$120, but if
+age > 65 in the Northeast, subtract $45") mixes two *different* terms in
+one scenario, which reads as a per-prediction decomposition, while the
+signature itself (`feature="income"`) reads as a per-feature profile.
+Rather than guess which one, both were asked about and both were
+approved, shipping as two functions in `zoneboost.eda`:
+`prediction_waterfall(model, X, index=0, max_terms=None, purify=False,
+...)` -- every term's own contribution to *one row's* prediction, sorted
+by `|contribution|` descending, stacked from `baseline` to the final
+predicted value -- and `signed_contribution_profile(model, X, feature,
+n_zones=7, ..., split_criterion="variance", purify=False, ...)` -- how
+*one feature's* own main-effect contribution rises or falls across its
+own range, zone by zone. Neither invents new modeling math:
+`prediction_waterfall` is a pure ordering/rendering layer over
+`explain(X.iloc[[index]])`'s own already-exact row; `signed_contribution_profile`
+reuses the *exact same* zone construction `zone_boxplot` already uses
+(`adaptive_zone_boundaries`/`categorical_zone_map`, `split_criterion`
+forwarded through for free), just binning against `feature`'s own
+already-computed `explain(X)` contribution column instead of the real
+target `y` -- the identical machinery, a different "y."
+
+`max_terms` on `prediction_waterfall` folds the smallest-magnitude excess
+terms into one `"other"` row (summed, not dropped) once a model has more
+terms than fit readably on one chart -- verified, not just argued: the
+waterfall's own `"total"` row matches `predict()` to within floating-point
+noise whether or not `max_terms` truncates. A real bug was caught and
+fixed during this same implementation pass, before ever committing:
+both functions initially forwarded `purify=purify` to `model.explain(...)`
+unconditionally, but `ZoneBoostClassifier.explain()` has no `purify`
+parameter at all (purification is regressor-only) -- calling either
+function on *any* classifier, not just a multiclass one, would have
+raised a confusing `TypeError` regardless of what the caller actually
+passed for `purify`. Fixed by checking `inspect.signature(model.explain)`
+for a `purify` parameter before forwarding it, raising a clear,
+intentional `ValueError` only if the caller explicitly asked for
+`purify=True` on a model that can't honor it. `signed_contribution_profile`
+requires `feature` to have appeared as its own main-effect term in
+`explain(X)` -- raises `ValueError` otherwise (a column only ever fit
+inside an interaction, or never sampled by `col_subsample` in any round,
+has no main-effect contribution column of its own to profile; verified
+directly with a constructed single-round, forced-column-exclusion fit
+rather than assumed). Both raise `ValueError` for a multiclass classifier
+(`explain(X)` returns a `{class_label: DataFrame}` dict there, not the
+single flat table either function needs). See
+`src/zoneboost/eda/_prediction_waterfall.py`,
+`src/zoneboost/eda/_signed_contribution_profile.py`, `README.md`
+("zoneboost.eda (optional)"), `docs/how-it-works.html`
+(`#zoneboost-eda`), `docs/api-reference.html`
+(`#prediction-waterfall-signature`,
+`#signed-contribution-profile-signature`).

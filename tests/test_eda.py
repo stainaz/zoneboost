@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from zoneboost import ZoneBoostRegressor, compare_models
-from zoneboost.eda import drift_dashboard, zone_boxplot
+from zoneboost import ZoneBoostClassifier, ZoneBoostRegressor, compare_models
+from zoneboost.eda import drift_dashboard, prediction_waterfall, signed_contribution_profile, zone_boxplot
 
 
 def _step_data(n=2000, seed=0):
@@ -137,3 +137,127 @@ def test_drift_dashboard_no_shared_continuous_columns():
     data, fig = drift_dashboard(m_old, m_new, X)
     assert data["boundary_shift"] == {}
     assert len(fig.axes) == 2  # tornado + prediction shift only
+
+
+def _interaction_data(n=800, seed=0):
+    rng = np.random.default_rng(seed)
+    x1 = rng.uniform(-3, 3, n)
+    x2 = rng.uniform(-3, 3, n)
+    x3 = rng.uniform(-3, 3, n)
+    y = 2.0 * x1 + 0.5 * x1 * x2 + rng.normal(0, 0.3, n)
+    X = pd.DataFrame({"x1": x1, "x2": x2, "x3": x3})
+    return X, y
+
+
+def test_prediction_waterfall_sums_exactly_to_predict():
+    X, y = _interaction_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0).fit(X, y)
+    table = prediction_waterfall(model, X, index=5, plot=False)
+    pred = model.predict(X.iloc[[5]]).item()
+    assert abs(pred - table.loc["total", "cumulative_end"]) < 1e-6
+    contrib_row = model.explain(X.iloc[[5]]).iloc[0]
+    assert abs(table.loc["baseline", "cumulative_end"] - contrib_row["baseline"]) < 1e-9
+
+
+def test_prediction_waterfall_sorted_by_magnitude_descending():
+    X, y = _interaction_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0).fit(X, y)
+    table = prediction_waterfall(model, X, index=5, plot=False)
+    term_rows = table.drop(index=["baseline", "total"])
+    magnitudes = term_rows["contribution"].abs().to_numpy()
+    assert list(magnitudes) == sorted(magnitudes, reverse=True)
+
+
+def test_prediction_waterfall_max_terms_preserves_total():
+    X, y = _interaction_data()
+    model = ZoneBoostRegressor(n_rounds=20, random_state=0).fit(X, y)
+    full = prediction_waterfall(model, X, index=5, plot=False)
+    capped = prediction_waterfall(model, X, index=5, max_terms=1, plot=False)
+    assert "other" in capped.index
+    assert len(capped) < len(full)
+    assert abs(full.loc["total", "cumulative_end"] - capped.loc["total", "cumulative_end"]) < 1e-6
+
+
+def test_prediction_waterfall_plot_true_returns_axes():
+    X, y = _interaction_data()
+    model = ZoneBoostRegressor(n_rounds=15, random_state=0).fit(X, y)
+    table, ax = prediction_waterfall(model, X, index=0)
+    assert isinstance(table, pd.DataFrame)
+    assert hasattr(ax, "barh")
+
+
+def test_prediction_waterfall_rejects_multiclass():
+    rng = np.random.default_rng(0)
+    n = 600
+    X = pd.DataFrame({"x1": rng.uniform(-3, 3, n), "x2": rng.uniform(-3, 3, n)})
+    y = rng.choice([0, 1, 2], n)
+    model = ZoneBoostClassifier(n_rounds=10, random_state=0).fit(X, y)
+    with pytest.raises(ValueError):
+        prediction_waterfall(model, X, index=0, plot=False)
+
+
+def test_signed_contribution_profile_recovers_monotonic_sign_flip():
+    rng = np.random.default_rng(0)
+    n = 2000
+    x1 = rng.uniform(-3, 3, n)
+    y = 2.0 * x1 + rng.normal(0, 0.3, n)
+    X = pd.DataFrame({"x1": x1})
+    model = ZoneBoostRegressor(n_rounds=30, random_state=0).fit(X, y)
+    table = signed_contribution_profile(model, X, "x1", n_zones=4, plot=False)
+    contributions = table["mean_contribution"].to_numpy()
+    assert contributions[0] < 0 < contributions[-1]
+    assert list(contributions) == sorted(contributions)
+
+
+def test_signed_contribution_profile_categorical_column():
+    rng = np.random.default_rng(0)
+    n = 1500
+    region = rng.choice(["a", "b", "c"], n)
+    x1 = rng.uniform(-3, 3, n)
+    y = 2.0 * x1 + np.where(region == "a", 5.0, -5.0) + rng.normal(0, 0.3, n)
+    X = pd.DataFrame({"x1": x1, "region": region})
+    model = ZoneBoostRegressor(n_rounds=20, categorical_features=["region"], random_state=0).fit(X, y)
+    table = signed_contribution_profile(model, X, "region", plot=False)
+    assert set(table.index) == {"a", "b", "c"}
+    assert table.loc["a", "mean_contribution"] > table.loc["b", "mean_contribution"]
+
+
+def test_signed_contribution_profile_plot_true_returns_axes():
+    X, y = _interaction_data()
+    model = ZoneBoostRegressor(n_rounds=15, random_state=0).fit(X, y)
+    table, ax = signed_contribution_profile(model, X, "x1")
+    assert isinstance(table, pd.DataFrame)
+    assert hasattr(ax, "bar")
+
+
+def test_signed_contribution_profile_raises_when_feature_never_a_main_effect():
+    # A single round with col_subsample forcing exactly 2 of 3 predictors
+    # sampled reliably leaves one column out of explain(X) entirely -- it
+    # never appeared as a main effect (or anything else) in any round.
+    rng = np.random.default_rng(0)
+    n = 300
+    X = pd.DataFrame({"x1": rng.uniform(-3, 3, n), "x2": rng.uniform(-3, 3, n), "x3": rng.uniform(-3, 3, n)})
+    y = 2.0 * X["x1"].to_numpy() + rng.normal(0, 0.3, n)
+    model = ZoneBoostRegressor(n_rounds=1, col_subsample=0.34, validation_fraction=0.0, random_state=0).fit(X, y)
+    contrib = model.explain(X)
+    missing = [c for c in X.columns if c not in contrib.columns]
+    assert missing, "test setup expected at least one column excluded from explain(X)"
+    with pytest.raises(ValueError):
+        signed_contribution_profile(model, X, missing[0], plot=False)
+
+
+def test_signed_contribution_profile_unknown_column_raises():
+    X, y = _interaction_data()
+    model = ZoneBoostRegressor(n_rounds=15, random_state=0).fit(X, y)
+    with pytest.raises(ValueError):
+        signed_contribution_profile(model, X, "not_a_column", plot=False)
+
+
+def test_signed_contribution_profile_rejects_multiclass():
+    rng = np.random.default_rng(0)
+    n = 600
+    X = pd.DataFrame({"x1": rng.uniform(-3, 3, n), "x2": rng.uniform(-3, 3, n)})
+    y = rng.choice([0, 1, 2], n)
+    model = ZoneBoostClassifier(n_rounds=10, random_state=0).fit(X, y)
+    with pytest.raises(ValueError):
+        signed_contribution_profile(model, X, "x1", plot=False)

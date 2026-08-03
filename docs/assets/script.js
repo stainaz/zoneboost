@@ -147,6 +147,8 @@
     { title: "compile_to_sql Signature", crumb: "API Reference", url: "api-reference.html#compile-to-sql-signature" },
     { title: "zone_boxplot Signature", crumb: "API Reference", url: "api-reference.html#zone-boxplot-signature" },
     { title: "drift_dashboard Signature", crumb: "API Reference", url: "api-reference.html#drift-dashboard-signature" },
+    { title: "prediction_waterfall Signature", crumb: "API Reference", url: "api-reference.html#prediction-waterfall-signature" },
+    { title: "signed_contribution_profile Signature", crumb: "API Reference", url: "api-reference.html#signed-contribution-profile-signature" },
     { title: "evidence_card Signature", crumb: "API Reference", url: "api-reference.html#evidence-card-signature" },
     { title: "explain / feature_importance purify Parameters", crumb: "API Reference", url: "api-reference.html#purify-parameters" },
     { title: "Scope & Compatibility", crumb: "API Reference", url: "api-reference.html#scope" },
