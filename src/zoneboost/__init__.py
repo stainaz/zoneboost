@@ -27,6 +27,7 @@ from ._feature_space import ZoneFeatureSpace
 from ._laplace_history import LaplaceHistoryTransformer
 from ._sql_export import compile_to_sql
 from ._survival import ZoneBoostSurvival
+from ._time_series import ZoneBoostTimeSeries
 from ._version import __version__
 from ._zone_forest import ZoneForest
 from ._zone_namer import LLMZoneNamer
@@ -41,6 +42,7 @@ __all__ = [
     "BootstrapStability",
     "ZoneForest",
     "ZoneBoostSurvival",
+    "ZoneBoostTimeSeries",
     "ZoneProfileEncoder",
     "DepthTransformer",
     "DepthCrowd",

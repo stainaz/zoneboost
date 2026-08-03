@@ -194,6 +194,31 @@
       </tbody>
     </table>
 
+    <h2 id="time-series-parameters">ZoneBoostTimeSeries Parameters</h2>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>base_estimator</code></td><td><code>None</code></td><td>Unfit <code>ZoneBoostRegressor</code> template; <code>None</code> uses a plain <code>ZoneBoostRegressor()</code>. Cloned and refit once per period — only <code>random_state</code> is overridden per clone — see <a href="how-it-works.html#zoneboosttimeseries">ZoneBoostTimeSeries</a></td></tr>
+        <tr><td><code>time_col</code></td><td><code>None</code></td><td>Required — the column (name, or index if <code>X</code> isn't a DataFrame) giving each row's timestamp, coerced via <code>pandas.to_datetime</code></td></tr>
+        <tr><td><code>freq</code></td><td><code>"Y"</code></td><td>A pandas offset alias controlling period granularity (<code>"Y"</code>/<code>"Q"</code>/<code>"M"</code>/...), forwarded to <code>.dt.to_period(freq)</code></td></tr>
+        <tr><td><code>window</code></td><td><code>"expanding"</code></td><td><code>"expanding"</code> or <code>"rolling"</code> — see <a href="how-it-works.html#zoneboosttimeseries">ZoneBoostTimeSeries</a>. Raises <code>ValueError</code> otherwise</td></tr>
+        <tr><td><code>min_periods</code></td><td><code>2</code></td><td>Dual meaning by <code>window</code>: minimum periods pooled for the first <code>"expanding"</code> fit, or the fixed window size for <code>"rolling"</code>. Must be <code>&gt;= 1</code>; raises <code>ValueError</code> if fewer than <code>min_periods</code> distinct periods exist at all</td></tr>
+        <tr><td><code>random_state</code></td><td><code>42</code></td><td>Seed for each period's own derived clone seed</td></tr>
+      </tbody>
+    </table>
+    <p><code>ZoneBoostTimeSeries</code> fitted attributes:</p>
+    <table>
+      <tbody>
+        <tr><td><code>time_col_</code></td><td>Resolved column name for <code>time_col</code>.</td></tr>
+        <tr><td><code>feature_names_in_</code></td><td>Every column actually fit on — <code>time_col_</code> excluded.</td></tr>
+        <tr><td><code>periods_</code></td><td>Every distinct period observed, sorted, including any too early to have their own model.</td></tr>
+        <tr><td><code>models_</code></td><td><code>{period: fitted_model}</code>, one entry per period from <code>periods_[min_periods - 1]</code> onward.</td></tr>
+        <tr><td><code>comparisons_</code></td><td><code>{(period_k, period_k_plus_1): compare_models(...)}</code> for every consecutive fitted pair.</td></tr>
+        <tr><td><code>drift_alerts_</code></td><td><code>{(period_k, period_k_plus_1): flag_drift(...)}</code>, only for a pair where the newer period's model has a calibrated conformal margin.</td></tr>
+      </tbody>
+    </table>
+    <p><code>ZoneBoostTimeSeries</code> also exposes <code>predict(X)</code>/<code>explain(X)</code>/<code>feature_importance(X)</code> (each delegating to the most recent period's own fitted model) and <code>stability_report()</code> (a per-feature drift summary aggregated across every consecutive pair) — see <a href="how-it-works.html#zoneboosttimeseries">ZoneBoostTimeSeries</a>.</p>
+
     <h2 id="survival-parameters">ZoneBoostSurvival Parameters</h2>
     <table>
       <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>

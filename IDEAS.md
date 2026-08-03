@@ -33,7 +33,7 @@ useful context on its own.
 | **ZoneFeatureSpace** (first-class transformer/feature-space API) | Shipped | Notebook page 2 ("1. the ado-transformer") | `src/zoneboost/_feature_space.py` (`ZoneFeatureSpace`) |
 | **Correlation-aware zone boundaries** | Shipped | Notebook page 2 ("correlation", "covariance") | `src/zoneboost/_zones.py` (`split_criterion="correlation"` on `adaptive_zone_boundaries`), threaded through `ZoneProfileEncoder`/`ConditionalZoneGrid`/`ZoneFeatureSpace` |
 | **zoneboost.eda** (`zone_boxplot`, `drift_dashboard`) | Shipped | Notebook page 2 ("compare outcome & variables boxplots") | `src/zoneboost/eda/` (`zone_boxplot`, `drift_dashboard`), gated behind the `zoneboost[eda]` extra |
-| **ZoneBoostTimeSeries** (native expanding/rolling/walk-forward fitting) | Proposed | Notebook page 3 ("sequential date pattern") | Would live in `src/zoneboost/_time_series.py`; fits one model per window and reuses `compare_models`/`flag_drift` across windows automatically |
+| **ZoneBoostTimeSeries** (native expanding/rolling walk-forward fitting) | Shipped | Notebook page 3 ("sequential date pattern") | `src/zoneboost/_time_series.py` (`ZoneBoostTimeSeries`); fits one model per period and reuses `compare_models`/`flag_drift` across consecutive periods automatically |
 | **Signed contribution waterfall** (`plot_signed_contributions`) | Proposed | Notebook page 2 ("min-max scaler — direction included") | Would live alongside `_explain.py`; waterfall visualization of already-computed per-zone contributions, sign-colored rather than magnitude-only |
 | **Spline zones** (bounded linear trend within a zone) | Proposed | Notebook page 1 ("genuinely continuous relationship") | Would extend `_weak_learner.py`'s per-zone constant mean to an optional per-zone linear fit, still bounded by zone edges — not a recursive split |
 
@@ -470,3 +470,82 @@ for a plotting utility, unlike an HTML artifact). See
 (optional)"), `docs/how-it-works.html` (`#zoneboost-eda`),
 `docs/api-reference.html` (`#zone-boxplot-signature`,
 `#drift-dashboard-signature`).
+
+**ZoneBoostTimeSeries.** `ZoneBoostTimeSeries(base_estimator=None,
+time_col=None, freq="Y", window="expanding", min_periods=2,
+random_state=42)` fits one `ZoneBoostRegressor` per time period,
+walk-forward, and automatically compares every consecutive pair via
+`compare_models`/`flag_drift` -- both already shipped, so this module
+invents zero new modeling math, purely period-bucketing/windowing
+orchestration around estimators/functions that already exist. Two real
+scope decisions were resolved by asking rather than assuming (the
+original pitch's own phrasing left both ambiguous):
+
+The original pitch's three window strings (`"expanding"`/`"rolling"`/
+`"walk_forward"`) collapsed to two (`"expanding"`/`"rolling"`) -- walk-
+forward evaluation (comparing a period's own model against the next
+period's genuinely held-out data) turned out to be inherent to *either*
+window definition once fit per-period, not a third, distinct way to
+define the training window itself; keeping a separate `"walk_forward"`
+string would have meant two parameter values behaving identically, worse
+than not offering a third option. `min_periods` reuses one integer-count
+knob for both window modes rather than adding a second, overlapping
+`window_periods` parameter: for `"expanding"` it's the minimum periods
+pooled for the first fit (the window then only grows); for `"rolling"`
+it's the fixed size every window keeps. Deliberately an integer period
+**count**, not a timedelta string like the original pitch's own `"2Y"`
+phrasing -- `freq` (a plain pandas offset alias, resolved via pandas'
+own `.dt.to_period(freq)`, no date-parsing logic reinvented here)
+already controls what one period spans, so `min_periods=2` with
+`freq="Y"` already means "2 years," with no second string-parsing
+convention needed on top.
+
+`time_col` is excluded from every per-period model's own fitted feature
+space entirely -- not optional, always: a raw timestamp has no meaning
+as a zone-averaged predictor, and `resolve_categorical_features` would
+otherwise auto-detect a datetime64 column as an absurdly high-cardinality
+"categorical" column (confirmed by reasoning through
+`_common.py`'s own `is_numeric_dtype` check before writing any code, not
+discovered by trial and error afterward). A caller who wants the
+calendar signal itself fitted (day-of-year, a trend index) engineers
+that as a separate column first -- this class derives no calendar
+features of its own.
+
+`predict(X)`/`explain(X)`/`feature_importance(X)` all delegate to the
+most recent period's own fitted model (`models_[max(models_)]`) -- a
+genuine, usable `RegressorMixin`, not a diagnostic-only wrapper like
+`BootstrapStability`, decided explicitly since a caller should be able to
+deploy the fitted object directly for production scoring, with every
+per-period diagnostic available as additional attributes on top rather
+than the only thing this class does. `drift_alerts_` only contains a
+consecutive pair when the newer period's own model has a non-`None`
+`conformal_scores_` (i.e. was fit with `validation_fraction > 0` or
+`calibration_fraction > 0`, the `ZoneBoostRegressor` default) -- a pair
+missing from `drift_alerts_` while still present in `comparisons_`
+discloses that precondition wasn't met, the same "membership itself is
+the disclosure" precedent `ConditionalZoneGrid.segment_grids_` already
+sets for a segment below `min_segment_size`.
+
+`stability_report()` answers the original pitch's own "detect which
+zones are stable vs. drifting over time" ask directly: an aggregation of
+`compare_models`'s own per-pair `population_migration`/`boundary_shift`
+numbers across every consecutive comparison, per feature -- zero new
+statistics, sorted by mean population migration descending. Verified,
+not just argued: on synthetic data with one feature whose relationship
+to `y` genuinely flips sign halfway through the series and one whose
+relationship never changes, the flipping feature ranked first.
+
+Two related asks from the original pitch were deliberately **not**
+attempted here, disclosed rather than half-built: "flag when a zone's
+empirical Bayes prior should be updated" has no existing defensible,
+general rule to build on (`drift_alerts_`/`stability_report()` are the
+closest available signal, not a replacement for a real rule that doesn't
+exist yet); "generate the boxplots over time" is left to the caller via
+`zoneboost.eda.drift_dashboard(model.models_[k], model.models_[k_plus_1],
+X_eval, y_eval)` per consecutive pair directly, rather than adding a
+second, ZoneBoostTimeSeries-specific plotting entry point on top of
+`zoneboost.eda`'s own already-shipped one. **Scope**: regressor only
+(`compare_models` itself is regressor-only). See
+`src/zoneboost/_time_series.py`, `README.md` ("ZoneBoostTimeSeries"),
+`docs/how-it-works.html` (`#zoneboosttimeseries`),
+`docs/api-reference.html` (`#time-series-parameters`).

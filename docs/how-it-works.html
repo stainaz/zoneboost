@@ -1088,6 +1088,80 @@ model.feature_importance(X)</code></pre>
       on large datasets, disclosed rather than optimized around here.
     </div>
 
+    <h2 id="zoneboosttimeseries">ZoneBoostTimeSeries</h2>
+    <p>The notebook pages' own "if data follows a date pattern it's broken down to
+    follow sequential date pattern" concern — fits one <code>ZoneBoostRegressor</code>
+    per time period, walk-forward, and automatically compares every consecutive pair via
+    <code>compare_models</code>/<code>flag_drift</code>, already shipped. Invents no new
+    modeling math: this is purely period-bucketing and windowing orchestration around
+    estimators/functions that already exist.</p>
+    <pre><code>from zoneboost import ZoneBoostTimeSeries, ZoneBoostRegressor
+
+model = ZoneBoostTimeSeries(
+    base_estimator=ZoneBoostRegressor(n_rounds=100),
+    time_col="date",
+    freq="Q",              # pandas offset alias: quarterly periods
+    window="expanding",    # or "rolling"
+    min_periods=4,         # >= 4 quarters of history before the first fit
+).fit(X, y)
+
+model.predict(X)                 # delegates to the most recent period's model
+model.stability_report()         # which zones are stable vs. drifting over time
+model.comparisons_               # {(period_k, period_k+1): compare_models(...)}
+model.drift_alerts_              # {(period_k, period_k+1): flag_drift(...)}</code></pre>
+    <p>Buckets rows into periods via <code>time_col</code>'s own
+    <code>.dt.to_period(freq)</code> (any pandas offset alias — <code>"Y"</code>/
+    <code>"Q"</code>/<code>"M"</code>/<code>"W"</code>/<code>"D"</code>, ...), then fits
+    a model "as of" every period with enough history:</p>
+    <ul>
+      <li><code>window="expanding"</code> (default): the model as of period <code>k</code>
+      trains on <strong>every</strong> row from the first period through <code>k</code>
+      — the window only grows.</li>
+      <li><code>window="rolling"</code>: the model as of period <code>k</code> trains on
+      exactly <code>min_periods</code> periods ending at <code>k</code> — a fixed-size,
+      sliding lookback.</li>
+    </ul>
+    <p><code>min_periods</code> is dual-meaning by <code>window</code>: for
+    <code>"expanding"</code>, the minimum periods pooled for the very first fit; for
+    <code>"rolling"</code>, the fixed window size. Deliberately an integer period
+    <strong>count</strong>, not a timedelta string (the notebook's own <code>"2Y"</code>
+    phrasing) — <code>freq</code> already controls what one period spans, so
+    <code>min_periods=2</code> with <code>freq="Y"</code> already means "2 years," no
+    second string-parsing convention needed.</p>
+    <p>For every <strong>consecutive</strong> pair of fitted periods, this is a genuine
+    walk-forward evaluation: period <code>k</code>'s own model (which never saw period
+    <code>k+1</code>'s rows at fit time) is compared against period <code>k+1</code>'s
+    model on period <code>k+1</code>'s own held-out data — <code>compare_models</code>
+    always, <code>flag_drift</code> only when period <code>k+1</code>'s model has a
+    calibrated conformal margin to check the drift against (true by default). A pair
+    missing from <code>drift_alerts_</code> (while still present in
+    <code>comparisons_</code>) discloses that precondition wasn't met for that period,
+    rather than storing <code>None</code> there.</p>
+    <p><code>time_col</code> is a partitioning key, <strong>not</strong> a feature: it's
+    excluded from every per-period model's own fitted feature space entirely (a raw
+    timestamp has no meaning as a zone-averaged predictor, and would otherwise be
+    auto-detected as an absurdly high-cardinality categorical column). Want the calendar
+    signal itself fitted — day-of-year, month, a trend index? Engineer that as a
+    <strong>separate</strong> column before calling <code>fit</code>; this class doesn't
+    derive calendar features on its own.</p>
+    <p><code>stability_report()</code> answers "which zones are stable vs. drifting over
+    time" directly from numbers <code>compare_models</code> already computed for every
+    pair — zero new statistics, a synthesis: for every feature that appeared in at least
+    one comparison, the mean/max population migration and mean/max boundary-center shift
+    across every pair it appeared in, sorted by mean population migration descending (the
+    most persistently drifting feature first).</p>
+    <div class="note">
+      <strong>Scope:</strong> regressor only (<code>compare_models</code> itself is
+      regressor-only). No automatic "flag when a zone's empirical Bayes prior should be
+      updated" rule — no defensible, general heuristic for that currently exists;
+      <code>drift_alerts_</code>/<code>stability_report()</code> are the closest
+      available signal. No plotting of its own either (no new dependency needed here at
+      all) — for the notebook's own "boxplots over time" ask, compose with
+      <code>zoneboost.eda.drift_dashboard</code> directly per consecutive pair, e.g.
+      <code>drift_dashboard(model.models_[k], model.models_[k_plus_1], X_eval,
+      y_eval)</code>.
+    </div>
+
     <h2 id="global-shape-constraints">Global Shape Constraints</h2>
     <p>Four related mechanisms for declaring shape knowledge the model has no way to
     infer on its own — all <strong>opt-in</strong>, all main-effects-focused, all reusing

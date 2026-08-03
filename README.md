@@ -1266,6 +1266,85 @@ question. No memmapping optimization — with process-based parallelism
 memory cost on large datasets, disclosed rather than optimized around
 here.
 
+### ZoneBoostTimeSeries
+
+The notebook pages' own "if data follows a date pattern it's broken down
+to follow sequential date pattern" concern — fits one `ZoneBoostRegressor`
+per time period, walk-forward, and automatically compares every
+consecutive pair via `compare_models`/`flag_drift`, already shipped.
+Invents no new modeling math: this is purely period-bucketing and
+windowing orchestration around estimators/functions that already exist.
+
+```python
+from zoneboost import ZoneBoostTimeSeries, ZoneBoostRegressor
+
+model = ZoneBoostTimeSeries(
+    base_estimator=ZoneBoostRegressor(n_rounds=100),
+    time_col="date",
+    freq="Q",              # pandas offset alias: quarterly periods
+    window="expanding",    # or "rolling"
+    min_periods=4,         # >= 4 quarters of history before the first fit
+).fit(X, y)
+
+model.predict(X)                 # delegates to the most recent period's model
+model.stability_report()         # which zones are stable vs. drifting over time
+model.comparisons_               # {(period_k, period_k+1): compare_models(...)}
+model.drift_alerts_              # {(period_k, period_k+1): flag_drift(...)}
+```
+
+Buckets rows into periods via `time_col`'s own `.dt.to_period(freq)` (any
+pandas offset alias — `"Y"`/`"Q"`/`"M"`/`"W"`/`"D"`, ...), then fits a
+model "as of" every period with enough history:
+
+- `window="expanding"` (default): the model as of period `k` trains on
+  **every** row from the first period through `k` — the window only
+  grows.
+- `window="rolling"`: the model as of period `k` trains on exactly
+  `min_periods` periods ending at `k` — a fixed-size, sliding lookback.
+
+`min_periods` is dual-meaning by `window`: for `"expanding"`, the minimum
+periods pooled for the very first fit; for `"rolling"`, the fixed window
+size. Deliberately an integer period **count**, not a timedelta string
+(the notebook's own `"2Y"` phrasing) — `freq` already controls what one
+period spans, so `min_periods=2` with `freq="Y"` already means "2 years,"
+no second string-parsing convention needed.
+
+For every **consecutive** pair of fitted periods, this is a genuine
+walk-forward evaluation: period `k`'s own model (which never saw period
+`k+1`'s rows at fit time) is compared against period `k+1`'s model on
+period `k+1`'s own held-out data — `compare_models` always,
+`flag_drift` only when period `k+1`'s model has a calibrated conformal
+margin to check the drift against (true by default). A pair missing from
+`drift_alerts_` (while still present in `comparisons_`) discloses that
+precondition wasn't met for that period, rather than storing `None`
+there.
+
+`time_col` is a partitioning key, **not** a feature: it's excluded from
+every per-period model's own fitted feature space entirely (a raw
+timestamp has no meaning as a zone-averaged predictor, and would
+otherwise be auto-detected as an absurdly high-cardinality categorical
+column). Want the calendar signal itself fitted — day-of-year, month, a
+trend index? Engineer that as a **separate** column before calling `fit`;
+this class doesn't derive calendar features on its own.
+
+`stability_report()` answers "which zones are stable vs. drifting over
+time" directly from numbers `compare_models` already computed for every
+pair — zero new statistics, a synthesis: for every feature that appeared
+in at least one comparison, the mean/max population migration and
+mean/max boundary-center shift across every pair it appeared in, sorted
+by mean population migration descending (the most persistently drifting
+feature first).
+
+**Scope**: regressor only (`compare_models` itself is regressor-only). No
+automatic "flag when a zone's empirical Bayes prior should be updated"
+rule — no defensible, general heuristic for that currently exists;
+`drift_alerts_`/`stability_report()` are the closest available signal. No
+plotting of its own either (no new dependency needed here at all) — for
+the notebook's own "boxplots over time" ask, compose with
+`zoneboost.eda.drift_dashboard` directly per consecutive pair, e.g.
+`drift_dashboard(model.models_[k], model.models_[k_plus_1], X_eval,
+y_eval)`.
+
 ### Compile to SQL scorecard
 
 `compile_to_sql(model)` compiles a fitted `ZoneBoostRegressor` to a
@@ -1958,6 +2037,27 @@ Fitted attributes: `estimators_` (the `n_estimators` fitted clones, in
 resampling order), `estimators_samples_` (each estimator's own bootstrap
 row indices), `estimators_features_` (each estimator's own column subset,
 as column names).
+
+## ZoneBoostTimeSeries parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `base_estimator` | `None` | Unfit `ZoneBoostRegressor` template; `None` uses a plain `ZoneBoostRegressor()`. Cloned and refit once per period — only `random_state` is overridden per clone. See "ZoneBoostTimeSeries" above |
+| `time_col` | `None` | Required — the column (name, or index if `X` isn't a DataFrame) giving each row's timestamp, coerced via `pandas.to_datetime` |
+| `freq` | `"Y"` | A pandas offset alias controlling period granularity (`"Y"`/`"Q"`/`"M"`/...), forwarded to `.dt.to_period(freq)` |
+| `window` | `"expanding"` | `"expanding"` or `"rolling"` — see "ZoneBoostTimeSeries" above. Raises `ValueError` otherwise |
+| `min_periods` | 2 | Dual meaning by `window`: minimum periods pooled for the first `"expanding"` fit, or the fixed window size for `"rolling"`. Must be `>= 1`; raises `ValueError` if fewer than `min_periods` distinct periods exist at all |
+| `random_state` | 42 | Seed for each period's own derived clone seed |
+
+Fitted attributes: `time_col_` (resolved column name), `feature_names_in_`
+(every column actually fit on — `time_col_` excluded), `periods_` (every
+distinct period observed, sorted, including any too early to have their
+own model), `models_` (`{period: fitted_model}`, one entry per period from
+`periods_[min_periods - 1]` onward), `comparisons_` (`{(period_k,
+period_k_plus_1): compare_models(...)}` for every consecutive fitted
+pair), `drift_alerts_` (`{(period_k, period_k_plus_1): flag_drift(...)}`,
+only for a pair where the newer period's model has a calibrated conformal
+margin — see "ZoneBoostTimeSeries" above).
 
 ## ZoneBoostSurvival parameters
 
