@@ -1798,6 +1798,70 @@ clear `ImportError` pointing at `pip install zoneboost[llm]` if it's
 missing. Pass any object exposing `.messages.create(...)` as `client` to
 use your own (or a fake one in tests) without ever touching the network.
 
+## zoneboost.eda (optional)
+
+The notebook pages asked for a visual, business-friendly layer — "compare
+outcome & variables boxplots" — on top of what `evidence_report()`/
+`compare_models()` already report as tables. `zoneboost.eda` is that
+layer: a **separate subpackage**, not part of the top-level `zoneboost`
+namespace, since it's the first feature needing `matplotlib` (gated
+behind its own extra, the same precedent `LLMZoneNamer` set for
+`anthropic`):
+
+```bash
+pip install "zoneboost[eda]"
+```
+
+```python
+from zoneboost.eda import zone_boxplot, drift_dashboard
+
+stats, ax = zone_boxplot(X, y, column="income", n_zones=5, valid_range=(0, 500_000))
+data, fig = drift_dashboard(model_q1, model_q2, X_eval)
+```
+
+**`zone_boxplot(X, y, column, ...)`** bins `column` into zones using the
+*exact same* construction `ZoneProfileEncoder` already uses (adaptive
+variance/correlation-reducing boundaries for a continuous column — pass
+`split_criterion="correlation"` to reuse the correlation-aware splitting
+above — one zone per distinct value for a categorical one), then reports
+each zone's outcome distribution: count, mean, median, quartiles, and
+IQR-outlier count/fraction (the standard boxplot rule, applied to `y`
+within that zone). Always returns this `stats` table regardless of
+`plot`; `plot=False` skips `matplotlib` entirely, so the statistics are
+usable with zero extra dependency installed.
+
+`valid_range=(lower, upper)` is caller-declared domain knowledge about
+`column`'s own raw values (e.g. "age must be 18–100") — the same
+"declare it, don't infer it" precedent `monotonic_constraints`/
+`bounded_effects` already set on `ZoneBoostRegressor`. When given, each
+zone gets a `pct_business_invalid` column — the fraction of that zone's
+own rows whose raw value falls outside the declared range (a zone
+straddling the boundary gets a real fraction, not just 0 or 1) —
+disclosed only when actually declared; there's no statistical way to
+infer domain validity on its own. Raises `ValueError` for a categorical
+column (a numeric bound has no meaning there). `plot=True` (the default)
+additionally draws a boxplot with one box per zone, coloring any zone
+with `pct_business_invalid > 0` distinctly from an ordinary one.
+
+**`drift_dashboard(model_old, model_new, X_eval, y_eval=None, ...)`**
+computes zero new statistics — it's a pure rendering layer over
+`compare_models`, already shipped. `plot=False` returns *exactly*
+`compare_models`'s own dict (a passthrough, useful for toggling
+visualization without switching functions). `plot=True` (the default)
+renders a multi-panel figure: a feature-importance-change tornado chart,
+an old-vs-new boundary-shift interval plot per shared continuous column,
+a population-migration bar chart, and a prediction-shift histogram (the
+one panel that needs more than `compare_models`'s own `{"mean", "std"}`
+summary, so it recomputes the raw per-row `predict` diff directly,
+disclosed as such).
+
+**Scope**: neither function invents new modeling math — `zone_boxplot`
+reuses `adaptive_zone_boundaries`/`zone_index`/`categorical_zone_index`
+directly, `drift_dashboard` reuses `compare_models` directly. Static
+`matplotlib` figures only (no interactive/HTML charting backend); no
+automatic light/dark theming (a single rendered image, not a themed
+report).
+
 ## Parameters
 
 Identical parameter set on both estimators, except `undersample`/

@@ -41,6 +41,9 @@ benchmark = [
 llm = [
     "anthropic",
 ]
+eda = [
+    "matplotlib",
+]
 
 [project.urls]
 Homepage = "https://github.com/stainaz/zoneboost"

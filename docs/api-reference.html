@@ -415,6 +415,53 @@
       </tbody>
     </table>
 
+    <h2 id="zone-boxplot-signature">zone_boxplot Signature</h2>
+    <p><code>zoneboost.eda.zone_boxplot(X, y, column, n_zones=7, min_zone_frac=0.02,
+    min_zone_abs=20, split_criterion="variance", valid_range=None, plot=True,
+    ax=None)</code> — a top-level function in the separate <code>zoneboost.eda</code>
+    subpackage (<code>pip install zoneboost[eda]</code>), not a method. See
+    <a href="how-it-works.html#zoneboost-eda">zoneboost.eda (Optional)</a> for the full
+    design.</p>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>X</code></td><td>—</td><td>DataFrame or array-like of shape (n_samples, n_features)</td></tr>
+        <tr><td><code>y</code></td><td>—</td><td>The outcome whose per-zone distribution is being compared</td></tr>
+        <tr><td><code>column</code></td><td>—</td><td>The column (name, or index if <code>X</code> isn't a DataFrame) to zone</td></tr>
+        <tr><td><code>n_zones</code></td><td><code>7</code></td><td>Forwarded as <code>max_zones</code> to <code>adaptive_zone_boundaries</code>; ignored for a categorical column</td></tr>
+        <tr><td><code>min_zone_frac</code></td><td><code>0.02</code></td><td>Forwarded to <code>adaptive_zone_boundaries</code>; ignored for a categorical column</td></tr>
+        <tr><td><code>min_zone_abs</code></td><td><code>20</code></td><td>Forwarded to <code>adaptive_zone_boundaries</code>; ignored for a categorical column</td></tr>
+        <tr><td><code>split_criterion</code></td><td><code>"variance"</code></td><td>Forwarded to <code>adaptive_zone_boundaries</code> — see <a href="how-it-works.html#correlation-aware-zone-boundaries">Correlation-Aware Zone Boundaries</a>; ignored for a categorical column</td></tr>
+        <tr><td><code>valid_range</code></td><td><code>None</code></td><td>Caller-declared <code>(lower, upper)</code> domain bound on <code>column</code>'s own raw values; adds <code>pct_business_invalid</code> to the result when given. Raises <code>ValueError</code> for a categorical column</td></tr>
+        <tr><td><code>plot</code></td><td><code>True</code></td><td>If <code>True</code>, also draws a boxplot via <code>matplotlib</code> (only import reached when <code>True</code>) and returns <code>(stats, ax)</code>; if <code>False</code>, returns only <code>stats</code></td></tr>
+        <tr><td><code>ax</code></td><td><code>None</code></td><td>Draw onto this existing <code>matplotlib.axes.Axes</code> instead of creating a new figure; ignored if <code>plot=False</code></td></tr>
+      </tbody>
+    </table>
+    <p>Returns <code>stats</code> (a DataFrame indexed by zone label, columns
+    <code>count</code>/<code>mean</code>/<code>median</code>/<code>q1</code>/<code>q3</code>/
+    <code>iqr</code>/<code>outlier_count</code>/<code>outlier_frac</code>, plus
+    <code>pct_business_invalid</code> when <code>valid_range</code> is given), or the tuple
+    <code>(stats, ax)</code> when <code>plot=True</code>.</p>
+
+    <h2 id="drift-dashboard-signature">drift_dashboard Signature</h2>
+    <p><code>zoneboost.eda.drift_dashboard(model_old, model_new, X_eval, y_eval=None,
+    plot=True, top_n=15)</code> — a top-level function in the separate
+    <code>zoneboost.eda</code> subpackage, wrapping <code>compare_models</code> with a
+    rendering layer. See <a href="how-it-works.html#zoneboost-eda">zoneboost.eda
+    (Optional)</a> for the full design.</p>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>model_old</code> / <code>model_new</code></td><td>—</td><td>Both already-fitted <code>ZoneBoostRegressor</code> instances, forwarded as-is to <code>compare_models</code></td></tr>
+        <tr><td><code>X_eval</code></td><td>—</td><td>Forwarded to <code>compare_models</code></td></tr>
+        <tr><td><code>y_eval</code></td><td><code>None</code></td><td>Forwarded to <code>compare_models</code>; if given, the performance change is annotated on the figure</td></tr>
+        <tr><td><code>plot</code></td><td><code>True</code></td><td>If <code>True</code>, also renders the multi-panel figure via <code>matplotlib</code> and returns <code>(data, fig)</code>; if <code>False</code>, returns exactly <code>compare_models</code>'s own dict</td></tr>
+        <tr><td><code>top_n</code></td><td><code>15</code></td><td>Number of terms shown in the feature-importance-change panel, ranked by <code>|change|</code>; ignored if <code>plot=False</code></td></tr>
+      </tbody>
+    </table>
+    <p>Returns <code>data</code> (exactly <code>compare_models</code>'s own dict), or the
+    tuple <code>(data, fig)</code> when <code>plot=True</code>.</p>
+
     <h2 id="purify-parameters">explain / feature_importance purify Parameters</h2>
     <p><code>purify</code>/<code>purify_n_bins</code> are parameters of the existing
     <code>explain</code>/<code>feature_importance</code> methods, not a new function.

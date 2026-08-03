@@ -32,7 +32,7 @@ useful context on its own.
 | **Cythonize zone lookup/split search** | Proposed | Strategy discussion, not the notebook | Performance work inside `_zones.py`/`_weak_learner.py`'s existing lookup/split-search paths; no API change, no new opacity |
 | **ZoneFeatureSpace** (first-class transformer/feature-space API) | Shipped | Notebook page 2 ("1. the ado-transformer") | `src/zoneboost/_feature_space.py` (`ZoneFeatureSpace`) |
 | **Correlation-aware zone boundaries** | Shipped | Notebook page 2 ("correlation", "covariance") | `src/zoneboost/_zones.py` (`split_criterion="correlation"` on `adaptive_zone_boundaries`), threaded through `ZoneProfileEncoder`/`ConditionalZoneGrid`/`ZoneFeatureSpace` |
-| **zoneboost.eda** (`zone_boxplot`, `drift_dashboard`) | Proposed | Notebook page 2 ("compare outcome & variables boxplots") | Would live in a new `src/zoneboost/eda/` subpackage; visual, business-facing layer on top of the already-shipped `evidence_report()`/`compare_models()` |
+| **zoneboost.eda** (`zone_boxplot`, `drift_dashboard`) | Shipped | Notebook page 2 ("compare outcome & variables boxplots") | `src/zoneboost/eda/` (`zone_boxplot`, `drift_dashboard`), gated behind the `zoneboost[eda]` extra |
 | **ZoneBoostTimeSeries** (native expanding/rolling/walk-forward fitting) | Proposed | Notebook page 3 ("sequential date pattern") | Would live in `src/zoneboost/_time_series.py`; fits one model per window and reuses `compare_models`/`flag_drift` across windows automatically |
 | **Signed contribution waterfall** (`plot_signed_contributions`) | Proposed | Notebook page 2 ("min-max scaler — direction included") | Would live alongside `_explain.py`; waterfall visualization of already-computed per-zone contributions, sign-colored rather than magnitude-only |
 | **Spline zones** (bounded linear trend within a zone) | Proposed | Notebook page 1 ("genuinely continuous relationship") | Would extend `_weak_learner.py`'s per-zone constant mean to an optional per-zone linear fit, still bounded by zone edges — not a recursive split |
@@ -404,3 +404,69 @@ boundaries"), `docs/how-it-works.html`
 (`#correlation-aware-zone-boundaries`), and the `split_criterion` row in
 the `ZoneProfileEncoder`/`ConditionalZoneGrid`/`ZoneFeatureSpace`
 parameter tables in both `README.md` and `docs/api-reference.html`.
+
+**zoneboost.eda.** `zone_boxplot(X, y, column, n_zones=7, min_zone_frac=
+0.02, min_zone_abs=20, split_criterion="variance", valid_range=None,
+plot=True, ax=None)` and `drift_dashboard(model_old, model_new, X_eval,
+y_eval=None, plot=True, top_n=15)` are a new `zoneboost.eda` subpackage --
+a **separate** subpackage, not part of the top-level `zoneboost`
+namespace, because this is the first feature needing a dependency beyond
+`numpy`/`pandas`/`scikit-learn` for something other than an LLM call:
+`matplotlib`, gated behind a new `zoneboost[eda]` extra, imported lazily
+inside each function's own body (never at module import time -- verified
+directly: `import zoneboost.eda`/`from zoneboost.eda import zone_boxplot`
+import only `numpy`/`pandas`/zoneboost's own `_zones.py`/`_drift.py`, the
+same "only import inside the method body that actually needs it"
+discipline `LLMZoneNamer` already established for `anthropic`).
+
+Neither function invents new modeling math -- deliberately, the same
+compose-rather-than-build-in precedent every transformer in this ledger
+already sets. `zone_boxplot` reuses the *exact same* zone construction
+`ZoneProfileEncoder` already calls (`adaptive_zone_boundaries`/
+`zone_index` for continuous columns, `categorical_zone_map`/
+`categorical_zone_index` for categorical ones, `split_criterion` forwarded
+straight through so it composes with "Correlation-aware zone boundaries"
+above for free) rather than a separately-invented quantile-bin boxplot.
+`drift_dashboard` calls `compare_models` internally and computes zero new
+statistics of its own -- `plot=False` returns *exactly* `compare_models`'s
+own dict, a pure passthrough, not a re-derived summary.
+
+`valid_range=(lower, upper)` on `zone_boxplot` answers the notebook's own
+"business would know better" framing directly, scoped down from a vaguer
+"mark business-valid vs invalid" pitch to the same "declare it, don't
+infer it" convention `monotonic_constraints`/`bounded_effects` already use
+on `ZoneBoostRegressor` -- a numeric bound is domain knowledge no
+statistic can infer on its own, so it's caller-supplied, not guessed.
+Emits a `pct_business_invalid` column only when actually declared (a zone
+straddling the boundary gets a real fraction between 0 and 1, not a
+binary flag), and raises `ValueError` if declared on a categorical column
+(a numeric bound has no meaning there, the same rejection
+`DepthTransformer` already gives a declared categorical column for an
+analogous reason). The always-on statistical signal --
+`outlier_count`/`outlier_frac` per zone, the standard IQR boxplot rule
+applied to `y` within that zone -- needs no such declaration and is
+present regardless.
+
+`drift_dashboard`'s multi-panel figure needs one number `compare_models`
+itself doesn't expose beyond a `{"mean", "std"}` summary -- the raw
+per-row `predict_new(X) - predict_old(X)` array for its histogram panel
+-- so that one panel recomputes it directly via two `predict` calls,
+disclosed in both the docstring and the rendered figure's own construction
+rather than silently reaching past `compare_models`'s documented return
+shape. Gracefully omits the boundary-shift/population-migration panels
+entirely (rather than rendering an empty one) when the two models share no
+continuous main-effect column, e.g. two purely-categorical models.
+
+Every function still returns its full underlying numbers (`stats`
+DataFrame, or `compare_models`'s own dict) even when `plot=True` also
+draws a picture -- nothing here is only inspectable as a rendered image,
+the same disclosure-over-convenience precedent this whole ledger has kept
+throughout. **Scope**: static `matplotlib` figures only (no interactive/
+HTML charting backend, e.g. plotly); no automatic light/dark theming (a
+single rendered image, not a themed report -- deliberately out of scope
+for a plotting utility, unlike an HTML artifact). See
+`src/zoneboost/eda/__init__.py`, `src/zoneboost/eda/_zone_boxplot.py`,
+`src/zoneboost/eda/_drift_dashboard.py`, `README.md` ("zoneboost.eda
+(optional)"), `docs/how-it-works.html` (`#zoneboost-eda`),
+`docs/api-reference.html` (`#zone-boxplot-signature`,
+`#drift-dashboard-signature`).

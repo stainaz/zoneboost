@@ -124,6 +124,7 @@
     { title: "ZoneFeatureSpace", crumb: "How It Works", url: "how-it-works.html#zonefeaturespace" },
     { title: "Correlation-Aware Zone Boundaries", crumb: "How It Works", url: "how-it-works.html#correlation-aware-zone-boundaries" },
     { title: "LLM Zone Naming (Optional)", crumb: "How It Works", url: "how-it-works.html#llm-zone-naming" },
+    { title: "zoneboost.eda (Optional)", crumb: "How It Works", url: "how-it-works.html#zoneboost-eda" },
     { title: "How It Compares", crumb: "How It Works", url: "how-it-works.html#how-it-compares" },
 
     { title: "API Reference", crumb: "Docs", url: "api-reference.html" },
@@ -142,6 +143,8 @@
     { title: "compare_models Signature", crumb: "API Reference", url: "api-reference.html#compare-models-signature" },
     { title: "flag_drift Signature", crumb: "API Reference", url: "api-reference.html#flag-drift-signature" },
     { title: "compile_to_sql Signature", crumb: "API Reference", url: "api-reference.html#compile-to-sql-signature" },
+    { title: "zone_boxplot Signature", crumb: "API Reference", url: "api-reference.html#zone-boxplot-signature" },
+    { title: "drift_dashboard Signature", crumb: "API Reference", url: "api-reference.html#drift-dashboard-signature" },
     { title: "evidence_card Signature", crumb: "API Reference", url: "api-reference.html#evidence-card-signature" },
     { title: "explain / feature_importance purify Parameters", crumb: "API Reference", url: "api-reference.html#purify-parameters" },
     { title: "Scope & Compatibility", crumb: "API Reference", url: "api-reference.html#scope" },

@@ -1638,6 +1638,61 @@ encoder = ZoneProfileEncoder(split_criterion="correlation").fit(X, y)</code></pr
       one in tests) without ever touching the network.
     </div>
 
+    <h2 id="zoneboost-eda">zoneboost.eda (Optional)</h2>
+    <p>The notebook pages asked for a visual, business-friendly layer — "compare outcome
+    &amp; variables boxplots" — on top of what <code>evidence_report()</code>/
+    <code>compare_models()</code> already report as tables. <code>zoneboost.eda</code> is
+    that layer: a <strong>separate subpackage</strong>, not part of the top-level
+    <code>zoneboost</code> namespace, since it's the first feature needing
+    <code>matplotlib</code> (gated behind its own <code>zoneboost[eda]</code> extra, the
+    same precedent <code>LLMZoneNamer</code> set for <code>anthropic</code>).</p>
+    <pre><code>from zoneboost.eda import zone_boxplot, drift_dashboard
+
+stats, ax = zone_boxplot(X, y, column="income", n_zones=5, valid_range=(0, 500_000))
+data, fig = drift_dashboard(model_q1, model_q2, X_eval)</code></pre>
+    <p><strong><code>zone_boxplot(X, y, column, ...)</code></strong> bins <code>column</code>
+    into zones using the <em>exact same</em> construction <code>ZoneProfileEncoder</code>
+    already uses (adaptive variance/correlation-reducing boundaries for a continuous column
+    — pass <code>split_criterion="correlation"</code> to reuse
+    <a href="#correlation-aware-zone-boundaries">Correlation-Aware Zone Boundaries</a> — one
+    zone per distinct value for a categorical one), then reports each zone's outcome
+    distribution: count, mean, median, quartiles, and IQR-outlier count/fraction (the
+    standard boxplot rule, applied to <code>y</code> within that zone). Always returns this
+    <code>stats</code> table regardless of <code>plot</code>; <code>plot=False</code> skips
+    <code>matplotlib</code> entirely, so the statistics are usable with zero extra
+    dependency installed.</p>
+    <p><code>valid_range=(lower, upper)</code> is caller-declared domain knowledge about
+    <code>column</code>'s own raw values (e.g. "age must be 18–100") — the same "declare it,
+    don't infer it" precedent <code>monotonic_constraints</code>/<code>bounded_effects</code>
+    already set on <code>ZoneBoostRegressor</code>. When given, each zone gets a
+    <code>pct_business_invalid</code> column — the fraction of that zone's own rows whose
+    raw value falls outside the declared range (a zone straddling the boundary gets a real
+    fraction, not just 0 or 1) — disclosed only when actually declared; there's no
+    statistical way to infer domain validity on its own. Raises <code>ValueError</code> for
+    a categorical column (a numeric bound has no meaning there). <code>plot=True</code> (the
+    default) additionally draws a boxplot with one box per zone, coloring any zone with
+    <code>pct_business_invalid &gt; 0</code> distinctly from an ordinary one.</p>
+    <p><strong><code>drift_dashboard(model_old, model_new, X_eval, y_eval=None,
+    ...)</code></strong> computes zero new statistics — it's a pure rendering layer over
+    <a href="explaining-predictions.html#time-based-drift-comparison">compare_models</a>,
+    already shipped.
+    <code>plot=False</code> returns <em>exactly</em> <code>compare_models</code>'s own dict
+    (a passthrough, useful for toggling visualization without switching functions).
+    <code>plot=True</code> (the default) renders a multi-panel figure: a
+    feature-importance-change tornado chart, an old-vs-new boundary-shift interval plot per
+    shared continuous column, a population-migration bar chart, and a prediction-shift
+    histogram (the one panel that needs more than <code>compare_models</code>'s own
+    <code>{"mean", "std"}</code> summary, so it recomputes the raw per-row
+    <code>predict</code> diff directly, disclosed as such).</p>
+    <div class="note">
+      <strong>Scope:</strong> neither function invents new modeling math —
+      <code>zone_boxplot</code> reuses <code>adaptive_zone_boundaries</code>/
+      <code>zone_index</code>/<code>categorical_zone_index</code> directly,
+      <code>drift_dashboard</code> reuses <code>compare_models</code> directly. Static
+      <code>matplotlib</code> figures only (no interactive/HTML charting backend); no
+      automatic light/dark theming (a single rendered image, not a themed report).
+    </div>
+
     <h2 id="how-it-compares">How It Compares</h2>
     <p>zoneboost sits at the intersection of additive models (GAMs), boosting frameworks
     (like XGBoost), and rule/bin-based models — combining the interpretable, additive
