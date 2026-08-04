@@ -21,12 +21,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e '.[eda]'
           pip install ucimlrepo
+      - name: Prepare research-sized runner
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('analysis/bike_042_results_v2.py')
+          s=p.read_text()
+          s=s.replace("X=df[features]; y=df.cnt.astype(float); cut=int(len(df)*.8)", "df=df.iloc[::4].reset_index(drop=True); X=df[features]; y=df.cnt.astype(float); cut=int(len(df)*.8)")
+          s=s.replace('n_rounds=80','n_rounds=35').replace('n_rounds=60','n_rounds=30').replace('n_rounds=30','n_rounds=20').replace('n_rounds=25','n_rounds=15')
+          s=s.replace('n_estimators=6','n_estimators=4').replace('n_bootstrap=4','n_bootstrap=3')
+          Path('analysis/bike_042_quick.py').write_text(s)
+          PY
       - name: Run analysis
-        run: python analysis/bike_042_results_v2.py
+        run: python analysis/bike_042_quick.py
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bike-042-results-v2
+          name: bike-042-results-quick
           path: analysis_output/
           if-no-files-found: warn
