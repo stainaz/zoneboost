@@ -72,7 +72,11 @@
     seed of what became pairwise (and eventually higher-order) <a
     href="how-it-works.html#interactions">interactions</a> and <a
     href="how-it-works.html#adaptive-interaction-order">adaptive interaction
-    order</a> rather than a single fixed 2D grid.</p>
+    order</a> for continuous zone grids, and, read literally as "keep filtering
+    a segment down by a=1, then b=1, then c=1," the direct ancestor of <a
+    href="how-it-works.html#conditional-zone-grid"><code>ConditionalZoneGrid</code></a> —
+    a 2D grid fit fresh inside each discrete segment, rather than one grid pooling
+    every segment together.</p>
     <p>A starred note reframes the whole thing: "coming up with a new profile almost
     similar to decision trees" — for a simplified 10-variable example (x, y, z, a, b,
     c, d, e, f, h, outcome), with "outcome could be a number or classes." That
@@ -83,6 +87,17 @@
     version of the trust-the-data-boundary judgment that <a
     href="how-it-works.html#robust-cell-statistics"><code>trim_fraction</code></a> now
     makes automatic and consistent instead of a manual call per dataset.</p>
+    <p>Look again at the sketch itself, though, and there's a tension the rest of the
+    page never resolves: <var>x</var> and <var>y</var> are drawn as ordinary
+    continuous axes, but the grid laid over them carves each into a handful of
+    discrete labeled cells — every value inside a cell gets treated identically, no
+    matter where it sits within its own boundaries. That gap between "the axis is
+    continuous" and "the model only sees which bucket you landed in" went unaddressed
+    for the rest of zoneboost's life until <a
+    href="how-it-works.html#spline-zones">spline zones</a> — an opt-in
+    <code>spline_zones</code> parameter that fits a genuinely continuous curve across
+    a column's own zone boundaries instead of one flat average per cell, closing the
+    oldest open question on this page.</p>
 
     <h2 id="page-2">Page 2 — Regions of Interest</h2>
     <figure class="docs-figure">
@@ -103,16 +118,33 @@
     boxplots comparing outcome against each variable are proposed as a running sanity
     check. That's an early, manual stand-in for what
     <a href="how-it-works.html#empirical-bayes-shrinkage">empirical Bayes
-    shrinkage</a> now does automatically per zone, and what a <a
+    shrinkage</a> now does automatically per zone, what a <a
     href="explaining-predictions.html#time-based-drift-comparison">time-based drift
-    comparison</a> does automatically across model versions.</p>
+    comparison</a> does automatically across model versions, and — taken literally,
+    the actual boxplots-of-outcome-against-variable habit itself — what <a
+    href="how-it-works.html#zoneboost-eda"><code>zoneboost.eda.zone_boxplot</code></a>
+    now renders directly from a fitted zone grid, IQR outliers and a declared
+    business-valid range included.</p>
     <p>The closing numbered list — "1. the ado-transformer, 2. correlation, 3.
     covariance, 4. original value," with min-max scaling and "direction included" —
     is the first draft of a feature-engineering pipeline: rescale, then compute
     per-region relationships, keeping the sign of the relationship rather than just
-    its magnitude. "ado-transformer" never became a real class name, but the
-    idea — a transformer built from region statistics rather than a fixed formula —
-    is the through-line to every zone in zoneboost today.</p>
+    its magnitude. "ado-transformer" never became a literal class name, but the
+    idea it names — a transformer built from region statistics rather than a fixed
+    formula, assembled from smaller composable pieces — is close to exactly what <a
+    href="how-it-works.html#zonefeaturespace"><code>ZoneFeatureSpace</code></a>
+    shipped as, years later: one orchestrator wrapping the zone-profile, depth, and
+    conditional-grid transformers below into a single fitted feature space with its
+    own <code>explain()</code>. "2. correlation" and "3. covariance," sitting right
+    beside it, are exactly what <a
+    href="how-it-works.html#correlation-aware-zone-boundaries">correlation-aware zone
+    boundaries</a> (<code>split_criterion="correlation"</code>) use to place a zone
+    cut where a variable's local relationship to the outcome reverses sign, rather
+    than only where it most reduces variance — and "direction included" is the same
+    sign-preserving instinct behind <a
+    href="how-it-works.html#zoneboost-eda"><code>signed_contribution_profile</code></a>
+    and <code>prediction_waterfall</code>, which chart a contribution's own rise,
+    fall, and sign rather than collapsing it to a single importance magnitude.</p>
 
     <h2 id="page-3">Page 3 — Weighting Regions and Resampling</h2>
     <figure class="docs-figure">
@@ -125,19 +157,32 @@
     with samples of data, i.e. breaks down the data to smaller samples & then
     average it out" — followed by "the idea is to see what weight you give each
     section of the data," with a worked example (a region between 0.8–1.0 on one
-    axis and 90–100 on another getting a 50% weight). That's <a
+    axis and 90–100 on another getting a 50% weight). Read as one sentence, that's <a
     href="how-it-works.html#empirical-bayes-shrinkage">density-aware shrinkage</a> in
     everything but name: a zone with more supporting data should count for more than
-    a sparse one.</p>
+    a sparse one. Read as two separate ideas, though, "breaks down the data to
+    smaller samples & then average it out" is its own, different mechanism —
+    resampling the rows, not just weighting the zones — which is exactly what <a
+    href="how-it-works.html#zoneforest"><code>ZoneForest</code></a> shipped as: a
+    bagged ensemble of shallow zone models, each fit on its own bootstrap resample
+    and its own column subset, averaged into one prediction — the "averaging"
+    paradigm the notebook describes here, sitting deliberately apart from
+    <code>ZoneBoostRegressor</code>'s own sequential-boosting-on-one-sample
+    paradigm.</p>
     <p>It then defines four kinds of regions by name — inner core, outer core,
     outliers, with sub-cases for whether a point matters to one variable, both, or
-    neither — which is a hand-drawn precursor to the model shrinking sparse or
-    disagreeing zones toward a shared prior rather than trusting every region
-    equally. The "important steps to include" list underneath — correlation,
-    covariance, joint/conditional probability, interaction effects, point-biserial
-    correlation, mean/median/mode, variance, range — is essentially a checklist of
-    the descriptive statistics zoneboost's zones are built from, rather than anything
-    resembling a decision-tree split criterion or a gradient-descent update.</p>
+    neither. Read as a shrinkage story, that's a hand-drawn precursor to the model
+    shrinking sparse or disagreeing zones toward a shared prior rather than trusting
+    every region equally. Read as a scoring story, it's what <a
+    href="how-it-works.html#depth-transformer"><code>DepthTransformer</code></a>
+    generalizes into a single continuous number — a point's Mahalanobis distance
+    from the joint center of a group of columns, replacing the hand-drawn discrete
+    rings with one coreness score that composes with any downstream model. The
+    "important steps to include" list underneath — correlation, covariance,
+    joint/conditional probability, interaction effects, point-biserial correlation,
+    mean/median/mode, variance, range — is essentially a checklist of the descriptive
+    statistics zoneboost's zones are built from, rather than anything resembling a
+    decision-tree split criterion or a gradient-descent update.</p>
     <p>The closing note is the earliest version of an evaluation discipline that
     stuck: "if data follows a date pattern, it's broken down to follow [a] sequential
     date pattern; if no date pattern, data is chosen without replacement" — and
@@ -148,7 +193,11 @@
     href="how-it-works.html#honest-data-splits">honest data splits</a>, <a
     href="how-it-works.html#cross-fitted-cell-means">cross-fitted cell means</a>, and
     <a href="explaining-predictions.html#bootstrap-stability">bootstrap
-    stability</a>.</p>
+    stability</a>. The "sequential date pattern" half specifically is now also its
+    own estimator rather than just an evaluation discipline: <a
+    href="how-it-works.html#zoneboosttimeseries"><code>ZoneBoostTimeSeries</code></a>
+    fits one model per period, walk-forward, and compares each consecutive pair
+    automatically.</p>
 
     <h2 id="what-stuck">What Stuck, and What Didn't</h2>
     <p>Read together, three ideas from these pages survived essentially intact into
@@ -173,19 +222,33 @@
       <li>The fixed 2D grid on page 1 gave way to <a
       href="how-it-works.html#continuous-vs-categorical">adaptive, data-driven zone
       boundaries</a> re-derived every boosting round, rather than one grid drawn
-      once.</li>
-      <li>"The ado-transformer" as a named, standalone preprocessing step never
-      shipped — its job got absorbed into the zone-fitting step itself rather than
-      staying a separate transform.</li>
+      once — and, within a zone, to a genuinely continuous fit rather than a flat
+      average, for any column opted into <a
+      href="how-it-works.html#spline-zones">spline zones</a>.</li>
+      <li>"The ado-transformer" never shipped as a literal class of that name — but
+      unlike the original assessment of this page, its job didn't just get absorbed
+      invisibly into the zone-fitting step. <a
+      href="how-it-works.html#zonefeaturespace"><code>ZoneFeatureSpace</code></a>
+      shipped later as a real, standalone composed feature space, close to the
+      original pitch in spirit if not in name.</li>
       <li>The manual "re-check boxplots as the model changes" habit on page 2 is now
       closer to an explicit tool — <a
       href="explaining-predictions.html#time-based-drift-comparison">time-based drift
-      comparison</a> — than something a person has to remember to do.</li>
+      comparison</a>, its threshold-triggered sibling <a
+      href="explaining-predictions.html#drift-threshold-monitor"><code>flag_drift</code></a>,
+      and the boxplots themselves via <a
+      href="how-it-works.html#zoneboost-eda"><code>zone_boxplot</code></a> — than
+      something a person has to remember to do.</li>
     </ul>
     <p>None of this was planned as a coherent design when it was written — it reads
     like someone working out, page by page, why a decision tree's opacity bothered
-    them and what a transparent alternative would have to track instead. The rest of
-    these docs describe what that alternative turned into.</p>
+    them and what a transparent alternative would have to track instead. As of this
+    writing, essentially every question raised across these three pages has a shipped
+    answer — the one deliberately open item left on <a
+    href="https://github.com/stainaz/zoneboost/blob/main/IDEAS.md">the ideas
+    ledger</a> is a pure performance optimization (Cythonizing the zone lookup/split
+    search), not a scope gap. The rest of these docs describe what the notebook's
+    ideas turned into.</p>
   </article>
 </div>
 
