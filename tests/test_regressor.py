@@ -286,6 +286,45 @@ def test_max_interaction_order_3_improves_fit_on_genuine_triple_interaction():
     assert any(len(round_["triples"]) > 0 for round_ in model_triples.rounds_)
 
 
+def test_max_interaction_order_3_fits_with_unequal_per_column_zone_counts():
+    # Regression test for a real bug: _get_pair returned a joint-deviation
+    # array as-is when only the reversed key was stored, instead of
+    # transposing it, which only happened to avoid an IndexError when every
+    # column's zone count was equal (e.g. _three_way_interaction_data's own
+    # 3 symmetric uniform columns above never triggered it). A low-
+    # cardinality column ("b", 3 distinct values) alongside two adaptively-
+    # zoned continuous columns is the actual failure condition reported
+    # against v0.38.0/v0.42.0.
+    rng = np.random.default_rng(0)
+    n = 400
+    X = pd.DataFrame(
+        {
+            "a": rng.uniform(-3, 3, n),
+            "b": rng.integers(0, 3, n).astype(float),
+            "c": rng.uniform(-3, 3, n),
+        }
+    )
+    y = X["a"] * X["b"] + X["b"] * X["c"] + X["a"] * X["c"] + rng.normal(0, 0.5, n)
+
+    model = ZoneBoostRegressor(
+        n_rounds=15, random_state=0, col_subsample=1.0, max_interaction_order=3, validation_fraction=0
+    ).fit(X, y)  # must not raise IndexError
+    pred = model.predict(X)
+    explained = model.explain(X)
+    np.testing.assert_allclose(explained.sum(axis=1).to_numpy(), pred, atol=1e-8)
+
+
+def test_shrinkage_m_zero_fits_without_nan():
+    # Regression test: shrinkage_m=0.0 used to produce a 0/0 NaN for any
+    # zone with no supporting rows in a given round/fold, which then made
+    # the Lasso combination step raise ValueError("Input X contains NaN").
+    X, y = _three_way_interaction_data()
+    model = ZoneBoostRegressor(n_rounds=15, random_state=0, shrinkage_m=0.0, validation_fraction=0).fit(X, y)
+    pred = model.predict(X)
+    assert np.all(np.isfinite(pred))
+    np.testing.assert_allclose(model.explain(X).sum(axis=1).to_numpy(), pred, atol=1e-8)
+
+
 def _non_monotonic_looking_data(n=800, seed=0):
     # An overall increasing trend in x with a real, noisy dip in the
     # middle -- without a constraint the fitted main effect should NOT

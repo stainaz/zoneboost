@@ -10,6 +10,7 @@ from zoneboost._weak_learner import (
     _cross_fitted_contributions,
     _estimate_boundary_lambda,
     _fit_lasso_weights,
+    _get_pair,
     _make_folds,
     _pair_interaction_score,
     _pair_shrunk_deviation,
@@ -968,3 +969,74 @@ def test_weak_learner_fit_track_reliability_default_bit_identical():
         np.testing.assert_array_equal(a[2][key], b[2][key])
     np.testing.assert_array_equal(a[4], b[4])
     assert a[5] is None and b[5] is None
+
+
+# ---- shrinkage_m=0 divide-by-zero (an empty zone with m=0 has neither its
+# own data nor a prior weight -- 0/0) ------------------------------------
+
+def test_zone_shrunk_deviation_m_zero_empty_zone_is_zero_not_nan():
+    # zone 1 has zero supporting rows; m=0 means the usual "lean on the
+    # prior" escape hatch is also switched off -- must fall back to a zero
+    # deviation (no information at all), never NaN.
+    zone_values = np.array([0, 0, 0])
+    target_values = np.array([5.0, 5.0, 5.0])
+    with np.errstate(invalid="raise", divide="raise"):
+        deviation = _zone_shrunk_deviation(zone_values, target_values, overall_stat=0.0, n_zones=2, m=0.0)
+    assert np.all(np.isfinite(deviation))
+    assert deviation[1] == 0.0
+    assert deviation[0] == pytest.approx(5.0)  # zone 0 has its own data -- m=0 means fully trust it
+
+
+def test_pair_shrunk_deviation_m_zero_empty_cell_falls_back_to_marginal_prior():
+    # Cell (zone_a=1, zone_b=1) has no supporting rows; m=0 disables the
+    # ordinary "shrink toward dev_a+dev_b" mechanism's own weighting, so by
+    # continuity (the same formula's own limit as m -> 0 for any non-empty
+    # cell) the empty cell's deviation must still equal dev_a + dev_b
+    # exactly, not NaN.
+    rng = np.random.default_rng(0)
+    n = 200
+    za = rng.integers(0, 2, n)
+    zb = np.zeros(n, dtype=int)  # zb is always 0 -> zone (1, 1) is always empty
+    target = rng.normal(size=n)
+    with np.errstate(invalid="raise", divide="raise"):
+        deviation = _pair_shrunk_deviation(za, zb, target, overall_stat=float(target.mean()), n_zones_a=2, n_zones_b=2, m=0.0)
+    assert np.all(np.isfinite(deviation))
+    dev_a = _zone_shrunk_deviation(za, target, float(target.mean()), 2, 0.0)
+    dev_b = _zone_shrunk_deviation(zb, target, float(target.mean()), 2, 0.0)
+    np.testing.assert_allclose(deviation[1, 1], dev_a[1] + dev_b[1])
+
+
+def test_triple_shrunk_deviation_m_zero_no_nan():
+    rng = np.random.default_rng(0)
+    n = 300
+    za = rng.integers(0, 3, n)
+    zb = rng.integers(0, 3, n)
+    zc = np.zeros(n, dtype=int)  # zone 1 of c is always empty
+    target = rng.normal(size=n)
+    with np.errstate(invalid="raise", divide="raise"):
+        deviation = _triple_shrunk_deviation(za, zb, zc, target, float(target.mean()), 3, 3, 2, m=0.0)
+    assert np.all(np.isfinite(deviation))
+
+
+# ---- _get_pair must transpose a reversed-key ndarray, not return it as-is
+# (the root cause of max_interaction_order=3's IndexError on unequal zone
+# counts) -------------------------------------------------------------
+
+def test_get_pair_transposes_reversed_key_ndarray():
+    # Stored under ("b", "a"): shape (n_zones_b, n_zones_a) = (3, 5).
+    stored = np.arange(15.0).reshape(3, 5)
+    interactions = {("b", "a"): stored}
+    result = _get_pair(interactions, "a", "b")
+    assert result.shape == (5, 3)
+    np.testing.assert_array_equal(result, stored.T)
+    # And the direct key order is returned completely untouched.
+    interactions_direct = {("a", "b"): stored}
+    np.testing.assert_array_equal(_get_pair(interactions_direct, "a", "b"), stored)
+
+
+def test_get_pair_passes_scalars_through_unchanged():
+    # pair_importance-style dict: values are plain floats, not arrays --
+    # order must not matter and nothing should be "transposed".
+    importance = {("b", "a"): 0.42}
+    assert _get_pair(importance, "a", "b") == 0.42
+    assert _get_pair({("a", "b"): 0.42}, "a", "b") == 0.42

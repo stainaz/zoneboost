@@ -234,7 +234,15 @@ def _zone_shrunk_deviation(
     density-aware spirit as the shrinkage above.
     """
     cell_stat, counts = _zone_raw_stat(zone_values, target_values, n_zones, quantile, trim_fraction, sample_weight)
-    shrunk_stat = (counts * cell_stat + m * overall_stat) / (counts + m)
+    denom = counts + m
+    # A zone with no supporting rows (count=0) *and* m=0 (no prior weight
+    # either) has literally nothing to shrink toward -- 0/0. Falls back to
+    # overall_stat (deviation=0), the same "count=0 reduces to deviation=0"
+    # precedent this docstring already documents for the ordinary m>0 case,
+    # extended continuously to m=0.
+    shrunk_stat = np.divide(
+        counts * cell_stat + m * overall_stat, denom, out=np.full_like(denom, overall_stat), where=denom > 0
+    )
     deviation = shrunk_stat - overall_stat
 
     if monotonic != 0:
@@ -647,7 +655,12 @@ def _fit_spline_main_effect(
             else float(miss_residual.mean())
         )
         # Same shrink-then-center-to-a-deviation pattern as intercept above.
-        missing_value = (n_miss * raw_missing + m * overall_stat) / (n_miss + m) - overall_stat
+        # n_miss + m == 0 only when every missing row has zero sample_weight
+        # and m == 0 -- no evidence and no prior weight, so this falls back
+        # to the same "no information -> zero deviation" convention used
+        # everywhere else in this module rather than 0/0.
+        missing_denom = n_miss + m
+        missing_value = (n_miss * raw_missing + m * overall_stat) / missing_denom - overall_stat if missing_denom > 0 else 0.0
     else:
         missing_value = 0.0
 
@@ -742,7 +755,15 @@ def _pair_shrunk_deviation(
     cell_stat = cell_stat.reshape(n_zones_a, n_zones_b)
     counts = counts.reshape(n_zones_a, n_zones_b)
     prior = overall_stat + dev_a[:, None] + dev_b[None, :]
-    shrunk_stat = (counts * cell_stat + m * prior) / (counts + m)
+    denom = counts + m
+    # count=0 already falls back to shrunk_stat=prior for any m>0 (the
+    # documented "borrow from the two marginals" behavior); m=0 is just the
+    # limit of that same formula as m -> 0, so an empty cell with m=0 too
+    # (0/0) gets exactly the same marginal-borrowing fallback by continuity,
+    # not a special case.
+    shrunk_stat = np.divide(
+        counts * cell_stat + m * prior, denom, out=np.array(prior, dtype=float), where=denom > 0
+    )
     deviation = shrunk_stat - overall_stat
 
     if monotonic_a != 0:
@@ -802,7 +823,11 @@ def _triple_shrunk_deviation(
         + dev_ac[:, None, :]
         + dev_bc[None, :, :]
     )
-    shrunk_stat = (counts * cell_stat + m * prior) / (counts + m)
+    denom = counts + m
+    # Same m=0-is-the-continuous-limit-of-m>0 fallback as the pair case.
+    shrunk_stat = np.divide(
+        counts * cell_stat + m * prior, denom, out=np.array(prior, dtype=float), where=denom > 0
+    )
     deviation = shrunk_stat - overall_stat
 
     if monotonic_a != 0:
@@ -1429,8 +1454,24 @@ def _cross_fitted_contributions(
 def _get_pair(interactions: dict, x: str, y: str):
     """Fetch a pair's value regardless of which of the two key orders
     ``interactions`` happened to store it under (pair keys follow
-    ``predictor_subset``'s order, not alphabetical)."""
-    return interactions[(x, y)] if (x, y) in interactions else interactions[(y, x)]
+    ``predictor_subset``'s order, not alphabetical).
+
+    A 2D joint-deviation array (the ``interactions`` dict's own values) is
+    always stored shape ``(n_zones[a], n_zones[b])`` for whichever key order
+    ``(a, b)`` it was fit under -- axis 0 indexed by the *first* key
+    element's zones (see ``_pair_shrunk_deviation``/``_fit_pairs``). So when
+    only the reversed key ``(y, x)`` is present, the stored array is shaped
+    ``(n_zones[y], n_zones[x])`` and must be transposed to match what a
+    caller asking for ``(x, y)`` expects -- returning it as-is silently
+    swaps which axis belongs to which column, which is harmless only when
+    both columns happen to have the same zone count and raises
+    ``IndexError`` otherwise. This function is also called with a ``dict``
+    of plain scalars (``pair_importance``), where transposing is a no-op,
+    so only an ``ndarray`` value is actually transposed."""
+    if (x, y) in interactions:
+        return interactions[(x, y)]
+    value = interactions[(y, x)]
+    return value.T if isinstance(value, np.ndarray) else value
 
 
 def _fit_pairs(
