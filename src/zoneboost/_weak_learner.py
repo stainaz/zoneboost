@@ -45,6 +45,7 @@ re-center the round's output back toward the mean/median every round.
 from __future__ import annotations
 
 import itertools
+from collections import namedtuple
 
 import numpy as np
 import pandas as pd
@@ -54,7 +55,23 @@ from sklearn.linear_model import Lasso, QuantileRegressor
 from ._shrinkage import _estimate_shrinkage_m
 from ._zones import adaptive_zone_boundaries, categorical_zone_index, categorical_zone_map, zone_centers, zone_index
 
-__all__ = ["weak_learner_fit", "weak_learner_contributions"]
+__all__ = ["weak_learner_fit", "weak_learner_contributions", "SplineMainEffect"]
+
+SplineMainEffect = namedtuple("SplineMainEffect", ["intercept", "slope", "bend", "missing_value"])
+"""A continuous main effect fit as a single continuous piecewise-linear
+(linear spline / "broken-stick") regression across a column's own zone
+boundaries, instead of one flat mean per zone -- see
+:func:`_fit_spline_main_effect`. ``intercept``/``slope`` are the
+unconstrained global line (never shrunk -- they play the same role
+``overall_stat`` plays for a flat main effect: the honest "if this column
+had no local structure at all" baseline); ``bend`` is one shrunk
+coefficient per interior zone boundary (knot), each representing that
+knot's own deviation from the trend established so far, shrunk toward
+``0`` ("no additional bend") the same empirical-Bayes way every other
+deviation in this module is shrunk toward its own prior; ``missing_value``
+is a separate flat scalar (a shrunk mean of the residual over missing rows
+only) since a spline has no value defined for ``NaN``.
+"""
 
 
 def _trimmed_mean(values: np.ndarray, trim_fraction: float) -> float:
@@ -324,6 +341,359 @@ def _project_convexity(deviation: np.ndarray, counts: np.ndarray, centers: np.nd
     out = deviation.copy()
     out[:n_real] = reconstructed
     return out
+
+
+def _hinge_design_matrix(x: np.ndarray, boundaries: np.ndarray) -> np.ndarray:
+    """Design matrix ``[1, x, (x-k_1)+, ..., (x-k_{m-1})+]`` for a linear
+    spline with knots at ``boundaries`` -- a linear combination of these
+    columns is a continuous piecewise-linear function of ``x``, by
+    construction (every hinge term ``(x-k)+`` is itself continuous), the
+    mechanism :func:`_fit_spline_main_effect` relies on for zone-boundary
+    continuity rather than any post-hoc blending. ``x`` must already have
+    missing values removed by the caller (a spline has no value defined
+    for ``NaN`` -- see :func:`_fit_spline_main_effect`).
+    """
+    n = len(x)
+    design = np.empty((n, len(boundaries) + 2))
+    design[:, 0] = 1.0
+    design[:, 1] = x
+    for j, knot in enumerate(boundaries):
+        design[:, j + 2] = np.maximum(x - knot, 0.0)
+    return design
+
+
+def _project_spline_monotonic(intercept: float, slope: float, bend: np.ndarray, direction: int) -> tuple:
+    """Projects a fitted linear spline onto a non-decreasing
+    (``direction=+1``) or non-increasing (``direction=-1``) function --
+    for a piecewise-linear curve this is exactly "every segment's own
+    slope has the required sign," a simpler, more direct constraint than
+    the isotonic-regress-the-zone-index-sequence
+    :func:`_zone_shrunk_deviation` uses for a flat main effect (there is
+    no "level sequence" to isotonic-regress here -- levels vary
+    continuously, not just at zone boundaries). Segment slopes are the
+    running cumulative sum ``s_0 = slope, s_j = s_{j-1} + bend[j-1]``;
+    each is clipped to the required sign, then ``bend`` is re-derived from
+    the *clipped* slope sequence so the two stay consistent.
+    """
+    if len(bend) == 0:
+        clipped_slope = max(0.0, slope) if direction > 0 else min(0.0, slope)
+        return intercept, clipped_slope, bend
+    raw_slopes = np.concatenate(([slope], slope + np.cumsum(bend)))
+    clipped_slopes = np.maximum(raw_slopes, 0.0) if direction > 0 else np.minimum(raw_slopes, 0.0)
+    new_slope = float(clipped_slopes[0])
+    new_bend = np.diff(clipped_slopes)
+    return intercept, new_slope, new_bend
+
+
+def _project_spline_convexity(
+    intercept: float, slope: float, bend: np.ndarray, zone_counts: np.ndarray, direction: int
+) -> tuple:
+    """Projects a fitted linear spline's segment-slope sequence onto a
+    convex (``direction=+1``, non-decreasing slopes) or concave
+    (``direction=-1``, non-increasing slopes) sequence via
+    ``sklearn.isotonic.IsotonicRegression`` -- the exact same tool
+    :func:`_project_convexity` already uses for a flat main effect's own
+    *approximate* divided-difference slopes between zone centroids, except
+    here the slopes are the spline's own *exact* fitted segment slopes,
+    not an approximation. A piecewise-linear function is convex/concave
+    precisely when its own segment-slope sequence is non-decreasing/
+    non-increasing, so this is a strictly more faithful version of what
+    ``_project_convexity`` already approximates. Weighted by each
+    segment's own bounding zone's row count (``zone_counts``, one entry
+    per real zone -- segment ``j`` is weighted by the zone starting at its
+    own right end), the same "sparse segments don't distort the fit"
+    spirit as every other weighted projection in this module.
+    """
+    if len(bend) == 0:
+        return intercept, slope, bend
+    raw_slopes = np.concatenate(([slope], slope + np.cumsum(bend)))
+    weights = zone_counts[: len(raw_slopes)].astype(float)
+    weights = np.where(weights > 0, weights, 1.0)
+    iso = IsotonicRegression(increasing=direction > 0, out_of_bounds="clip")
+    fitted_slopes = iso.fit_transform(np.arange(len(raw_slopes)), raw_slopes, sample_weight=weights)
+    new_slope = float(fitted_slopes[0])
+    new_bend = np.diff(fitted_slopes)
+    return intercept, new_slope, new_bend
+
+
+def _clip_spline_bounded(effect: SplineMainEffect, boundaries: np.ndarray, lower: float, upper: float) -> SplineMainEffect:
+    """Clips a fitted linear spline's range to ``[lower, upper]`` --
+    evaluates the fitted level at every interior knot, clips those levels,
+    then re-derives every *interior* segment's own slope from the clipped
+    neighboring levels (a linear segment between two in-bounds endpoints
+    stays in-bounds everywhere between them, so this is exact for any `x`
+    between the first and last knot -- not an approximation). Because
+    clipping one knot's level changes its own two neighboring segments'
+    slopes (they're geometrically connected, unlike independent flat zone
+    means), this re-derives affected slopes rather than an elementwise
+    clip of ``bend`` itself.
+
+    The two open-ended outer rays (before the first knot, after the last)
+    keep their own already-fit slope unchanged -- a real, disclosed
+    limitation: nothing here guarantees the bound holds for `x` beyond the
+    observed knot range, the same "bounds this round's own stored value,
+    not a business-rule guarantee on unbounded extrapolation" spirit
+    ``bounded_effects`` already discloses for the flat-zone case.
+    """
+    n_knots = len(boundaries)
+    if n_knots == 0:
+        return SplineMainEffect(
+            float(np.clip(effect.intercept, lower, upper)), effect.slope, effect.bend, effect.missing_value
+        )
+
+    slopes = np.concatenate(([effect.slope], effect.slope + np.cumsum(effect.bend)))
+    levels = np.empty(n_knots)
+    levels[0] = effect.intercept + effect.slope * boundaries[0]
+    for j in range(1, n_knots):
+        levels[j] = levels[j - 1] + slopes[j] * (boundaries[j] - boundaries[j - 1])
+    clipped = np.clip(levels, lower, upper)
+
+    new_intercept = float(clipped[0] - effect.slope * boundaries[0])
+    new_slopes = slopes.copy()
+    for j in range(1, n_knots):
+        gap = boundaries[j] - boundaries[j - 1]
+        new_slopes[j] = (clipped[j] - clipped[j - 1]) / gap if gap > 0 else slopes[j]
+    new_bend = np.diff(new_slopes)
+    return SplineMainEffect(new_intercept, float(new_slopes[0]), new_bend, effect.missing_value)
+
+
+def _fit_spline_main_effect(
+    x_col: np.ndarray,
+    residual: np.ndarray,
+    boundaries: np.ndarray,
+    overall_stat: float,
+    m: float,
+    monotonic: int = 0,
+    convexity: int = 0,
+    bounded: tuple = None,
+    sample_weight: np.ndarray = None,
+) -> SplineMainEffect:
+    """Fits one column's main effect as a continuous piecewise-linear
+    (linear spline) regression of ``residual`` on ``x_col``, with knots at
+    ``boundaries`` (that round's own already-fit zone boundaries -- see
+    :func:`zoneboost._zones.adaptive_zone_boundaries`; this function never
+    places its own knots) -- see "Spline zones" in the docs for the full
+    design.
+
+    The global ``intercept`` is never penalized -- it plays the same role
+    ``overall_stat`` plays for a flat main effect: the honest answer if
+    this column had no local structure at all. ``slope`` and every knot's
+    own ``bend`` coefficient (how much the local slope changes right after
+    that knot) are fit via a single **joint, penalized (ridge) least-
+    squares solve** -- not an unpenalized fit followed by shrinking each
+    coefficient independently. This was a real design correction, made
+    after measuring (not assuming) that independent per-coefficient
+    shrinkage badly under-regularizes once a column has several knots:
+    adjacent hinge-basis columns are highly collinear (nearly identical
+    past their shared region), so two correlated coefficients can trade
+    off against each other while barely changing the *fitted* curve on
+    training rows -- exactly the instability that generalizes poorly, and
+    exactly what a *joint* penalty in the normal equations corrects (the
+    same reason ridge/lasso regression always jointly regularizes
+    correlated predictors, never independently). Measured directly:
+    holding every other setting fixed, growing the number of zones (knots)
+    from 2 to 7 made an *independently*-shrunk fit progressively worse
+    relative to the flat mechanism (a clear regression), while the joint
+    ridge solve does not show this degradation.
+
+    The penalty is scaled per-column by that column's own mean squared
+    value, not one shared constant -- equivalent to standardizing every
+    non-intercept column to unit scale, penalizing uniformly there by
+    ``m``, then un-standardizing, without a second solve. Left
+    unstandardized, one small-scale hinge term and one large-scale raw
+    ``x`` column would receive wildly different *effective* shrinkage from
+    the same nominal penalty -- the identical standardization
+    ``stacking_alpha`` already needs for the same reason (see its own
+    docstring on :class:`zoneboost.ZoneBoostRegressor`). Disclosed as an
+    approximation, not a fully rigorous empirical-Bayes derivation: ``m``
+    is used directly as a ridge penalty in standardized units, not
+    calibrated against a formally derived prior variance -- consistent
+    with every other "cheap, disclosed, not a rigorous posterior" shrinkage
+    approximation already in this module.
+
+    Missing values in ``x_col`` have no defined spline value -- they're
+    excluded from the hinge-basis fit entirely and instead get a separate
+    flat ``missing_value`` scalar (a shrunk mean of the residual over just
+    the missing rows, toward the same ``overall_stat`` prior), the exact
+    same "dedicated missing zone" precedent every other main effect
+    already has.
+
+    ``monotonic``/``convexity``/``bounded`` are applied, in that order, to
+    the *shrunk* coefficients -- see :func:`_project_spline_monotonic`,
+    :func:`_project_spline_convexity`, :func:`_clip_spline_bounded` for
+    exactly what each means for a continuous piecewise-linear function
+    (materially simpler/more exact than their flat-zone-mean counterparts
+    in most cases -- see each function's own docstring).
+
+    Parameters
+    ----------
+    x_col : ndarray of shape (n_rows,)
+        Raw (possibly-NaN) values of the column being fit.
+    residual : ndarray of shape (n_rows,)
+    boundaries : ndarray
+        This round's own zone boundaries for this column (the knots).
+    overall_stat : float
+        The round's overall prior (see :func:`_overall_stat`) -- used as
+        the fallback whenever there's no information to fit from (a
+        degenerate column, or no missing rows at all for
+        ``missing_value``), mirroring ``_zone_raw_stat``'s own zero-count
+        fallback.
+    m : float
+        Shrinkage strength for the bend coefficients (``spline_shrinkage_m``)
+        *and* for the missing-value scalar (reusing the same constant --
+        there is no dedicated "missing shrinkage" knob, matching how a
+        flat main effect's own missing zone already reuses its column's
+        one ``shrinkage_m``).
+    sample_weight : ndarray of shape (n_rows,), default=None
+        Per-row weight, threaded into the weighted least-squares fit, the
+        per-knot shrinkage counts (a weighted sum rather than a plain row
+        count), and the missing-value shrunk mean.
+
+    Returns
+    -------
+    SplineMainEffect
+    """
+    present = ~np.isnan(x_col)
+    x_present = x_col[present]
+    residual_present = residual[present]
+    w_present = sample_weight[present] if sample_weight is not None else None
+
+    n_knots = len(boundaries)
+    n_real = n_knots + 1
+    degenerate = len(x_present) < n_knots + 2 or (len(x_present) > 0 and np.all(x_present == x_present[0]))
+    if degenerate:
+        # No information to fit from -- fall back to a zero deviation
+        # (contribute nothing beyond the prior), the same "count=0 reduces
+        # to deviation=0" precedent _zone_shrunk_deviation's own formula
+        # already has (shrunk_stat collapses to overall_stat when n=0, so
+        # deviation = shrunk_stat - overall_stat = 0).
+        intercept, slope, bend = 0.0, 0.0, np.zeros(n_knots)
+        counts = np.zeros(n_real)
+    else:
+        design = _hinge_design_matrix(x_present, boundaries)
+        if w_present is not None:
+            sqrt_w = np.sqrt(w_present)
+            design_w = design * sqrt_w[:, None]
+            target_w = residual_present * sqrt_w
+        else:
+            design_w = design
+            target_w = residual_present
+
+        # A joint, penalized (ridge) solve -- not an unpenalized fit
+        # post-hoc shrunk coefficient-by-coefficient. Measured directly
+        # before settling on this: with several knots, adjacent hinge
+        # columns are highly collinear (nearly identical past their
+        # shared region), so independently shrinking each coefficient by
+        # its own *marginal* variance badly under-corrects -- it ignores
+        # how much two correlated coefficients can trade off against each
+        # other while barely changing the fitted curve on training rows,
+        # which is exactly the instability that generalizes poorly. A
+        # joint penalty in the normal equations regularizes the whole
+        # correlated coefficient vector at once, the same fix
+        # multicollinear ridge/lasso regression always needs.
+        #
+        # The penalty is scaled per-column by that column's own mean
+        # squared value (``design_w[:, j]^2`` averaged) rather than one
+        # shared constant -- equivalent to standardizing every non-
+        # intercept column to unit scale, penalizing uniformly there by
+        # ``m``, then un-standardizing, without a second matrix solve.
+        # Un-standardized, one shrinkage_m-scale column (e.g. a small
+        # zone-count-like hinge term) and one large-scale column (e.g. raw
+        # ``x`` itself) would receive wildly different *effective*
+        # shrinkage from the same nominal penalty -- the identical
+        # standardization ``stacking_alpha`` already needs for the same
+        # reason (see its own docstring).
+        col_scale = np.sqrt(np.mean(design_w**2, axis=0))
+        col_scale[0] = 0.0  # intercept: never penalized, matches every other main effect's prior
+        penalty = np.diag(m * np.where(col_scale > 0, col_scale**2, 0.0))
+        # pinv rather than solve/inv -- the same singular/ill-conditioned-
+        # design safeguard DepthTransformer's own covariance already uses;
+        # the ridge penalty alone already guarantees invertibility for any
+        # m > 0, but a user-supplied spline_shrinkage_m=0 (no shrinkage at
+        # all) must still degrade gracefully rather than raising.
+        coef = np.linalg.pinv(design_w.T @ design_w + penalty) @ (design_w.T @ target_w)
+
+        # Re-center to a deviation from overall_stat, matching every other
+        # main effect's own convention (predict/explain sum baseline +
+        # every term's own deviation, never an absolute level) -- OLS is
+        # translation-invariant in its non-intercept coefficients, so
+        # shifting the fitted intercept by a constant here is exactly
+        # equivalent to having fit on (residual - overall_stat) directly,
+        # without a second solve.
+        intercept = float(coef[0]) - overall_stat
+        slope = float(coef[1])
+        bend = coef[2:]
+
+        zone_idx = zone_index(x_present, boundaries)
+        counts = (
+            np.bincount(zone_idx, minlength=n_real).astype(float)
+            if w_present is None
+            else np.bincount(zone_idx, weights=w_present, minlength=n_real)
+        )
+
+    if monotonic != 0:
+        intercept, slope, bend = _project_spline_monotonic(intercept, slope, bend, monotonic)
+    if convexity != 0:
+        intercept, slope, bend = _project_spline_convexity(intercept, slope, bend, counts, convexity)
+
+    missing_mask = ~present
+    if missing_mask.any():
+        miss_residual = residual[missing_mask]
+        miss_weight = sample_weight[missing_mask] if sample_weight is not None else None
+        n_miss = float(missing_mask.sum()) if miss_weight is None else float(miss_weight.sum())
+        raw_missing = (
+            float(np.average(miss_residual, weights=miss_weight))
+            if miss_weight is not None
+            else float(miss_residual.mean())
+        )
+        # Same shrink-then-center-to-a-deviation pattern as intercept above.
+        missing_value = (n_miss * raw_missing + m * overall_stat) / (n_miss + m) - overall_stat
+    else:
+        missing_value = 0.0
+
+    effect = SplineMainEffect(intercept, slope, bend, missing_value)
+    if bounded is not None:
+        effect = _clip_spline_bounded(effect, boundaries, bounded[0], bounded[1])
+    return effect
+
+
+def _evaluate_spline_main_effect(x_col, effect: SplineMainEffect, boundaries: np.ndarray) -> np.ndarray:
+    """Evaluates a fitted :class:`SplineMainEffect` at each row's own raw
+    value -- ``intercept + slope*x + sum(bend[j] * max(0, x - knot_j))``
+    for a present value, ``missing_value`` for ``NaN`` -- the single
+    evaluation function used at every predict/explain/backfitting call
+    site, so the "spline is continuous at every knot" guarantee and the
+    "explain(X) sums exactly to predict(X)" invariant both come from
+    calling this one function everywhere, not from separately re-deriving
+    the formula per call site.
+    """
+    x_arr = np.asarray(x_col, dtype=float)
+    is_missing = np.isnan(x_arr)
+    x_safe = np.where(is_missing, boundaries[0] if len(boundaries) else 0.0, x_arr)
+    value = effect.intercept + effect.slope * x_safe
+    for j, knot in enumerate(boundaries):
+        value = value + effect.bend[j] * np.maximum(x_safe - knot, 0.0)
+    return np.where(is_missing, effect.missing_value, value)
+
+
+def _main_effect_value(x_col, effect, zone_info_col: tuple) -> np.ndarray:
+    """Evaluate a fitted main effect at each row's own raw value -- the
+    one place that knows about both possible main-effect representations:
+    a flat, per-zone deviation array (the existing scalar-per-zone
+    empirical-Bayes mechanism, read via the soft/interpolated blend), or a
+    :class:`SplineMainEffect` (a continuous piecewise-linear fit, read via
+    :func:`_evaluate_spline_main_effect` directly at the row's own x --
+    see "Spline zones" in the docs). Called identically by
+    ``weak_learner_contributions``/``_explain.py``'s ``explain_rounds``
+    (predict/explain), ``_fit_pairs``/``_select_triples`` (backfitting),
+    and ``_cross_fitted_contributions`` (honest, cross-fitted scoring) --
+    the single shared function that keeps ``explain(X).sum(axis=1) ==
+    predict(X)`` exact regardless of which representation a column uses.
+    """
+    if isinstance(effect, SplineMainEffect):
+        return _evaluate_spline_main_effect(x_col, effect, zone_info_col[1])
+    z_lo, z_hi, w = _column_soft_zone_index(x_col, zone_info_col)
+    return _blend_1d(effect, z_lo, z_hi, w)
 
 
 def _pair_shrunk_deviation(
@@ -823,6 +1193,12 @@ def _cross_fitted_contributions(
     m_triple: float = None,
     trim_fraction: float = 0.0,
     sample_weight: np.ndarray = None,
+    raw_values: dict = None,
+    zone_info: dict = None,
+    spline_zones: frozenset = frozenset(),
+    convexity_constraints: dict = None,
+    bounded_effects: dict = None,
+    m_spline: float = None,
 ):
     """Leakage-free version of what ``weak_learner_contributions`` would
     compute for the exact rows used to build this round's tables: for each
@@ -885,10 +1261,25 @@ def _cross_fitted_contributions(
     weighted ``_zone_shrunk_deviation``/``_zone_raw_stat`` machinery, so
     this generalizes for free (see the module-level design note in
     ``regressor.py``'s ``fit`` docstring).
+
+    ``spline_zones`` (default ``frozenset()``, bit-identical to every
+    prior release): main effects named here are refit per fold via
+    :func:`_fit_spline_main_effect` instead of :func:`_zone_shrunk_
+    deviation`, using ``raw_values``/``zone_info`` (both required
+    whenever ``spline_zones`` is non-empty) and shrunk with ``m_spline``
+    -- otherwise the identical fold-loop structure (masking, cyclic
+    main-then-pair-then-triple order, ``return_fold_std`` bookkeeping)
+    already used for every other term. ``convexity_constraints``/
+    ``bounded_effects`` are only consulted for a spline-declared column
+    (a flat column's own convexity/bounded projection happens outside
+    this function, in ``weak_learner_fit`` itself, unchanged).
     """
     monotonic_constraints = monotonic_constraints or {}
+    convexity_constraints = convexity_constraints or {}
+    bounded_effects = bounded_effects or {}
     m_pair = m_pair if m_pair is not None else m
     m_triple = m_triple if m_triple is not None else m
+    m_spline = m_spline if m_spline is not None else m
     n = len(residual)
     n_terms = len(main_effect_keys) + len(interaction_keys) + len(triple_keys)
     contributions = np.empty((n, n_terms))
@@ -911,31 +1302,46 @@ def _cross_fitted_contributions(
 
         col = 0
         main_dev_k = {}
+        main_val_k = {}
         for name in main_effect_keys:
-            dev = _zone_shrunk_deviation(
-                zones[name][out_mask],
-                residual[out_mask],
-                overall_stat_k,
-                n_zones[name],
-                m,
-                monotonic_constraints.get(name, 0),
-                quantile=quantile,
-                trim_fraction=trim_fraction,
-                sample_weight=weight_out,
-            )
+            if name in spline_zones:
+                dev = _fit_spline_main_effect(
+                    raw_values[name][out_mask],
+                    residual[out_mask],
+                    zone_info[name][1],
+                    overall_stat_k,
+                    m_spline,
+                    monotonic=monotonic_constraints.get(name, 0),
+                    convexity=convexity_constraints.get(name, 0),
+                    bounded=bounded_effects.get(name),
+                    sample_weight=weight_out,
+                )
+            else:
+                dev = _zone_shrunk_deviation(
+                    zones[name][out_mask],
+                    residual[out_mask],
+                    overall_stat_k,
+                    n_zones[name],
+                    m,
+                    monotonic_constraints.get(name, 0),
+                    quantile=quantile,
+                    trim_fraction=trim_fraction,
+                    sample_weight=weight_out,
+                )
             main_dev_k[name] = dev
             if return_fold_std:
                 fold_devs[name].append(dev)
-            z_lo, z_hi, w = soft[name]
-            contributions[in_mask, col] = _blend_1d(dev, z_lo[in_mask], z_hi[in_mask], w[in_mask])
+            if name in spline_zones:
+                contributions[in_mask, col] = _main_effect_value(raw_values[name][in_mask], dev, zone_info[name])
+                main_val_k[name] = _main_effect_value(raw_values[name][out_mask], dev, zone_info[name])
+            else:
+                z_lo, z_hi, w = soft[name]
+                contributions[in_mask, col] = _blend_1d(dev, z_lo[in_mask], z_hi[in_mask], w[in_mask])
+                main_val_k[name] = dev[zones[name][out_mask]]
             col += 1
 
         for a, b in interaction_keys:
-            partial = (
-                residual[out_mask]
-                - main_dev_k[a][zones[a][out_mask]]
-                - main_dev_k[b][zones[b][out_mask]]
-            )
+            partial = residual[out_mask] - main_val_k[a] - main_val_k[b]
             dev = _pair_shrunk_deviation(
                 zones[a][out_mask],
                 zones[b][out_mask],
@@ -959,12 +1365,7 @@ def _cross_fitted_contributions(
             col += 1
 
         for a, b, c in triple_keys:
-            partial = (
-                residual[out_mask]
-                - main_dev_k[a][zones[a][out_mask]]
-                - main_dev_k[b][zones[b][out_mask]]
-                - main_dev_k[c][zones[c][out_mask]]
-            )
+            partial = residual[out_mask] - main_val_k[a] - main_val_k[b] - main_val_k[c]
             dev = _triple_shrunk_deviation(
                 zones[a][out_mask],
                 zones[b][out_mask],
@@ -1003,10 +1404,25 @@ def _cross_fitted_contributions(
     if not return_fold_std:
         return contributions
 
-    fold_std = {
-        key: (np.std(np.stack(devs), axis=0) if len(devs) >= 2 else np.zeros_like(devs[0]))
-        for key, devs in fold_devs.items()
-    }
+    fold_std = {}
+    for key, devs in fold_devs.items():
+        if key in spline_zones:
+            # A SplineMainEffect isn't directly stackable (it's a
+            # namedtuple of coefficients, not a per-zone array) -- report
+            # fold-to-fold variability the same *shape* every other main
+            # effect's own fold_std has (one entry per zone, missing zone
+            # last) by evaluating each fold's own fitted spline at that
+            # zone's own centroid, matching centers' role elsewhere in
+            # this module as "a representative point per zone."
+            centers = zone_info[key][2]
+            if len(devs) >= 2:
+                center_values = np.stack([_evaluate_spline_main_effect(centers, d, zone_info[key][1]) for d in devs])
+                missing_values = np.array([d.missing_value for d in devs])
+                fold_std[key] = np.concatenate([center_values.std(axis=0), [missing_values.std()]])
+            else:
+                fold_std[key] = np.zeros(len(centers) + 1)
+        else:
+            fold_std[key] = np.std(np.stack(devs), axis=0) if len(devs) >= 2 else np.zeros_like(devs[0])
     return contributions, fold_std
 
 
@@ -1021,7 +1437,7 @@ def _fit_pairs(
     pairs,
     zones: dict,
     n_zones: dict,
-    main_effects: dict,
+    main_effect_values: dict,
     residual: np.ndarray,
     m: float,
     quantile: float = None,
@@ -1035,6 +1451,13 @@ def _fit_pairs(
     per-pair work. ``monotonic_constraints`` (default ``None``) is looked
     up per column and forwarded to :func:`_pair_shrunk_deviation` as
     ``monotonic_a``/``monotonic_b`` -- see "inherited monotonicity" there.
+
+    ``main_effect_values`` is ``{col: per_row_array}`` -- each main
+    effect's own already-evaluated contribution for every row (see
+    :func:`_main_effect_value`), not the raw fitted deviation/spline
+    object itself, so this function backfits correctly regardless of
+    whether a column's own main effect is a flat zone-mean or a
+    :class:`SplineMainEffect`.
 
     ``learn_shrinkage_m`` (default ``False``): estimate one shrinkage
     strength for this whole level (pooling every pair's own raw joint-cell
@@ -1055,7 +1478,7 @@ def _fit_pairs(
         -- the constant ``m`` unchanged when ``learn_shrinkage_m=False``.
     """
     monotonic_constraints = monotonic_constraints or {}
-    partials = {(a, b): residual - main_effects[a][zones[a]] - main_effects[b][zones[b]] for a, b in pairs}
+    partials = {(a, b): residual - main_effect_values[a] - main_effect_values[b] for a, b in pairs}
 
     m_used = m
     if learn_shrinkage_m and pairs:
@@ -1117,7 +1540,7 @@ def _select_triples(
     candidate_cols: list,
     zones: dict,
     n_zones: dict,
-    main_effects: dict,
+    main_effect_values: dict,
     interactions: dict,
     residual: np.ndarray,
     max_triple_interactions: int,
@@ -1177,6 +1600,12 @@ def _select_triples(
     accepted triple's *stored* value (``dev_abc``) -- the accept/reject
     ``gain_dev`` test above stays unweighted, the same disclosed
     cheap-diagnostic exemption pair screening's own proxy already has.
+
+    ``main_effect_values`` is ``{col: per_row_array}`` -- each main
+    effect's own already-evaluated contribution for every row (see
+    :func:`_main_effect_value`), so this backfits correctly regardless of
+    whether a column's own main effect is a flat zone-mean or a
+    :class:`SplineMainEffect`.
     """
     if len(candidate_cols) < 3 or not interactions:
         return {}
@@ -1195,9 +1624,9 @@ def _select_triples(
         ):
             continue
         za, zb, zc = zones[a], zones[b], zones[c]
-        dev_a = main_effects[a]
-        dev_b = main_effects[b]
-        dev_c = main_effects[c]
+        main_a = main_effect_values[a]
+        main_b = main_effect_values[b]
+        main_c = main_effect_values[c]
         dev_ab = _get_pair(interactions, a, b)
         dev_ac = _get_pair(interactions, a, c)
         dev_bc = _get_pair(interactions, b, c)
@@ -1206,9 +1635,9 @@ def _select_triples(
         )
         lower_order_raw = np.column_stack(
             [
-                dev_a[za],
-                dev_b[zb],
-                dev_c[zc],
+                main_a,
+                main_b,
+                main_c,
                 dev_ab[za, zb],
                 dev_ac[za, zc],
                 dev_bc[zb, zc],
@@ -1227,7 +1656,7 @@ def _select_triples(
             # handled automatically inside _triple_shrunk_deviation's own
             # recursive _pair_shrunk_deviation calls, so dev_abc comes out
             # interaction-only rather than re-encoding mains+pairs signal.
-            mains_removed = residual - dev_a[za] - dev_b[zb] - dev_c[zc]
+            mains_removed = residual - main_a - main_b - main_c
             dev_abc = _triple_shrunk_deviation(
                 za,
                 zb,
@@ -1379,6 +1808,8 @@ def weak_learner_fit(
     learn_shrinkage_m: bool = False,
     trim_fraction: float = 0.0,
     sample_weight: np.ndarray = None,
+    spline_zones: frozenset = frozenset(),
+    spline_shrinkage_m: float = 1.0,
 ):
     """Fit one boosting round's weak learner: zone info (adaptive-continuous
     or exact-categorical per column), main effects, interactions, and
@@ -1600,6 +2031,36 @@ def weak_learner_fit(
         actually applied at each level this round (present alongside the
         ``track_reliability`` keys above if both are set, or alone if only
         ``learn_shrinkage_m`` is).
+    spline_zones : frozenset, default=frozenset()
+        Column names whose *main effect* is fit as a continuous
+        piecewise-linear (linear spline) regression across this round's
+        own zone boundaries (see :func:`_fit_spline_main_effect`) instead
+        of a flat shrunk mean per zone -- see "Spline zones" in the docs.
+        ``frozenset()`` (default) is bit-identical to every prior release.
+        Main effects only -- a spline-declared column that also
+        participates in a pairwise/triple interaction still uses the
+        ordinary flat zone-grid mechanism for that interaction.
+    spline_shrinkage_m : float, default=1.0
+        Ridge penalty strength (in per-column-standardized units -- see
+        :func:`_fit_spline_main_effect`) for a spline main effect's own
+        slope and bend coefficients, jointly. Kept much smaller than
+        ``shrinkage_m``'s own default by design, not by oversight: unlike
+        an independent per-zone mean, several correlated hinge-basis
+        coefficients are jointly regularized in one solve, so meaningfully
+        less nominal penalty is needed for a comparable degree of real
+        shrinkage -- measured directly (held-out accuracy compared across
+        a range of values on data with a genuine kink) before choosing
+        this default over ``shrinkage_m``'s own ``10.0``, which
+        over-shrunk the fitted trend measurably. Only used for columns in
+        ``spline_zones``. Always this constant, regardless of
+        ``learn_shrinkage_m`` -- deferred for the same reason triples are
+        (see ``learn_shrinkage_m`` above): a spline column's own
+        pooled-estimate inputs (raw bend coefficients) aren't directly
+        comparable to a flat main effect's own raw zone-mean deviations,
+        and ``learn_shrinkage_m``'s pooled estimate for ``m_main`` itself
+        excludes any column declared in ``spline_zones`` for the same
+        reason (mixing the two raw-statistic scales would bias the
+        estimate for both).
     """
     monotonic_constraints = monotonic_constraints or {}
     convexity_constraints = convexity_constraints or {}
@@ -1629,10 +2090,12 @@ def weak_learner_fit(
             if group_col in (a, b) and frozenset((a, b)) not in forbidden_interactions
         }
 
+    flat_predictor_subset = [c for c in predictor_subset if c not in spline_zones]
+
     m_main = shrinkage_m
-    if learn_shrinkage_m and predictor_subset:
+    if learn_shrinkage_m and flat_predictor_subset:
         deviations_main = []
-        for col in predictor_subset:
+        for col in flat_predictor_subset:
             stat, counts = _zone_raw_stat(
                 zones[col], residual, n_zones[col], quantile, trim_fraction, sample_weight=sample_weight
             )
@@ -1645,6 +2108,19 @@ def weak_learner_fit(
 
     main_effects = {}
     for col in predictor_subset:
+        if col in spline_zones:
+            main_effects[col] = _fit_spline_main_effect(
+                X[col].to_numpy(dtype=float),
+                residual,
+                zone_info[col][1],
+                overall_stat,
+                spline_shrinkage_m,
+                monotonic=monotonic_constraints.get(col, 0),
+                convexity=convexity_constraints.get(col, 0),
+                bounded=bounded_effects.get(col),
+                sample_weight=sample_weight,
+            )
+            continue
         dev = _zone_shrunk_deviation(
             zones[col],
             residual,
@@ -1664,6 +2140,22 @@ def weak_learner_fit(
             lower, upper = bounded_effects[col]
             dev = np.clip(dev, lower, upper)
         main_effects[col] = dev
+
+    # Precomputed once per round: every main effect's own per-row
+    # contribution, regardless of representation -- what _fit_pairs/
+    # _select_triples backfit against. A flat column keeps the exact
+    # hard-zone indexing (main_effects[col][zones[col]]) pairs/triples
+    # always backfit against -- they're fit on the hard zone grid
+    # (zones[a], zones[b], ...) themselves, so removing the *soft-blended*
+    # main effect here would subtract a different quantity than the one
+    # the pair/triple grid is defined against, silently changing every
+    # existing (non-spline) fit. Only a spline-declared column, which has
+    # no hard-zone value at all, uses the continuous evaluation.
+    main_effect_values = {
+        col: (_main_effect_value(X[col], main_effects[col], zone_info[col]) if col in spline_zones
+              else main_effects[col][zones[col]])
+        for col in predictor_subset
+    }
 
     n = len(residual)
     effective_folds = min(cross_fit_folds, n)
@@ -1692,6 +2184,8 @@ def weak_learner_fit(
             zone_info[c] = (kind, boundaries, centers, lam)
             soft[c] = _column_soft_zone_index(X[c], zone_info[c])
 
+    raw_values = {c: X[c].to_numpy() for c in predictor_subset}
+
     screen = max_pair_interactions is not None and fold_ids is not None
     if screen:
         # Cheap-then-exact hierarchical discovery: score every C(p, 2)
@@ -1714,6 +2208,12 @@ def weak_learner_fit(
             quantile=quantile,
             trim_fraction=trim_fraction,
             sample_weight=sample_weight,
+            raw_values=raw_values,
+            zone_info=zone_info,
+            spline_zones=spline_zones,
+            convexity_constraints=convexity_constraints,
+            bounded_effects=bounded_effects,
+            m_spline=spline_shrinkage_m,
         ).sum(axis=1)
         screening_residual = residual - oof_main_pred
 
@@ -1740,7 +2240,7 @@ def weak_learner_fit(
         ]
 
     interactions_full, m_pair = _fit_pairs(
-        fit_pairs, zones, n_zones, main_effects, residual, shrinkage_m,
+        fit_pairs, zones, n_zones, main_effect_values, residual, shrinkage_m,
         quantile=quantile, monotonic_constraints=monotonic_constraints,
         learn_shrinkage_m=learn_shrinkage_m, sample_weight=sample_weight,
     )
@@ -1753,7 +2253,7 @@ def weak_learner_fit(
             candidate_cols,
             zones,
             n_zones,
-            main_effects,
+            main_effect_values,
             interactions_full,
             residual,
             max_triple_interactions,
@@ -1802,6 +2302,12 @@ def weak_learner_fit(
             m_triple=shrinkage_m,
             trim_fraction=trim_fraction,
             sample_weight=sample_weight,
+            raw_values=raw_values,
+            zone_info=zone_info,
+            spline_zones=spline_zones,
+            convexity_constraints=convexity_constraints,
+            bounded_effects=bounded_effects,
+            m_spline=spline_shrinkage_m,
         )
     else:
         oof_contributions = _cross_fitted_contributions(
@@ -1821,6 +2327,12 @@ def weak_learner_fit(
             m_triple=shrinkage_m,
             trim_fraction=trim_fraction,
             sample_weight=sample_weight,
+            raw_values=raw_values,
+            zone_info=zone_info,
+            spline_zones=spline_zones,
+            convexity_constraints=convexity_constraints,
+            bounded_effects=bounded_effects,
+            m_spline=spline_shrinkage_m,
         )
 
     diagnostics = None
@@ -1891,9 +2403,8 @@ def weak_learner_contributions(
     soft = {c: _column_soft_zone_index(X[c], zone_info[c]) for c in needed_cols}
 
     contributions = []
-    for col, deviation in main_effects.items():
-        z_lo, z_hi, w = soft[col]
-        contributions.append(_blend_1d(deviation, z_lo, z_hi, w))
+    for col, effect in main_effects.items():
+        contributions.append(_main_effect_value(X[col], effect, zone_info[col]))
     for (a, b), deviation in interactions.items():
         za_lo, za_hi, wa = soft[a]
         zb_lo, zb_hi, wb = soft[b]

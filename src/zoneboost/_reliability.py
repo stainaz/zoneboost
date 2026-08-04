@@ -10,6 +10,22 @@ have been fit with ``track_reliability=True`` (they read the ``counts``/
 computes then, stored per round as ``round_["diagnostics"]``).
 ``n_rounds_present``/``boundary_weight``/``extrapolation_frac`` need no
 such flag -- they're derived from ``zone_info``, which is always retained.
+
+For a column declared in ``spline_zones``, every diagnostic here reads
+the identical ``counts``/``fold_std``/``zone_info`` arrays a flat main
+effect uses -- no separate code path, since ``counts`` is still each
+zone's own row count regardless of what the main effect's own fitted
+*value* is, and a spline's own ``fold_std`` (see
+:func:`zoneboost._weak_learner._cross_fitted_contributions`) is already
+computed at each zone's own centroid to match this same shape. One real
+approximation, disclosed rather than silently reused: ``shrinkage_fraction``
+still reports ``shrinkage_m/(count+shrinkage_m)`` -- the *flat* mechanism's
+own empirical-Bayes formula -- even for a spline column, whose own
+coefficients are actually shrunk via a joint ridge penalty in
+per-column-standardized units (:func:`zoneboost._weak_learner.
+_fit_spline_main_effect`), a different mechanism entirely. It remains a
+directionally sensible signal (more support still means less shrinkage,
+qualitatively), just not the literally-correct formula for that column.
 """
 
 from __future__ import annotations

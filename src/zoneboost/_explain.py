@@ -23,8 +23,14 @@ pre-sigmoid log-odds score) -- not an estimate of it.
 Each ``term_i`` itself is a soft, interpolated lookup for continuous
 columns (see ``_weak_learner._column_soft_zone_index`` and
 ``_blend_1d``/``_blend_2d``/``_blend_3d``) rather than a hard single-zone
-value -- this module must use the exact same blend `predict` does, or the
-row-sum-equals-prediction invariant above would break.
+value -- or, for a main effect declared in ``spline_zones``, a direct
+evaluation of its fitted continuous piecewise-linear function at the
+row's own x (see ``_weak_learner._evaluate_spline_main_effect``). Either
+way, a main effect's own value is read via
+``_weak_learner._main_effect_value``, the single dispatch function that
+also drives `predict` -- this module must use the exact same evaluation
+`predict` does, or the row-sum-equals-prediction invariant above would
+break.
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from ._weak_learner import _blend_1d, _blend_2d, _blend_3d, _column_soft_zone_index
+from ._weak_learner import _blend_2d, _blend_3d, _column_soft_zone_index, _main_effect_value
 
 __all__ = ["explain_rounds"]
 
@@ -81,9 +87,8 @@ def explain_rounds(X: pd.DataFrame, rounds: list, baseline: float, learning_rate
         # same order weak_learner_contributions builds its columns in, and
         # the order the round's weights were fit against.
         i = 0
-        for col, deviation in main_effects.items():
-            z_lo, z_hi, w = _column_soft_zone_index(X[col], zone_info[col])
-            share = learning_rate * weights[i] * _blend_1d(deviation, z_lo, z_hi, w)
+        for col, effect in main_effects.items():
+            share = learning_rate * weights[i] * _main_effect_value(X[col], effect, zone_info[col])
             term_totals.setdefault(col, np.zeros(n))
             term_totals[col] += share
             i += 1

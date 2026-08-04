@@ -24,6 +24,7 @@ import json
 from sklearn.utils.validation import check_is_fitted
 
 from ._evidence_card import evidence_card
+from ._weak_learner import SplineMainEffect
 
 __all__ = ["compile_to_sql"]
 
@@ -123,6 +124,24 @@ def _main_effect_leaf_fn(col_sql: str, deviation, zone_info: tuple):
     return leaf_fn
 
 
+def _spline_main_effect_sql(col_sql: str, effect: SplineMainEffect, boundaries) -> str:
+    """SQL mirror of :func:`zoneboost._weak_learner._evaluate_spline_main_effect`
+    -- a single ``CASE`` dispatching ``NULL`` to the missing-value scalar,
+    else a plain arithmetic expression (``intercept + slope*x + sum of
+    hinge terms``). Genuinely **simpler** than a flat main effect's own
+    zone/direction ``CASE`` dispatch (:func:`_dispatch_zone`) -- a linear
+    spline's continuity is already structural, so there's no blend
+    weight/direction dispatch left to reproduce, just a straight-line
+    formula with ``MAX(..., 0.0)`` hinge terms (SQLite's own scalar
+    ``MAX``, the same 2-argument idiom already used elsewhere in this
+    module for clipping).
+    """
+    formula = f"{_sql_num(effect.intercept)} + {_sql_num(effect.slope)} * {col_sql}"
+    for knot, coef in zip(boundaries, effect.bend):
+        formula += f" + {_sql_num(float(coef))} * MAX({col_sql} - {_sql_num(knot)}, 0.0)"
+    return f"(CASE WHEN {col_sql} IS NULL THEN {_sql_num(effect.missing_value)} ELSE ({formula}) END)"
+
+
 def _pair_sql(col_a_sql: str, zone_info_a: tuple, col_b_sql: str, zone_info_b: tuple, deviation2d) -> str:
     """Nested ``CASE`` (column A's zone/direction dispatch, then column
     B's) whose leaf reproduces :func:`zoneboost._weak_learner._blend_2d`'s
@@ -185,7 +204,10 @@ def compile_to_sql(
     an approximate hard-zone lookup -- verified by literally executing
     the generated SQL (via Python's built-in ``sqlite3``) against real
     data and comparing to ``predict(X)`` directly, see
-    ``tests/test_sql_export.py``.
+    ``tests/test_sql_export.py``. A column declared in ``spline_zones``
+    compiles to a *simpler* expression instead (see :func:`_spline_main_effect_sql`)
+    -- a plain arithmetic formula with no zone/direction ``CASE`` dispatch
+    at all, since a linear spline's continuity is already structural.
 
     Parameters
     ----------
@@ -269,8 +291,11 @@ def compile_to_sql(
         term_pieces = []
         for col, deviation in round_["main_effects"].items():
             col_sql = _quote_ident(col)
-            leaf_fn = _main_effect_leaf_fn(col_sql, deviation, zone_info[col])
-            expr = _dispatch_zone(col_sql, zone_info[col], leaf_fn)
+            if isinstance(deviation, SplineMainEffect):
+                expr = _spline_main_effect_sql(col_sql, deviation, zone_info[col][1])
+            else:
+                leaf_fn = _main_effect_leaf_fn(col_sql, deviation, zone_info[col])
+                expr = _dispatch_zone(col_sql, zone_info[col], leaf_fn)
             term_pieces.append(f"({_sql_num(weights[weight_idx])} * {expr})")
             weight_idx += 1
         for (a, b), deviation2d in round_["interactions"].items():

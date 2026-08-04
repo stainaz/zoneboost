@@ -16,6 +16,7 @@ __all__ = [
     "resolve_bounded_effects",
     "resolve_forbidden_interactions",
     "resolve_group_col",
+    "resolve_spline_zones",
     "_glm_residual",
     "_glm_inverse_link",
     "_glm_baseline",
@@ -121,6 +122,19 @@ def resolve_forbidden_interactions(X: pd.DataFrame, declared) -> set:
             raise ValueError(f"forbidden_interactions entries must name exactly 2 distinct columns, got {pair!r}")
         resolved.add(frozenset(names))
     return resolved
+
+
+def resolve_spline_zones(X: pd.DataFrame, declared) -> set:
+    """Normalize a user-declared list of column names/indices to a
+    ``set`` of column names -- the same name/index convention
+    ``resolve_categorical_features`` uses. No auto-detection (unlike
+    ``resolve_categorical_features``) -- spline zones are purely an
+    opt-in declaration, never inferred: there's no sensible default rule
+    for "this column probably has a genuine local trend."
+    """
+    if not declared:
+        return set()
+    return {X.columns[f] if isinstance(f, (int, np.integer)) else f for f in declared}
 
 
 def resolve_group_col(X: pd.DataFrame, declared):

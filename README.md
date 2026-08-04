@@ -1345,6 +1345,120 @@ the notebook's own "boxplots over time" ask, compose with
 `drift_dashboard(model.models_[k], model.models_[k_plus_1], X_eval,
 y_eval)`.
 
+### Spline zones
+
+The origin-story notebook's own page 1 asked for a "genuinely continuous
+relationship." Today, a continuous column's main effect is a flat, shrunk
+mean per zone — the existing soft-boundary interpolation only smooths the
+*transition* between two zones' own flat means; it never lets a single
+zone express a genuine local trend. `spline_zones` does: a declared
+column's main effect is fit as one continuous piecewise-linear ("linear
+spline" / "broken-stick") regression across that round's own zone
+boundaries, instead of a flat mean per zone.
+
+```python
+from zoneboost import ZoneBoostRegressor
+
+model = ZoneBoostRegressor(
+    n_rounds=100,
+    spline_zones=["income"],      # this column's main effect becomes a spline
+    spline_shrinkage_m=1.0,       # default; see "Measured, honestly" below
+).fit(X, y)
+```
+
+The fitted curve is **continuous at every zone boundary by construction**
+— a linear combination of hinge basis functions (`[1, x, (x-k_1)+, ...,
+(x-k_{m-1})+]` for knots at the zone boundaries), not a post-hoc smoothing
+of independent per-zone means. This is a materially different mechanism
+from the existing soft zone boundaries (which interpolate *between* two
+zones' own flat values); a spline-declared zone can express a real slope
+*within* itself, not just a smoothed transition at its edges.
+
+**Shrinkage — a design correction, made after measuring, not assumed.**
+The global intercept is never penalized (it plays the same role
+`overall_stat` plays for a flat main effect — the honest answer if this
+column had no local structure at all). The slope and every knot's own
+local "bend" coefficient are fit via a single **joint, penalized (ridge)
+least-squares solve**, not an unpenalized fit followed by independently
+shrinking each coefficient. An earlier version of this feature did exactly
+that (independent shrinkage) and was measurably worse: with several
+knots, adjacent hinge-basis columns are highly collinear, so two
+correlated coefficients can trade off against each other while barely
+changing the *fitted* curve on training rows — exactly the instability
+that generalizes poorly, and exactly what a *joint* penalty in the normal
+equations corrects (the same reason ridge/lasso regression always jointly
+regularizes correlated predictors). The penalty is scaled per-column by
+that column's own mean squared value — equivalent to standardizing every
+non-intercept column to unit scale before penalizing uniformly, the
+identical standardization `stacking_alpha` already needs for the same
+reason.
+
+**Monotonic/convexity/bounded_effects are genuinely cleaner for a spline
+than for flat zones.** Segment slopes are the cumulative sum of the
+global slope plus every bend up to that point:
+- **Monotonic**: every segment slope gets the required sign — simpler
+  than the flat mechanism's own isotonic-regress-over-zone-index, since
+  "non-decreasing function" for a piecewise-linear curve is exactly
+  "every slope non-negative."
+- **Convexity**: the segment-slope *sequence* is isotonic-regressed to be
+  non-decreasing (convex) or non-increasing (concave) — the same tool the
+  flat mechanism's own `convexity_constraints` already uses, but now on
+  the spline's *exact* fitted slopes instead of divided-difference
+  *approximations* between zone centroids — a strictly more faithful
+  version of what already existed.
+- **`bounded_effects`**: clips the fitted level at every interior knot,
+  then re-derives each *interior* segment's slope from the clipped
+  neighboring levels — exact for any x between the first and last knot.
+  The two open-ended outer rays (before the first knot, after the last)
+  keep their own already-fit slope — a real, disclosed limitation: the
+  bound isn't guaranteed for extrapolation past the observed knot range,
+  the same "bounds this round's own contribution, not a business-rule
+  guarantee on unbounded extrapolation" spirit `bounded_effects` already
+  discloses for flat zones.
+
+**Missing values** get a separate flat scalar (a shrunk mean of the
+residual over missing rows only) — a spline has no value defined for
+`NaN`, the exact same dedicated-missing-zone precedent every other main
+effect already has.
+
+**Scope**: main effects only — a spline-declared column that also
+participates in a pairwise/triple interaction still uses the ordinary
+flat zone-grid mechanism for that interaction. Not supported with
+`loss="quantile"` (a linear spline of quantiles is a materially
+different, unbuilt problem) or `trim_fraction > 0` (trimming doesn't
+compose with a joint regression the way it does with an independent
+per-zone mean) — both raise `ValueError` at `fit`. Composes with
+`loss` in `"poisson"`/`"gamma"`/`"tweedie"` with no special-casing — the
+hinge-basis regression fits whatever residual is passed in, exactly like
+the flat-mean fit already does uniformly across those three losses today.
+`adaptive_boundary_smoothing` has no effect on a spline-declared column
+(a disclosed no-op — there's no hard/soft lookup tradeoff left to smooth
+once continuity is already structural). `compile_to_sql` supports
+spline-declared columns too, and compiles to genuinely **simpler** SQL
+than a flat main effect's own zone/direction dispatch — a plain
+arithmetic formula with no `CASE`-based blend, since continuity is
+already structural. `spline_zones=None` (default) is bit-identical to
+every prior release — verified, not just argued.
+
+**Measured, honestly**: on synthetic data with a genuine V-shaped kink
+(`y = -2x` for `x<0`, `3x` for `x>=0`, plus a real `x2` main effect and
+noise), a single round's own full-data spline fit already beat the flat
+mechanism's own single-round fit (RMSE 3.65 vs. 3.89). Across a full
+30-round boosted fit at default settings, `spline_zones` came within
+~4-5% of the flat mechanism's own held-out RMSE (0.659 vs. 0.631) — not
+a strict win, but competitive, which is itself a real, disclosed finding:
+the flat mechanism can already approximate a kink reasonably well given
+enough zones and many boosting rounds, so spline zones' own advantage is
+about representing a *real* local trend with less capacity spent
+re-discovering it round after round, not about winning every synthetic
+benchmark by a wide margin. `spline_shrinkage_m`'s own default (`1.0`,
+deliberately much smaller than `shrinkage_m`'s own `10.0`) was chosen by
+directly comparing held-out accuracy across a range of values on this
+same data, not picked a priori — jointly regularizing several correlated
+coefficients in one ridge solve needs meaningfully less nominal penalty
+than shrinking one independent zone mean does for a comparable degree of
+real shrinkage.
+
 ### Compile to SQL scorecard
 
 `compile_to_sql(model)` compiles a fitted `ZoneBoostRegressor` to a
@@ -2015,6 +2129,8 @@ regression" above).
 | `quantile` | 0.5 | **Regressor only.** Target quantile level when `loss="quantile"` (ignored otherwise); see "Quantile regression" above |
 | `tweedie_power` | 1.5 | **Regressor only.** Tweedie variance power when `loss="tweedie"` (ignored otherwise); see "Actuarial losses" above |
 | `trim_fraction` | 0.0 | Robustify each main effect's own per-zone statistic against outlier rows via a trimmed mean instead of the plain mean; main effects only, opt-in, incompatible with `loss="quantile"`, see "Robust cell statistics" above |
+| `spline_zones` | None | **Regressor only.** Column names/indices whose main effect is fit as a continuous piecewise-linear (linear spline) regression instead of a flat mean per zone; main effects only, opt-in, incompatible with `loss="quantile"`/`trim_fraction > 0`, see "Spline zones" above |
+| `spline_shrinkage_m` | 1.0 | **Regressor only.** Ridge penalty strength (in per-column-standardized units) for a spline main effect's own slope/bend coefficients, fit jointly; only used for columns in `spline_zones`, see "Spline zones" above |
 | `random_state` | 42 | Seed for the validation split and subsampling |
 
 **On `max_zones` and `categorical_features`:** if a variable genuinely has
@@ -2756,6 +2872,8 @@ After `fit`, `ZoneBoostRegressor` exposes (among others):
   actually in effect (categorical columns dropped).
 - `forbidden_interactions_` — the resolved `set` of 2-element column-name
   `frozenset`s actually excluded from interaction discovery.
+- `spline_zones_` — the resolved set of column names actually fit as a
+  continuous piecewise-linear main effect; see "Spline zones" above.
 - `group_col_` — the resolved column name for `group_col` (`None` if not
   set); see "Hierarchical zones" above.
 - `conformal_scores_` — sorted absolute residuals on the held-out

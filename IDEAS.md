@@ -35,7 +35,7 @@ useful context on its own.
 | **zoneboost.eda** (`zone_boxplot`, `drift_dashboard`) | Shipped | Notebook page 2 ("compare outcome & variables boxplots") | `src/zoneboost/eda/` (`zone_boxplot`, `drift_dashboard`), gated behind the `zoneboost[eda]` extra |
 | **ZoneBoostTimeSeries** (native expanding/rolling walk-forward fitting) | Shipped | Notebook page 3 ("sequential date pattern") | `src/zoneboost/_time_series.py` (`ZoneBoostTimeSeries`); fits one model per period and reuses `compare_models`/`flag_drift` across consecutive periods automatically |
 | **Signed contribution waterfall** (`prediction_waterfall`, `signed_contribution_profile`) | Shipped | Notebook page 2 ("min-max scaler — direction included") | `src/zoneboost/eda/_prediction_waterfall.py`, `src/zoneboost/eda/_signed_contribution_profile.py` |
-| **Spline zones** (bounded linear trend within a zone) | Proposed | Notebook page 1 ("genuinely continuous relationship") | Would extend `_weak_learner.py`'s per-zone constant mean to an optional per-zone linear fit, still bounded by zone edges — not a recursive split |
+| **Spline zones** (continuous piecewise-linear main effect) | Shipped | Notebook page 1 ("genuinely continuous relationship") | `src/zoneboost/_weak_learner.py` (`spline_zones`/`spline_shrinkage_m` on `ZoneBoostRegressor`) -- the one item on this ledger integrated directly into the core boosting loop rather than shipped as a standalone transformer |
 
 ## Detail
 
@@ -603,3 +603,126 @@ single flat table either function needs). See
 (`#zoneboost-eda`), `docs/api-reference.html`
 (`#prediction-waterfall-signature`,
 `#signed-contribution-profile-signature`).
+
+**Spline zones.** `spline_zones=None`/`spline_shrinkage_m=1.0` on
+`ZoneBoostRegressor` -- a declared column's *main effect* is fit as one
+continuous piecewise-linear (linear spline / "broken-stick") regression
+across that round's own zone boundaries, instead of a flat, shrunk mean
+per zone. This is the one item on this whole ledger integrated directly
+into the core boosting loop (`_weak_learner.py`) rather than shipped as a
+safer standalone transformer -- every other risky "touch the hot loop"
+moment on this ledger (correlation-aware zone boundaries, most notably)
+was explicitly scoped OUT of `ZoneBoostRegressor` itself in favor of a
+standalone transformer; this is the deliberate exception, chosen after
+being asked directly rather than assumed, with the real, large blast
+radius (main-effect representation, shrinkage, cross-fitting, monotonic/
+convexity/bounded-effects semantics, `explain()`, SQL export) mapped out
+in a written plan *before* any code was touched.
+
+**Representation, decided over a genuine alternative.** Two designs were
+weighed: (a) retrofit a parallel `(slope, intercept)` array onto the
+existing `(n_zones,)` scalar-array-plus-soft-blend machinery, generalizing
+`_blend_1d` to evaluate two linear pieces and blend between them; or (b)
+fit one continuous hinge-basis (linear-spline) regression per column per
+round, with knots at the zone boundaries already found by
+`adaptive_zone_boundaries` -- continuous by construction, no blending
+needed at all. (b) was chosen: continuity becomes structural rather than
+something re-derived from patching the existing blend, and predict-time
+evaluation becomes a strictly *simpler* formula than today's zone/
+direction dispatch. A `SplineMainEffect` namedtuple (`intercept`, `slope`,
+`bend`, `missing_value`) coexists with the plain `(n_zones,)` array inside
+the *same* `main_effects` dict, discriminated by type; a single new
+dispatch function, `_main_effect_value`, is the one place all five
+existing consumers (`_fit_pairs`, `_select_triples`,
+`_cross_fitted_contributions`, `weak_learner_contributions`,
+`_explain.py`'s `explain_rounds`) read a main effect's value through --
+each swapped its own bare `dev[z]`/`_blend_1d(...)` call for this one
+dispatch, a mechanical, localized edit at each site rather than a rewrite
+of any of them. Missing values get a separate flat scalar (a spline has
+no value defined for `NaN`), the same dedicated-missing-zone precedent
+every other main effect already has.
+
+**A real bug, caught by direct measurement, not assumed away.** The first
+working version shrunk `slope` and each knot's own `bend` coefficient
+independently, using row count as the evidence measure (matching the flat
+mechanism's own `(n*raw + m*0)/(n+m)` formula literally). A full
+boosting-loop comparison against the flat mechanism on genuinely kinked
+data showed `spline_zones` getting **progressively worse** than a single
+round's own fit had promised as `max_zones` grew (2 zones: spline clearly
+won; 7 zones, the actual default: spline lost by a wide margin) -- traced,
+not guessed at, to real multicollinearity between adjacent hinge-basis
+columns: independently shrinking two *correlated* coefficients doesn't
+correctly regularize them, since they can trade off against each other
+while barely changing the fitted curve on training rows (exactly the
+instability that generalizes poorly). Fixed by replacing independent
+per-coefficient shrinkage with a single **joint, penalized (ridge)
+least-squares solve** -- the standard fix for correlated-predictor
+regularization, and the same "standardize before penalizing so the units
+are comparable" lesson `stacking_alpha` already applies elsewhere in this
+codebase. `spline_shrinkage_m`'s own default (`1.0`, deliberately far
+below `shrinkage_m`'s own `10.0`) was likewise chosen by directly sweeping
+held-out accuracy across a range of values on the same synthetic data, not
+picked a priori -- jointly regularizing several correlated coefficients in
+one solve needs meaningfully less nominal penalty for a comparable degree
+of real shrinkage than shrinking one independent zone mean does.
+
+**Monotonic/convexity/bounded_effects redefined, not just ported.**
+Segment slopes are the cumulative sum of the global slope plus every bend
+up to that point. Monotonic = every segment slope gets the required sign
+(a direct sign clip -- simpler than the flat mechanism's own isotonic
+regression over zone index, since "non-decreasing" for a piecewise-linear
+curve is exactly "every slope non-negative"). Convexity = the
+segment-slope *sequence* is isotonic-regressed to be non-decreasing/
+non-increasing -- the identical tool `_project_convexity` already uses,
+but now on the spline's *exact* fitted slopes rather than divided-
+difference *approximations* between zone centroids, a strictly more
+faithful version of what already existed. `bounded_effects` clips the
+fitted level at every interior knot and re-derives each interior
+segment's own slope from the clipped neighboring levels -- exact between
+the first and last knot; the two open-ended outer rays keep their
+already-fit slope unchanged, a disclosed limitation (verified directly:
+clipping to `[-5, 5]` held exactly between the interior knots, but a grid
+extending past the last knot reached values as high as `12.6`), matching
+`bounded_effects`' own existing "bounds this round's contribution, not a
+business-rule guarantee on unbounded extrapolation" precedent.
+
+**Cross-fitting and `explain_reliability` reuse existing shape wherever
+possible.** `_cross_fitted_contributions`'s fold loop (masking, cyclic
+main-then-pair-then-triple order, `return_fold_std` bookkeeping) is
+completely unchanged in structure -- only the per-fold fitting/scoring
+calls dispatch on `spline_zones` membership. `fold_std` for a spline
+column is computed by evaluating each fold's own fitted spline at that
+zone's own centroid (plus the missing-value's own cross-fold std as the
+trailing entry) specifically so it keeps the *same* `(n_zones,)` shape a
+flat main effect's own `fold_std` already has -- `_reliability.py` needed
+**zero code changes** as a result, since it never reads a main effect's
+raw value directly, only `counts`/`fold_std`/`zone_info`, all already
+shape-compatible. One disclosed approximation remains:
+`shrinkage_fraction` still reports the flat mechanism's own
+`shrinkage_m/(count+shrinkage_m)` formula for a spline column too --
+directionally sensible, but not the literally-correct joint-ridge
+formula, disclosed rather than silently reused as if exact.
+
+**`compile_to_sql` support shipped in the same pass**, confirmed with the
+user rather than deferred, and turned out **simpler** than the existing
+compiler: a spline main effect's own SQL is a single `CASE WHEN col IS
+NULL...` dispatching to a plain arithmetic formula
+(`intercept + slope*x + sum(bend_j * MAX(x-knot_j, 0.0))`) with no
+zone/direction dispatch at all, since continuity is already structural --
+verified the identical way the rest of the SQL compiler already is:
+running the compiled SQL via `sqlite3` and diffing against `predict(X)`
+directly (max absolute difference `7e-15`, floating-point-noise level).
+
+**Scope**: main effects only, confirmed with the user as the intended v1
+boundary rather than assumed -- a spline-declared column that also
+participates in a pairwise/triple interaction still uses the ordinary
+flat zone-grid mechanism for that interaction. Not supported with
+`loss="quantile"` or `trim_fraction > 0` (both raise `ValueError`,
+disclosed rather than silently degrading). See `src/zoneboost/
+_weak_learner.py` (`SplineMainEffect`, `_fit_spline_main_effect`,
+`_evaluate_spline_main_effect`, `_main_effect_value`,
+`_project_spline_monotonic`, `_project_spline_convexity`,
+`_clip_spline_bounded`), `src/zoneboost/regressor.py`, `src/zoneboost/
+_explain.py`, `src/zoneboost/_sql_export.py`, `src/zoneboost/
+_reliability.py`, `README.md` ("Spline zones"), `docs/how-it-works.html`
+(`#spline-zones`), `docs/api-reference.html`, `tests/test_spline_zones.py`.

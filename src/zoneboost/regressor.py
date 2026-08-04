@@ -25,6 +25,7 @@ from ._common import (
     resolve_forbidden_interactions,
     resolve_group_col,
     resolve_monotonic_constraints,
+    resolve_spline_zones,
 )
 from ._drift import _observed_range as _drift_observed_range
 from ._evidence_card import evidence_card as _evidence_card
@@ -504,6 +505,56 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         are robustified, not the initial baseline intercept (no simple
         trimmed equivalent for `_glm_baseline`'s closed-form MLE).
         ``0.0`` (default) is bit-identical to every prior release.
+    spline_zones : list of str or int, default=None
+        Columns whose *main effect* is fit as a continuous piecewise-
+        linear ("linear spline" / "broken-stick") regression across that
+        round's own zone boundaries, instead of a flat shrunk mean per
+        zone -- see "Spline zones" in the docs. The fitted curve is
+        continuous at every zone boundary by construction (a linear
+        combination of hinge basis functions, not a post-hoc smoothing of
+        independent per-zone means), letting a single zone express a
+        genuine local trend a flat mean can't. Accepts column names (if
+        ``X`` is a DataFrame) or integer positions, the same convention
+        as ``categorical_features``. Declaring a categorical column
+        raises ``ValueError`` -- there's no meaningful linear trend for a
+        nominal category. Main effects only: a spline-declared column
+        that also participates in a pairwise/triple interaction still
+        uses the ordinary flat zone-grid mechanism for that interaction.
+        Not supported with ``loss="quantile"`` (raises ``ValueError`` at
+        `fit`) -- a linear spline of *quantiles* is a materially
+        different, unbuilt problem. Not supported with
+        ``trim_fraction > 0`` (raises ``ValueError`` at `fit`) -- trimming
+        doesn't compose with a joint regression the way it does with an
+        independent per-zone mean. Composes with ``loss`` in
+        ``"poisson"``/``"gamma"``/``"tweedie"`` with no special-casing:
+        the hinge-basis regression fits whatever residual is passed in,
+        exactly like the flat-mean fit already does uniformly across
+        those three losses today. ``adaptive_boundary_smoothing`` has no
+        effect on a spline-declared column (a disclosed no-op -- there is
+        no hard/soft lookup tradeoff left to smooth once continuity is
+        already structural). ``None`` (default) is bit-identical to every
+        prior release -- verified, not just argued.
+    spline_shrinkage_m : float, default=1.0
+        Ridge penalty strength (in per-column-standardized units) for a
+        spline main effect's own slope and local "bend" coefficients,
+        fit *jointly* in one penalized least-squares solve rather than
+        independently -- correlated hinge-basis columns need joint, not
+        per-coefficient, regularization the same way ridge/lasso
+        regression always does for collinear predictors. Kept much
+        smaller than ``shrinkage_m``'s own default (``10.0``) by design:
+        jointly regularizing several correlated coefficients in one solve
+        needs meaningfully less nominal penalty for a comparable degree
+        of real shrinkage than shrinking one independent zone mean does
+        -- measured directly (held-out accuracy compared across a range
+        of values on data with a genuine kink) before choosing this
+        default, since ``shrinkage_m``'s own ``10.0`` measurably
+        over-shrunk the fitted trend. Always this constant, regardless of
+        ``learn_shrinkage_m`` -- deferred for the same reason triples are
+        (see ``learn_shrinkage_m`` above): a spline column's own raw
+        coefficients aren't directly comparable to a flat main effect's
+        own raw zone-mean deviations, so mixing the two into one pooled
+        DerSimonian-Laird estimate would bias both. Only used for columns
+        in ``spline_zones``.
     random_state : int, default=42
         Seed controlling the validation split and the per-round row/column
         subsampling.
@@ -529,6 +580,10 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
     forbidden_interactions_ : set
         Resolved ``set`` of 2-element column-name ``frozenset``s actually
         excluded from pairwise/triple interaction discovery.
+    spline_zones_ : set
+        Resolved set of column names actually fit as a continuous
+        piecewise-linear main effect (declared columns are validated at
+        `fit` time, not silently dropped -- see ``spline_zones``).
     group_col_ : str or None
         Resolved column name for ``group_col`` (``None`` if not set).
     baseline_ : float
@@ -640,6 +695,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         calibration_fraction: float = 0.0,
         refit_on_full_data: bool = False,
         trim_fraction: float = 0.0,
+        spline_zones=None,
+        spline_shrinkage_m: float = 1.0,
         random_state: int = 42,
     ):
         # scikit-learn convention: __init__ only assigns parameters as-is,
@@ -679,6 +736,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.calibration_fraction = calibration_fraction
         self.refit_on_full_data = refit_on_full_data
         self.trim_fraction = trim_fraction
+        self.spline_zones = spline_zones
+        self.spline_shrinkage_m = spline_shrinkage_m
         self.random_state = random_state
 
     def _ensure_dataframe(self, X) -> pd.DataFrame:
@@ -756,6 +815,17 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 "has an analogous ambiguity (drop by row count, or by weight mass?), not attempted "
                 "here."
             )
+        if self.spline_zones and self.loss == "quantile":
+            raise ValueError(
+                "spline_zones is not supported with loss='quantile' -- a linear spline of quantiles "
+                "is a materially different, unbuilt problem."
+            )
+        if self.spline_zones and self.trim_fraction > 0:
+            raise ValueError(
+                "spline_zones is not supported with trim_fraction > 0 -- trimming doesn't compose "
+                "with a joint hinge-basis regression the way it does with an independent per-zone "
+                "mean."
+            )
         sample_weight_arr = self._resolve_sample_weight(sample_weight, len(X))
         offset_arr = self._resolve_offset(offset, len(X))
 
@@ -763,6 +833,13 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
         self.feature_names_in_ = np.array(X.columns)
         self.predictor_names_ = list(X.columns)
         self.categorical_features_ = resolve_categorical_features(X, self.categorical_features)
+        self.spline_zones_ = resolve_spline_zones(X, self.spline_zones)
+        declared_categorical_spline = self.spline_zones_ & self.categorical_features_
+        if declared_categorical_spline:
+            raise ValueError(
+                f"spline_zones columns {sorted(declared_categorical_spline)} are categorical -- there's "
+                "no meaningful linear trend for a nominal category."
+            )
         self.monotonic_constraints_ = resolve_monotonic_constraints(
             X, self.monotonic_constraints, self.categorical_features_
         )
@@ -1058,6 +1135,8 @@ class ZoneBoostRegressor(BaseEstimator, RegressorMixin):
                 group_col=self.group_col_,
                 trim_fraction=self.trim_fraction,
                 sample_weight=weight_sub,
+                spline_zones=frozenset(self.spline_zones_),
+                spline_shrinkage_m=self.spline_shrinkage_m,
             )
             contributions = weak_learner_contributions(X_train, zone_info, main_effects, interactions, triples)
             # The round's own (sub)sampled rows would otherwise be scored by a

@@ -118,6 +118,7 @@
     { title: "ZoneBoostTimeSeries", crumb: "How It Works", url: "how-it-works.html#zoneboosttimeseries" },
     { title: "Global Shape Constraints", crumb: "How It Works", url: "how-it-works.html#global-shape-constraints" },
     { title: "Ensemble-Level Guarantees", crumb: "How It Works › Global Shape Constraints", url: "how-it-works.html#ensemble-level-guarantees" },
+    { title: "Spline Zones", crumb: "How It Works", url: "how-it-works.html#spline-zones" },
     { title: "Compile to SQL Scorecard", crumb: "How It Works", url: "how-it-works.html#compile-to-sql-scorecard" },
     { title: "Zone Profile Encoder", crumb: "How It Works", url: "how-it-works.html#zone-profile-encoder" },
     { title: "Depth Transformer", crumb: "How It Works", url: "how-it-works.html#depth-transformer" },
