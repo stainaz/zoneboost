@@ -11,6 +11,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -20,11 +22,11 @@ jobs:
           pip install -e '.[eda]'
           pip install ucimlrepo
       - name: Run analysis
-        run: python analysis/bike_042_results.py
+        run: python analysis/bike_042_results_v2.py
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bike-042-results
+          name: bike-042-results-v2
           path: analysis_output/
           if-no-files-found: warn
